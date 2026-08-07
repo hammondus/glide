@@ -179,6 +179,13 @@ type StrLit struct {
 	Line  int
 }
 
+// BlockExpr is a bare { … } in expression or statement position: a
+// scope whose tail expression is its value.
+type BlockExpr struct {
+	Body *Block
+	Line int
+}
+
 type IdentExpr struct {
 	Name string
 	Line int
@@ -279,6 +286,7 @@ func (*FloatLit) expr()   {}
 func (*BoolLit) expr()    {}
 func (*UnitLit) expr()    {}
 func (*StrLit) expr()     {}
+func (*BlockExpr) expr()  {}
 func (*IdentExpr) expr()  {}
 func (*TupleLit) expr()   {}
 func (*ListLit) expr()    {}

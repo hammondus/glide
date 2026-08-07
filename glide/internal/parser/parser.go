@@ -957,6 +957,18 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		return first, nil
 	case lexer.LBrack:
 		return p.parseListOrMap()
+	case lexer.LBrace:
+		// A bare block is an expression: its tail is its value, its
+		// bindings die at the }. Not in control headers — there the
+		// brace belongs to the body (same rule as struct literals).
+		if p.noStruct {
+			break
+		}
+		body, err := p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.BlockExpr{Body: body, Line: t.Line}, nil
 	}
 	return nil, p.errf("expected an expression, found %s", t.Kind)
 }

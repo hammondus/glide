@@ -962,6 +962,15 @@ Go's model, with its defects designed out:
   (Forced by the interpreter; ratified.)
 - Source files: `.gl`.
 - Expression-oriented: `if`, `match`, blocks return values.
+- **Bare blocks are expressions, legal in statement position** (Go's
+  scoping idiom, kept and upgraded): `let size = { let num = …; … }`
+  computes-and-hides — locals die at the `}`, the tail is the value —
+  and a freestanding `{ … }` scopes a region exactly as in Go. One
+  rule doing the work Go spreads across statement carve-outs (`if`
+  init clauses): where Go scopes a helper to a statement, Glide wraps
+  a block around exactly what should see it. Not in control-flow
+  headers — there the brace belongs to the body, same as struct
+  literals. (Ratified; implemented in the interpreter.)
 - **A function body is a block; its tail expression is the return
   value.** Not a separate feature — the consistent consequence of
   expression-orientation: `let status = if ok { … } else { … }`

@@ -649,6 +649,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 	case *ast.Binary:
 		return in.evalBinary(ex, env)
+	case *ast.BlockExpr:
+		return in.evalBlock(ex.Body, newEnv(env, false))
 	case *ast.If:
 		return in.evalIf(ex, env)
 	case *ast.Closure:

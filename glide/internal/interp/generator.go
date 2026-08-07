@@ -53,6 +53,9 @@ func stmtYields(s ast.Stmt) bool {
 	case *ast.ExprStmt:
 		return exprYields(st.E)
 	case *ast.LetStmt:
+		if exprYields(st.Init) {
+			return true
+		}
 		return st.Else != nil && blockYields(st.Else)
 	}
 	return false
@@ -76,6 +79,8 @@ func exprYields(e ast.Expr) bool {
 			return true
 		}
 		return ex.ElseBlock != nil && blockYields(ex.ElseBlock)
+	case *ast.BlockExpr:
+		return blockYields(ex.Body)
 	}
 	return false
 }

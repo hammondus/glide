@@ -405,6 +405,23 @@ the module *through* a live shadow (binding `sql`, then calling
 `sql.open()` in the same function) is a compile error that names both
 parties, instead of Go's diagnosis fog.
 
+**Blocks are expressions, and bare blocks scope.** A `{ … }` anywhere
+an expression can go is a scope whose tail expression is its value —
+so a computation's working variables can be hidden inside it:
+
+```glide
+let size = {
+    let num = rand.int_n(100)
+    if num > 50 { "big" } else { "small" }
+}                       // num is gone; size is "big" or "small"
+```
+
+A freestanding block scopes a region, as in Go. Where Go grew an init
+clause on `if` (`if num := rand.IntN(100); num > 50`) to keep a
+helper from outliving the statement, Glide gets the same containment
+from this one rule: wrap a block around exactly the code that should
+see the name.
+
 **Discarding.** `_` on the left of `=` evaluates and discards the
 right side, visibly: `_ = db.close()`. A function with no declared
 return type whose body ends in a meaningful value is an error — you

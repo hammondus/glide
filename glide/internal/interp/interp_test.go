@@ -103,6 +103,43 @@ fn main() {
 	}
 }
 
+func TestBlockExpression(t *testing.T) {
+	// let-bound: the block's tail is its value, its locals die at }.
+	out, err := runProg(t, `
+fn main() {
+    let size = {
+        let num = 60
+        if num > 50 { "big" } else { "small" }
+    }
+    println(size)
+}`)
+	if err != nil || out != "big\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	// Bare statement block: Go's scoping idiom.
+	out, err = runProg(t, `
+fn main() {
+    {
+        let hidden = "in"
+        println(hidden)
+    }
+    println("out")
+}`)
+	if err != nil || out != "in\nout\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	// The block is not a function boundary: shadowing an enclosing
+	// name inside it stays banned, and its locals really do die.
+	_, err = runProg(t, "fn main() {\n let x = 1\n {\n  let x = 2\n }\n}")
+	if err == nil || !strings.Contains(err.Error(), "shadow") {
+		t.Fatalf("want shadow error, got %v", err)
+	}
+	_, err = runProg(t, "fn main() {\n {\n  let inner = 1\n }\n println(inner)\n}")
+	if err == nil || !strings.Contains(err.Error(), "undefined") {
+		t.Fatalf("block locals must not escape, got %v", err)
+	}
+}
+
 func TestBuiltinsReserved(t *testing.T) {
 	for _, src := range []string{
 		"fn main() {\n let println = 5\n}",
