@@ -25,6 +25,15 @@ recorded sacrifice unless new evidence turns up.
 
 - Decisions get recorded in `DESIGN.md` when made (with the *why*), and
   open questions live in its final section. Keep both current.
+- **`LINEAGE.md` is DESIGN.md's companion**: for each significant
+  decision, it carries the short history — who invented the feature,
+  who adopted it, who tried living without it, what that evidence
+  says. When a decision lands in DESIGN.md, add (or update) its
+  lineage entry in the same commit. Entries are written for a reader
+  who knows Go and nothing else; dates and named languages, not
+  vibes. Craig reads these to cement that each decision is
+  well-trodden ground — keep them honest, including the evidence
+  *against* when it exists (e.g. Rust removing green threads).
 - Breaking changes are free — sole user, no compatibility promise. Never
   argue "but that would break existing code" at this stage.
 - Plan before code. Current phase: semantics and grammar on paper.
