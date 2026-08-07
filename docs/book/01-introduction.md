@@ -221,7 +221,13 @@ for word in text.split_whitespace() {
   fallback; the map can't hand you a fake `0` and hope, so it hands
   you a maybe. `?? 0` supplies the default: first sighting of a word,
   the read yields nothing, `?? 0` makes it `0`, and the count becomes
-  `1`.
+  `1`. `??` is the **option-coalescing operator** — Glide's variation
+  of what C#, JavaScript, and Swift call null-coalescing, retargeted
+  at `Option` because there is no null to coalesce. The right side is
+  evaluated only when the left is absent, and only *you* get to say
+  what absence means here — the language never guesses. (Unrelated to
+  `?` from step 5, despite the shared glyph: one question mark hands
+  the problem to your caller, two means you've answered it yourself.)
 - Assigning through an index (`counts[word] = …`) inserts or updates.
 
 ### Step 7 — sort, take twenty, print
@@ -406,7 +412,8 @@ in signatures*. `fn find(id: UserId) -> User?` tells you at the
 boundary that absence is possible; `fn owner() -> User` tells you it
 isn't, and you don't defensively check. Three ways to handle a `T?`:
 
-**`??` — supply a default.** Reads "or else":
+**`??` — supply a default.** The option-coalescing operator, reads
+"or else":
 
 ```glide
 let n = counts[word] ?? 0
