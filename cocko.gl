@@ -1,0 +1,7 @@
+fn main() {
+    let name = "Cocko"
+    let name = "Cccc"
+    let mut count = 1
+    count += 1
+    println("Hello {name}!: {count}")
+}

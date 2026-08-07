@@ -525,7 +525,12 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 	case *ast.If:
 		return in.evalIf(ex, env)
 	case *ast.Closure:
-		return &ClosureV{Params: ex.Params, BodyExpr: ex.BodyExpr, BodyBlock: ex.BodyBlock, Env: env}, nil
+		// Capture the *bindings* visible right now, not the names:
+		// a later `let x` redeclaration creates a new binding and
+		// must not retarget closures that captured the old one.
+		// Binding cells are shared, so mutation through a captured
+		// `mut` variable stays visible both ways.
+		return &ClosureV{Params: ex.Params, BodyExpr: ex.BodyExpr, BodyBlock: ex.BodyBlock, Env: env.capture()}, nil
 	case *ast.Try:
 		v, sg := in.eval(ex.X, env)
 		if sg != nil {

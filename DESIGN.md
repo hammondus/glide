@@ -157,6 +157,13 @@ map/filter culture. Decisions:
 - **Capture by reference**, mut rules doing the local work (mutating a
   capture requires the binding be `mut`). Loop variables fresh per
   iteration (recorded) — Go's capture bug already dead.
+- **Closures capture bindings, not names.** Sequential redeclaration
+  (`let x = …; let x = …`) creates a *new* binding; a closure created
+  before the redeclare keeps the binding it captured. Follows from
+  redeclare-is-not-mutation plus capture-by-reference; recorded
+  because the first interpreter got it wrong (looked names up at call
+  time) and the bug was invisible until a closure straddled a
+  redeclare.
 - **New compile rule: closures crossing task boundaries must not
   capture `mut` bindings.** `s.spawn(|| …)` referencing a local the
   parent still mutates is the data-race archetype, and this case is

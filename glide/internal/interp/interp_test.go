@@ -210,6 +210,24 @@ fn main() {
 	}
 }
 
+func TestClosureCapturesBindingNotName(t *testing.T) {
+	// Sequential redeclaration creates a new binding; a closure that
+	// captured the old one keeps it.
+	out, err := runProg(t, `
+fn main() {
+    let name = "Cocko"
+    let who = || name
+    let name = "Cccc"
+    println("{who()} {name}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Cocko Cccc\n" {
+		t.Fatalf("out = %q (closure must keep the binding it captured)", out)
+	}
+}
+
 func TestIfIsExpression(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {

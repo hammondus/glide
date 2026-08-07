@@ -200,6 +200,21 @@ func newEnv(parent *Env, fnBoundary bool) *Env {
 	return &Env{vars: map[string]*binding{}, parent: parent, fnBoundary: fnBoundary}
 }
 
+// capture flattens the visible bindings into one env for a closure:
+// capture-by-reference to binding cells, resolved at closure creation.
+// Inner scopes win, matching lookup order.
+func (e *Env) capture() *Env {
+	flat := newEnv(nil, false)
+	for env := e; env != nil; env = env.parent {
+		for name, b := range env.vars {
+			if _, seen := flat.vars[name]; !seen {
+				flat.vars[name] = b
+			}
+		}
+	}
+	return flat
+}
+
 func (e *Env) lookup(name string) *binding {
 	for env := e; env != nil; env = env.parent {
 		if b, ok := env.vars[name]; ok {

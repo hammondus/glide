@@ -45,6 +45,13 @@ deliberately cut because the real compiler makes them obsolete.
 - **Receiver-mut on builtin methods is not enforced** (`xs.push`
   works through a `let` binding). The checker's job; noted so nobody
   mistakes it for a semantic decision.
+- **Closures capture a flattened binding snapshot at creation**
+  (`Env.capture`): capture-by-reference to binding *cells*, resolved
+  when the closure is made. Sharing the cells keeps mutation through
+  captured `mut` variables visible; snapshotting keeps a later
+  same-scope redeclare from retargeting the closure. The first
+  implementation shared the live env map (call-time name lookup) and
+  got redeclare-straddling closures wrong.
 - **Known lexer limitation**: nested tuple access `x.0.1` lexes
   `0.1` as a float. Rust special-cases this; we will when it matters.
   Same bucket: string literals inside interpolation are unsupported.
