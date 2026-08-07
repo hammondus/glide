@@ -26,7 +26,7 @@ func runProg(t *testing.T, src string, args ...string) (string, error) {
 }
 
 func TestWordfreqGolden(t *testing.T) {
-	src, err := os.ReadFile("../../examples/wordfreq.gl")
+	src, err := os.ReadFile("../../examples/wordfreq.gld")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestWordfreqGolden(t *testing.T) {
 }
 
 func TestWordfreqUsageExit(t *testing.T) {
-	src, _ := os.ReadFile("../../examples/wordfreq.gl")
+	src, _ := os.ReadFile("../../examples/wordfreq.gld")
 	f, _ := parser.ParseFile(string(src))
 	in := New()
 	in.Stdout = &strings.Builder{}
@@ -63,7 +63,7 @@ func TestWordfreqUsageExit(t *testing.T) {
 }
 
 func TestTryPropagatesWithContext(t *testing.T) {
-	src, _ := os.ReadFile("../../examples/wordfreq.gl")
+	src, _ := os.ReadFile("../../examples/wordfreq.gld")
 	f, _ := parser.ParseFile(string(src))
 	in := New()
 	in.Stdout = &strings.Builder{}
@@ -365,7 +365,7 @@ fn main() {
 // --- M2 ---
 
 func TestTreeProgramProperty(t *testing.T) {
-	src, err := os.ReadFile("../../examples/tree.gl")
+	src, err := os.ReadFile("../../examples/tree.gld")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestTreeProgramProperty(t *testing.T) {
 	}
 	var out strings.Builder
 	if failed := RunTests(f, &out); failed != 0 {
-		t.Fatalf("tree.gl tests failed:\n%s", out.String())
+		t.Fatalf("tree.gld tests failed:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "100 cases") {
 		t.Fatalf("expected property cases, got:\n%s", out.String())

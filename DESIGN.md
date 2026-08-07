@@ -960,7 +960,7 @@ Go's model, with its defects designed out:
   body, and variants are capitalised too, so case can't disambiguate.
   Rust's rule, hit for Rust's reason; parenthesise to force a literal.
   (Forced by the interpreter; ratified.)
-- Source files: `.gl`.
+- Source files: `.gld`.
 - Expression-oriented: `if`, `match`, blocks return values.
 - **Bare blocks are expressions, legal in statement position** (Go's
   scoping idiom, kept and upgraded): `let size = { let num = …; … }`

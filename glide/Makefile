@@ -11,7 +11,7 @@ test:
 	go vet ./... && go test ./...
 
 run: build
-	./$(BIN) run examples/wordfreq.gl testdata/sample.txt
+	./$(BIN) run examples/wordfreq.gld testdata/sample.txt
 
 # CLI tool: macOS + linux (arm64, amd64) + windows.
 # CGO_ENABLED=0 for static binaries; -s -w strips symbol tables.

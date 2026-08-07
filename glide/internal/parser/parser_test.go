@@ -8,7 +8,7 @@ import (
 )
 
 func TestParseWordfreq(t *testing.T) {
-	src, err := os.ReadFile("../../examples/wordfreq.gl")
+	src, err := os.ReadFile("../../examples/wordfreq.gld")
 	if err != nil {
 		t.Fatal(err)
 	}

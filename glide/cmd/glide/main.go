@@ -1,4 +1,4 @@
-// glide runs Glide programs: glide run <file.gl> [args...]
+// glide runs Glide programs: glide run <file.gld> [args...]
 package main
 
 import (
@@ -12,7 +12,7 @@ import (
 
 func main() {
 	if len(os.Args) < 3 || (os.Args[1] != "run" && os.Args[1] != "test") {
-		fmt.Fprintln(os.Stderr, "usage: glide run <file.gl> [args...]\n       glide test <file.gl>")
+		fmt.Fprintln(os.Stderr, "usage: glide run <file.gld> [args...]\n       glide test <file.gld>")
 		os.Exit(2)
 	}
 	mode, path := os.Args[1], os.Args[2]

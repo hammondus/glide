@@ -332,7 +332,7 @@ block, even one line. Comments are `//` to end of line — there is no
 commenting out code that contains one leaves live code behind) or
 break on a stray `*/` in prose (Rust), and their real job, deadening
 a region while debugging, is your editor's toggle-comment key. Source
-files end in `.gl`. Number literals take underscores for readability:
+files end in `.gld`. Number literals take underscores for readability:
 `10_000_000`, `0..1_000_000`.
 
 ## 1.3 Values and bindings
@@ -936,7 +936,7 @@ generator (`for { yield n; n += 1 }`) is a perfectly good value.
 
 ## 1.13 Modules, imports, visibility
 
-**A directory is a module.** All `.gl` files in a directory share one
+**A directory is a module.** All `.gld` files in a directory share one
 namespace — no intra-module imports, no per-file declarations, no
 `mod.rs` tree. Go's model, kept.
 
