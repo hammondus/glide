@@ -1,0 +1,252 @@
+package interp
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
+
+// Free builtins: printing and the Result/Option constructors. Ok, Err
+// and Some are ordinary constructors, not keywords.
+var builtins = map[string]*BuiltinV{
+	"println": {Name: "println", Fn: func(in *Interp, args []Value, line int) Value {
+		fmt.Fprintln(in.Stdout, displayArg("println", args, line))
+		return UnitV{}
+	}},
+	"eprintln": {Name: "eprintln", Fn: func(in *Interp, args []Value, line int) Value {
+		fmt.Fprintln(in.Stderr, displayArg("eprintln", args, line))
+		return UnitV{}
+	}},
+	"Ok": {Name: "Ok", Fn: func(in *Interp, args []Value, line int) Value {
+		return &ResultV{Ok: true, V: one("Ok", args, line)}
+	}},
+	"Err": {Name: "Err", Fn: func(in *Interp, args []Value, line int) Value {
+		return &ResultV{Ok: false, V: one("Err", args, line)}
+	}},
+	"Some": {Name: "Some", Fn: func(in *Interp, args []Value, line int) Value {
+		return SomeV{V: one("Some", args, line)}
+	}},
+}
+
+func one(name string, args []Value, line int) Value {
+	if len(args) != 1 {
+		panic(rtErr{line, fmt.Sprintf("%s takes exactly one argument, got %d", name, len(args))})
+	}
+	return args[0]
+}
+
+func displayArg(name string, args []Value, line int) string {
+	return display(one(name, args, line))
+}
+
+// Module shims: Go code behind Glide interfaces (the recorded stdlib
+// strategy for the interpreter tier).
+func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
+	switch mod + "." + name {
+	case "os.args":
+		if len(args) != 0 {
+			panic(rtErr{line, "os.args takes no arguments"})
+		}
+		l := &ListV{}
+		for _, a := range in.Args {
+			l.Elems = append(l.Elems, StrV(a))
+		}
+		return l
+	case "os.exit":
+		code, ok := one("os.exit", args, line).(IntV)
+		if !ok {
+			panic(rtErr{line, "os.exit takes an Int"})
+		}
+		panic(exitPanic{code: int(code)})
+	case "fs.read_string":
+		path, ok := one("fs.read_string", args, line).(StrV)
+		if !ok {
+			panic(rtErr{line, "fs.read_string takes a String path"})
+		}
+		data, err := os.ReadFile(string(path))
+		if err != nil {
+			return &ResultV{Ok: false, V: &ErrV{Msg: err.Error()}}
+		}
+		return &ResultV{Ok: true, V: StrV(string(data))}
+	}
+	panic(rtErr{line, fmt.Sprintf("module %s has no function %q", mod, name)})
+}
+
+// Methods, dispatched on receiver type.
+func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Value {
+	switch r := recv.(type) {
+	case StrV:
+		switch name {
+		case "split_whitespace":
+			if len(args) != 0 {
+				panic(rtErr{line, "split_whitespace takes no arguments"})
+			}
+			l := &ListV{}
+			for _, w := range strings.Fields(string(r)) {
+				l.Elems = append(l.Elems, StrV(w))
+			}
+			return l
+		case "len":
+			return IntV(len(r))
+		case "trim":
+			return StrV(strings.TrimSpace(string(r)))
+		case "cmp":
+			s, ok := one("cmp", args, line).(StrV)
+			if !ok {
+				panic(rtErr{line, "String.cmp compares against another String"})
+			}
+			return IntV(strings.Compare(string(r), string(s)))
+		}
+	case IntV:
+		switch name {
+		case "cmp":
+			o, ok := one("cmp", args, line).(IntV)
+			if !ok {
+				panic(rtErr{line, "Int.cmp compares against another Int"})
+			}
+			switch {
+			case r < o:
+				return IntV(-1)
+			case r > o:
+				return IntV(1)
+			}
+			return IntV(0)
+		}
+	case *ListV:
+		switch name {
+		case "len":
+			return IntV(len(r.Elems))
+		case "push":
+			r.Elems = append(r.Elems, one("push", args, line))
+			return UnitV{}
+		case "iter":
+			if len(args) != 0 {
+				panic(rtErr{line, "iter takes no arguments"})
+			}
+			i := 0
+			return &IterV{Next: func() (Value, bool) {
+				if i >= len(r.Elems) {
+					return nil, false
+				}
+				v := r.Elems[i]
+				i++
+				return v, true
+			}}
+		case "sort_by":
+			f := one("sort_by", args, line)
+			// Stable, so ties keep first-seen order — deterministic
+			// programs without a tiebreak dance.
+			var sortErr any
+			func() {
+				defer func() { sortErr = recover() }()
+				sort.SliceStable(r.Elems, func(i, j int) bool {
+					c := in.callValue(f, []Value{r.Elems[i], r.Elems[j]}, line)
+					n, ok := c.(IntV)
+					if !ok {
+						panic(rtErr{line, fmt.Sprintf("sort_by comparator must return an Int (cmp order), got %s", typeName(c))})
+					}
+					return n < 0
+				})
+			}()
+			if sortErr != nil {
+				panic(sortErr)
+			}
+			return UnitV{}
+		}
+	case *MapV:
+		switch name {
+		case "len":
+			return IntV(len(r.keys))
+		case "entries":
+			if len(args) != 0 {
+				panic(rtErr{line, "entries takes no arguments"})
+			}
+			l := &ListV{}
+			for _, k := range r.keys {
+				l.Elems = append(l.Elems, TupleV{k, r.m[k]})
+			}
+			return l
+		}
+	case *ResultV:
+		switch name {
+		case "context":
+			msg, ok := one("context", args, line).(StrV)
+			if !ok {
+				panic(rtErr{line, "context takes a String"})
+			}
+			if r.Ok {
+				return r
+			}
+			return &ResultV{Ok: false, V: &ErrV{Msg: string(msg), Cause: r.V}}
+		}
+	case *IterV:
+		switch name {
+		case "take":
+			n, ok := one("take", args, line).(IntV)
+			if !ok {
+				panic(rtErr{line, "take takes an Int"})
+			}
+			left := int(n)
+			return &IterV{Next: func() (Value, bool) {
+				if left <= 0 {
+					return nil, false
+				}
+				left--
+				return r.Next()
+			}}
+		case "collect":
+			if len(args) != 0 {
+				panic(rtErr{line, "collect takes no arguments"})
+			}
+			l := &ListV{}
+			for {
+				v, ok := r.Next()
+				if !ok {
+					return l
+				}
+				l.Elems = append(l.Elems, v)
+			}
+		}
+	}
+	panic(rtErr{line, fmt.Sprintf("%s has no method %q", typeName(recv), name)})
+}
+
+// iterate adapts any iterable to a next() function for `for … in`.
+func (in *Interp) iterate(v Value, line int) func() (Value, bool) {
+	switch it := v.(type) {
+	case *IterV:
+		return it.Next
+	case *ListV:
+		i := 0
+		return func() (Value, bool) {
+			if i >= len(it.Elems) {
+				return nil, false
+			}
+			e := it.Elems[i]
+			i++
+			return e, true
+		}
+	case RangeV:
+		n := it.Lo
+		return func() (Value, bool) {
+			if n >= it.Hi {
+				return nil, false
+			}
+			v := IntV(n)
+			n++
+			return v, true
+		}
+	case *MapV:
+		i := 0
+		return func() (Value, bool) {
+			if i >= len(it.keys) {
+				return nil, false
+			}
+			k := it.keys[i]
+			i++
+			return TupleV{k, it.m[k]}, true
+		}
+	}
+	panic(rtErr{line, fmt.Sprintf("%s is not iterable", typeName(v))})
+}

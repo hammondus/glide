@@ -1,0 +1,25 @@
+// wordfreq counts word frequencies in a file.
+import fs
+import os
+
+fn main() -> Result<(), Error> {
+    let [_, path] = os.args() else {
+        eprintln("usage: wordfreq <file>")
+        os.exit(2)
+    }
+
+    let text = fs.read_string(path).context("reading input")?
+
+    let mut counts: Map<String, Int> = [:]
+    for word in text.split_whitespace() {
+        counts[word] = (counts[word] ?? 0) + 1
+    }
+
+    let mut entries = counts.entries()          // List<(String, Int)>
+    entries.sort_by(|a, b| b.1.cmp(a.1))
+
+    for (word, n) in entries.iter().take(20) {
+        println("{n:6}  {word}")
+    }
+    Ok(())
+}

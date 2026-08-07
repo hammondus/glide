@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 420">
+  <!-- mascot, scaled -->
+  <g transform="translate(14 4) scale(0.8)">
+    <circle cx="256" cy="268" r="236" fill="#E9F1F7"/>
+    <rect x="84" y="188" width="344" height="196" rx="94" fill="#8FA1B3"/>
+    <circle cx="106" cy="210" r="17" fill="#6E7F91"/>
+    <circle cx="406" cy="210" r="17" fill="#6E7F91"/>
+    <circle cx="106" cy="362" r="17" fill="#6E7F91"/>
+    <circle cx="406" cy="362" r="17" fill="#6E7F91"/>
+    <path d="M 262 378 C 232 470 342 494 398 438" fill="none"
+          stroke="#5E6E80" stroke-width="40" stroke-linecap="round"/>
+    <circle cx="398" cy="438" r="20" fill="#3E4757"/>
+    <ellipse cx="256" cy="298" rx="80" ry="90" fill="#F5EEE1"/>
+    <ellipse cx="176" cy="82" rx="30" ry="44" fill="#8FA1B3"
+             transform="rotate(-24 176 82)"/>
+    <ellipse cx="180" cy="88" rx="15" ry="25" fill="#E7A9B7"
+             transform="rotate(-24 180 88)"/>
+    <ellipse cx="336" cy="82" rx="30" ry="44" fill="#8FA1B3"
+             transform="rotate(24 336 82)"/>
+    <ellipse cx="332" cy="88" rx="15" ry="25" fill="#E7A9B7"
+             transform="rotate(24 332 88)"/>
+    <circle cx="256" cy="156" r="92" fill="#A9BACB"/>
+    <rect x="243" y="64" width="26" height="102" rx="13" fill="#3E4757"/>
+    <circle cx="215" cy="160" r="31" fill="#2B3240"/>
+    <circle cx="297" cy="160" r="31" fill="#2B3240"/>
+    <circle cx="206" cy="150" r="10" fill="#FFFFFF"/>
+    <circle cx="288" cy="150" r="10" fill="#FFFFFF"/>
+    <circle cx="224" cy="171" r="4" fill="#FFFFFF" opacity="0.7"/>
+    <circle cx="306" cy="171" r="4" fill="#FFFFFF" opacity="0.7"/>
+    <circle cx="182" cy="200" r="13" fill="#EFB9C4" opacity="0.55"/>
+    <circle cx="330" cy="200" r="13" fill="#EFB9C4" opacity="0.55"/>
+    <ellipse cx="256" cy="198" rx="11" ry="8" fill="#E58FA2"/>
+    <path d="M 246 212 Q 256 221 266 212" fill="none"
+          stroke="#3E4757" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="450" y="278" font-size="188" font-weight="700"
+        letter-spacing="-4"
+        font-family="ui-rounded, 'Arial Rounded MT Bold', 'Nunito', 'Quicksand', system-ui, sans-serif"
+        fill="#3E4757">glide</text>
+
+  <!-- motion underline -->
+  <path d="M 462 322 Q 640 352 962 316" fill="none"
+        stroke="#8FA1B3" stroke-width="12" stroke-linecap="round"/>
+</svg>

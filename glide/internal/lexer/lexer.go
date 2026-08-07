@@ -1,0 +1,351 @@
+// Package lexer turns Glide source into tokens.
+//
+// Statement termination: Glide has no semicolons. A newline ends a
+// statement when the token before it can end an expression (Go's
+// rule); all other newlines are insignificant. The parser therefore
+// sees explicit Semi tokens and never raw newlines.
+package lexer
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+type Kind int
+
+const (
+	EOF Kind = iota
+	Semi
+	Ident
+	Int
+	Float
+	String
+
+	KwFn
+	KwLet
+	KwMut
+	KwIf
+	KwElse
+	KwFor
+	KwIn
+	KwImport
+	KwReturn
+	KwTrue
+	KwFalse
+
+	LParen
+	RParen
+	LBrack
+	RBrack
+	LBrace
+	RBrace
+	Comma
+	Colon
+	Dot
+	DotDot
+	Arrow
+	Assign
+	PlusEq
+	MinusEq
+	Plus
+	Minus
+	Star
+	Slash
+	Percent
+	Eq
+	Ne
+	Lt
+	Le
+	Gt
+	Ge
+	Not
+	AndAnd
+	OrOr
+	Pipe
+	Question
+	QQ
+)
+
+var kindNames = map[Kind]string{
+	EOF: "end of file", Semi: "end of line", Ident: "identifier",
+	Int: "integer", Float: "float", String: "string",
+	KwFn: "'fn'", KwLet: "'let'", KwMut: "'mut'", KwIf: "'if'",
+	KwElse: "'else'", KwFor: "'for'", KwIn: "'in'", KwImport: "'import'",
+	KwReturn: "'return'", KwTrue: "'true'", KwFalse: "'false'",
+	LParen: "'('", RParen: "')'", LBrack: "'['", RBrack: "']'",
+	LBrace: "'{'", RBrace: "'}'", Comma: "','", Colon: "':'",
+	Dot: "'.'", DotDot: "'..'", Arrow: "'->'", Assign: "'='",
+	PlusEq: "'+='", MinusEq: "'-='", Plus: "'+'", Minus: "'-'",
+	Star: "'*'", Slash: "'/'", Percent: "'%'", Eq: "'=='", Ne: "'!='",
+	Lt: "'<'", Le: "'<='", Gt: "'>'", Ge: "'>='", Not: "'!'",
+	AndAnd: "'&&'", OrOr: "'||'", Pipe: "'|'", Question: "'?'", QQ: "'??'",
+}
+
+func (k Kind) String() string {
+	if s, ok := kindNames[k]; ok {
+		return s
+	}
+	return fmt.Sprintf("token(%d)", int(k))
+}
+
+var keywords = map[string]Kind{
+	"fn": KwFn, "let": KwLet, "mut": KwMut, "if": KwIf, "else": KwElse,
+	"for": KwFor, "in": KwIn, "import": KwImport, "return": KwReturn,
+	"true": KwTrue, "false": KwFalse,
+}
+
+// StrPart is one segment of an interpolated string literal: either
+// literal text or the source of an embedded expression with an
+// optional format spec ("{n:6}" -> expr "n", spec "6").
+type StrPart struct {
+	IsExpr bool
+	S      string
+	Spec   string
+	Line   int
+}
+
+type Token struct {
+	Kind  Kind
+	Text  string
+	Int   int64
+	Float float64
+	Parts []StrPart // String tokens only
+	Line  int
+}
+
+// Tokens whose presence at end-of-line means the statement is complete.
+var endsExpr = map[Kind]bool{
+	Ident: true, Int: true, Float: true, String: true,
+	KwTrue: true, KwFalse: true, KwReturn: true,
+	RParen: true, RBrack: true, RBrace: true, Question: true,
+}
+
+type lexer struct {
+	src  string
+	i    int
+	line int
+	toks []Token
+}
+
+func Lex(src string) ([]Token, error) {
+	lx := &lexer{src: src, line: 1}
+	if err := lx.run(); err != nil {
+		return nil, err
+	}
+	return lx.toks, nil
+}
+
+func (lx *lexer) errf(format string, args ...any) error {
+	return fmt.Errorf("line %d: %s", lx.line, fmt.Sprintf(format, args...))
+}
+
+func (lx *lexer) emit(k Kind, text string) {
+	lx.toks = append(lx.toks, Token{Kind: k, Text: text, Line: lx.line})
+}
+
+func (lx *lexer) prev() *Token {
+	if len(lx.toks) == 0 {
+		return nil
+	}
+	return &lx.toks[len(lx.toks)-1]
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+func isIdentCont(c byte) bool { return isIdentStart(c) || isDigit(c) }
+
+func (lx *lexer) run() error {
+	for lx.i < len(lx.src) {
+		c := lx.src[lx.i]
+		switch {
+		case c == '\n':
+			if p := lx.prev(); p != nil && endsExpr[p.Kind] {
+				lx.emit(Semi, "newline")
+			}
+			lx.line++
+			lx.i++
+		case c == ' ' || c == '\t' || c == '\r':
+			lx.i++
+		case c == '/' && lx.i+1 < len(lx.src) && lx.src[lx.i+1] == '/':
+			for lx.i < len(lx.src) && lx.src[lx.i] != '\n' {
+				lx.i++
+			}
+		case c == '"':
+			if err := lx.lexString(); err != nil {
+				return err
+			}
+		case isDigit(c):
+			lx.lexNumber()
+		case isIdentStart(c):
+			lx.lexIdent()
+		default:
+			if err := lx.lexOp(); err != nil {
+				return err
+			}
+		}
+	}
+	if p := lx.prev(); p != nil && endsExpr[p.Kind] {
+		lx.emit(Semi, "newline")
+	}
+	lx.emit(EOF, "")
+	return nil
+}
+
+func (lx *lexer) lexIdent() {
+	start := lx.i
+	for lx.i < len(lx.src) && isIdentCont(lx.src[lx.i]) {
+		lx.i++
+	}
+	text := lx.src[start:lx.i]
+	if k, ok := keywords[text]; ok {
+		lx.emit(k, text)
+		return
+	}
+	lx.emit(Ident, text)
+}
+
+func (lx *lexer) lexNumber() {
+	start := lx.i
+	for lx.i < len(lx.src) && (isDigit(lx.src[lx.i]) || lx.src[lx.i] == '_') {
+		lx.i++
+	}
+	isFloat := false
+	// "1.5" is a float; "1..n" is a range and "x.1.cmp" tuple access.
+	if lx.i+1 < len(lx.src) && lx.src[lx.i] == '.' && isDigit(lx.src[lx.i+1]) {
+		isFloat = true
+		lx.i++
+		for lx.i < len(lx.src) && (isDigit(lx.src[lx.i]) || lx.src[lx.i] == '_') {
+			lx.i++
+		}
+	}
+	text := strings.ReplaceAll(lx.src[start:lx.i], "_", "")
+	if isFloat {
+		f, _ := strconv.ParseFloat(text, 64)
+		lx.toks = append(lx.toks, Token{Kind: Float, Text: text, Float: f, Line: lx.line})
+	} else {
+		n, _ := strconv.ParseInt(text, 10, 64)
+		lx.toks = append(lx.toks, Token{Kind: Int, Text: text, Int: n, Line: lx.line})
+	}
+}
+
+func (lx *lexer) lexOp() error {
+	two := ""
+	if lx.i+1 < len(lx.src) {
+		two = lx.src[lx.i : lx.i+2]
+	}
+	twoKinds := map[string]Kind{
+		"->": Arrow, "..": DotDot, "??": QQ, "&&": AndAnd, "||": OrOr,
+		"==": Eq, "!=": Ne, "<=": Le, ">=": Ge, "+=": PlusEq, "-=": MinusEq,
+	}
+	if k, ok := twoKinds[two]; ok {
+		lx.emit(k, two)
+		lx.i += 2
+		return nil
+	}
+	oneKinds := map[byte]Kind{
+		'(': LParen, ')': RParen, '[': LBrack, ']': RBrack,
+		'{': LBrace, '}': RBrace, ',': Comma, ':': Colon, '.': Dot,
+		'=': Assign, '+': Plus, '-': Minus, '*': Star, '/': Slash,
+		'%': Percent, '<': Lt, '>': Gt, '!': Not, '|': Pipe, '?': Question,
+	}
+	c := lx.src[lx.i]
+	if k, ok := oneKinds[c]; ok {
+		lx.emit(k, string(c))
+		lx.i++
+		return nil
+	}
+	return lx.errf("unexpected character %q", string(c))
+}
+
+func (lx *lexer) lexString() error {
+	startLine := lx.line
+	lx.i++ // opening quote
+	var parts []StrPart
+	var lit strings.Builder
+	flush := func() {
+		if lit.Len() > 0 {
+			parts = append(parts, StrPart{S: lit.String(), Line: startLine})
+			lit.Reset()
+		}
+	}
+	for {
+		if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
+			return lx.errf("unterminated string")
+		}
+		c := lx.src[lx.i]
+		switch c {
+		case '"':
+			lx.i++
+			flush()
+			lx.toks = append(lx.toks, Token{Kind: String, Parts: parts, Line: startLine})
+			return nil
+		case '\\':
+			if lx.i+1 >= len(lx.src) {
+				return lx.errf("unterminated escape")
+			}
+			e := lx.src[lx.i+1]
+			switch e {
+			case 'n':
+				lit.WriteByte('\n')
+			case 't':
+				lit.WriteByte('\t')
+			case 'r':
+				lit.WriteByte('\r')
+			case '\\', '"', '{', '}':
+				lit.WriteByte(e)
+			default:
+				return lx.errf(`unknown escape \%c`, e)
+			}
+			lx.i += 2
+		case '{':
+			flush()
+			lx.i++
+			depth := 0
+			exprStart := lx.i
+			specAt := -1
+			for {
+				if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
+					return lx.errf("unterminated interpolation")
+				}
+				ch := lx.src[lx.i]
+				if ch == '"' {
+					return lx.errf("string literals inside interpolation are not supported yet")
+				}
+				if ch == '(' || ch == '[' || ch == '{' {
+					depth++
+				}
+				if ch == ')' || ch == ']' {
+					depth--
+				}
+				if ch == '}' {
+					if depth == 0 {
+						break
+					}
+					depth--
+				}
+				if ch == ':' && depth == 0 && specAt < 0 {
+					specAt = lx.i
+				}
+				lx.i++
+			}
+			exprEnd := lx.i
+			spec := ""
+			if specAt >= 0 {
+				spec = lx.src[specAt+1 : exprEnd]
+				exprEnd = specAt
+			}
+			expr := strings.TrimSpace(lx.src[exprStart:exprEnd])
+			if expr == "" {
+				return lx.errf("empty interpolation")
+			}
+			parts = append(parts, StrPart{IsExpr: true, S: expr, Spec: spec, Line: startLine})
+			lx.i++ // '}'
+		default:
+			lit.WriteByte(c)
+			lx.i++
+		}
+	}
+}
