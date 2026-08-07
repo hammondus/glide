@@ -319,6 +319,13 @@ func (e *Env) lookup(name string) *binding {
 // block within the same function is an error. Function boundaries
 // reset the rule (a closure may reuse outer names for its own locals).
 func (e *Env) declare(name string, v Value, mut bool, line int) {
+	// The free builtins are reserved outright: the set is tiny and
+	// fixed, and no program legitimately needs a local named println.
+	// (Imports are deliberately not reserved — that conflict is the
+	// checker era's two-live-meanings rule; see DESIGN.md Shadowing.)
+	if _, isBuiltin := builtins[name]; isBuiltin {
+		panic(rtErr{line, fmt.Sprintf("%q is a builtin and cannot be used as a binding name", name)})
+	}
 	if !e.fnBoundary {
 		for p := e.parent; p != nil; p = p.parent {
 			if _, ok := p.vars[name]; ok {

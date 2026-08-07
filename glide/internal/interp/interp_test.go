@@ -103,6 +103,26 @@ fn main() {
 	}
 }
 
+func TestBuiltinsReserved(t *testing.T) {
+	for _, src := range []string{
+		"fn main() {\n let println = 5\n}",
+		"fn main() {\n let f = |print| { print }\n f(1)\n}",
+		"fn eprint(s: String) {}\nfn main() {}",
+	} {
+		_, err := runProg(t, src)
+		if err == nil || !strings.Contains(err.Error(), "is a builtin") {
+			t.Fatalf("want builtin-reservation error for %q, got %v", src, err)
+		}
+	}
+	// Imports are NOT reserved: a local named after a module is legal
+	// as long as the module isn't used through the shadow (the checker
+	// era enforces the two-live-meanings conflict; M1 cannot see it).
+	out, err := runProg(t, "import os\nfn main() {\n let os = \"fine\"\n println(os)\n}")
+	if err != nil || out != "fine\n" {
+		t.Fatalf("local named after import should run, got out=%q err=%v", out, err)
+	}
+}
+
 func TestErrorLinesPointAtSource(t *testing.T) {
 	// A bad format spec blames the string's line...
 	_, err := runProg(t, "fn main() {\n let n = 5\n println(\"{n: 6}\")\n}")

@@ -395,6 +395,16 @@ unwritable. The two rules compose into an idiom: build with `mut`,
 then seal — `let mut acc = …; …; let acc = acc` — mutable during
 construction, immutable after.
 
+Two Go shadowing bites are handled separately. The free builtins
+(`print`, `println`, `eprint`, `eprintln`, `expect`) are reserved —
+`let println = 5` is an error at the declaration, since no program
+legitimately wants that local. Imports are *not* reserved: a variable
+named `sql` in a file that imports `sql` is fine — both are named
+after the domain, and the collision is usually harmless — but using
+the module *through* a live shadow (binding `sql`, then calling
+`sql.open()` in the same function) is a compile error that names both
+parties, instead of Go's diagnosis fog.
+
 **Discarding.** `_` on the left of `=` evaluates and discards the
 right side, visibly: `_ = db.close()`. A function with no declared
 return type whose body ends in a meaningful value is an error — you

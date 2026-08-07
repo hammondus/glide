@@ -536,6 +536,25 @@ never in nesting.** "Shadowing" is two features wearing one name:
 - Builtins/types protected by existing machinery: enforced casing means
   `let Int = 5` is already a violation; `len` is a method, not a
   shadowable global.
+- **Free builtins are reserved names**: `let println = …`, a `println`
+  param, or `fn println` is a compile error at the declaration. The
+  set is tiny, fixed, and known (the four prints, `expect`); no
+  program legitimately wants those locals, so the ban costs nothing —
+  one notch softer than a keyword. Keywords themselves need no rule:
+  they're token kinds, so `let for = 5` is unparseable. (`test`/
+  `bench` stay contextual and bindable — too good as variable names.)
+  (Enforced by the interpreter.)
+- **Imports: shadowable; the *conflict* is the error** (checker era).
+  A local named after an imported module is legal while the module
+  goes unused in that function — `sql` is a prime name for a query
+  string precisely because both are named after the domain, and Go's
+  bite (shadow `sql`, lose time to diagnosis fog) argues for a named
+  diagnosis, not a ban. Same logic as the nested-shadow rule: one
+  live meaning is harmless; binding `sql` *and* calling `sql.open()`
+  in the same function is two, and the error names both parties
+  ("shadows this file's import; rename one"). Blanket-banning
+  import names would punish the natural spelling of programs to
+  prevent a conflict the checker can simply point at.
 - **Loop variables: fresh binding per iteration** — Go's most expensive
   shadowing-adjacent bug (closure capture), fixed in their 1.22
   semantic break; ours from day one.

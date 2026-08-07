@@ -85,6 +85,9 @@ func (in *Interp) load(f *ast.File) error {
 		if _, dup := in.fns[fn.Name]; dup {
 			return fmt.Errorf("line %d: function %q declared twice", fn.Line, fn.Name)
 		}
+		if _, isBuiltin := builtins[fn.Name]; isBuiltin {
+			return fmt.Errorf("line %d: %q is a builtin and cannot be redeclared", fn.Line, fn.Name)
+		}
 		in.fns[fn.Name] = fn
 	}
 	for _, td := range f.Types {
