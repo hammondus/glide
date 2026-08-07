@@ -174,7 +174,10 @@ type StrPart struct {
 	E      Expr
 	Spec   string
 }
-type StrLit struct{ Parts []StrPart }
+type StrLit struct {
+	Parts []StrPart
+	Line  int
+}
 
 type IdentExpr struct {
 	Name string
@@ -191,10 +194,14 @@ type Binary struct {
 	Line int
 }
 type Unary struct {
-	Op string
-	X  Expr
+	Op   string
+	X    Expr
+	Line int
 }
-type RangeExpr struct{ Lo, Hi Expr }
+type RangeExpr struct {
+	Lo, Hi Expr
+	Line   int
+}
 
 type Call struct {
 	Fn   Expr
@@ -211,8 +218,9 @@ type Field struct {
 	Line int
 }
 type TupleIndex struct {
-	X Expr
-	N int
+	X    Expr
+	N    int
+	Line int
 }
 type Try struct {
 	X    Expr

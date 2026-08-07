@@ -103,6 +103,20 @@ fn main() {
 	}
 }
 
+func TestErrorLinesPointAtSource(t *testing.T) {
+	// A bad format spec blames the string's line...
+	_, err := runProg(t, "fn main() {\n let n = 5\n println(\"{n: 6}\")\n}")
+	if err == nil || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("format spec error should blame line 3, got %v", err)
+	}
+	// ...and so does a runtime error inside an interpolated expression,
+	// whose tokens were lexed from a standalone snippet.
+	_, err = runProg(t, "fn main() {\n let t = (1, 2)\n println(\"{t.5}\")\n}")
+	if err == nil || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("interpolated expr error should blame line 3, got %v", err)
+	}
+}
+
 func TestNullishDefault(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {

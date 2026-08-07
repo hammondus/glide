@@ -35,6 +35,12 @@ func parseExprSrc(src string, line int) (ast.Expr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("line %d: in interpolation {%s}: %v", line, src, err)
 	}
+	// The snippet is lexed standalone, so its tokens think they're on
+	// line 1; rebase them onto the string's line so AST nodes built
+	// from them blame the right place at runtime.
+	for i := range toks {
+		toks[i].Line += line - 1
+	}
 	p := &parser{toks: toks}
 	e, err := p.parseExpr()
 	if err != nil {
@@ -796,7 +802,7 @@ func (p *parser) parseBinary(min int) (ast.Expr, error) {
 			return nil, err
 		}
 		if k == lexer.DotDot {
-			left = &ast.RangeExpr{Lo: left, Hi: right}
+			left = &ast.RangeExpr{Lo: left, Hi: right, Line: opTok.Line}
 		} else {
 			left = &ast.Binary{Op: opTok.Text, L: left, R: right, Line: opTok.Line}
 		}
@@ -806,12 +812,12 @@ func (p *parser) parseBinary(min int) (ast.Expr, error) {
 func (p *parser) parseUnary() (ast.Expr, error) {
 	switch p.cur().Kind {
 	case lexer.Not, lexer.Minus:
-		op := p.next().Text
+		opTok := p.next()
 		x, err := p.parseUnary()
 		if err != nil {
 			return nil, err
 		}
-		return &ast.Unary{Op: op, X: x}, nil
+		return &ast.Unary{Op: opTok.Text, X: x, Line: opTok.Line}, nil
 	}
 	return p.parsePostfix()
 }
@@ -862,7 +868,7 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 			case lexer.Ident:
 				e = &ast.Field{X: e, Name: p.next().Text, Line: line}
 			case lexer.Int:
-				e = &ast.TupleIndex{X: e, N: int(p.next().Int)}
+				e = &ast.TupleIndex{X: e, N: int(p.next().Int), Line: line}
 			default:
 				return nil, p.errf("expected a name or tuple index after '.', found %s", p.cur().Kind)
 			}
@@ -892,7 +898,7 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		return &ast.BoolLit{V: false}, nil
 	case lexer.String:
 		p.next()
-		lit := &ast.StrLit{}
+		lit := &ast.StrLit{Line: t.Line}
 		for _, part := range t.Parts {
 			if part.IsExpr {
 				e, err := parseExprSrc(part.S, part.Line)

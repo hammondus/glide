@@ -620,7 +620,7 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		l, ok1 := lo.(IntV)
 		h, ok2 := hi.(IntV)
 		if !ok1 || !ok2 {
-			panic(rtErr{0, "range bounds must be Int"})
+			panic(rtErr{ex.Line, "range bounds must be Int"})
 		}
 		return RangeV{Lo: int64(l), Hi: int64(h)}, nil
 	case *ast.Unary:
@@ -636,11 +636,11 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 			case FloatV:
 				return -n, nil
 			}
-			panic(rtErr{0, fmt.Sprintf("cannot negate %s", typeName(v))})
+			panic(rtErr{ex.Line, fmt.Sprintf("cannot negate %s", typeName(v))})
 		case "!":
 			b, ok := v.(BoolV)
 			if !ok {
-				panic(rtErr{0, fmt.Sprintf("! requires Bool, got %s", typeName(v))})
+				panic(rtErr{ex.Line, fmt.Sprintf("! requires Bool, got %s", typeName(v))})
 			}
 			return !b, nil
 		}
@@ -675,10 +675,10 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 		tv, ok := v.(TupleV)
 		if !ok {
-			panic(rtErr{0, fmt.Sprintf(".%d requires a tuple, got %s", ex.N, typeName(v))})
+			panic(rtErr{ex.Line, fmt.Sprintf(".%d requires a tuple, got %s", ex.N, typeName(v))})
 		}
 		if ex.N >= len(tv) {
-			panic(rtErr{0, fmt.Sprintf("tuple has no field .%d (size %d)", ex.N, len(tv))})
+			panic(rtErr{ex.Line, fmt.Sprintf("tuple has no field .%d (size %d)", ex.N, len(tv))})
 		}
 		return tv[ex.N], nil
 	case *ast.Index:
@@ -865,7 +865,7 @@ func (in *Interp) evalStr(ex *ast.StrLit, env *Env) (Value, *sig) {
 		if part.Spec != "" {
 			w, err := strconv.Atoi(part.Spec)
 			if err != nil {
-				panic(rtErr{0, fmt.Sprintf("unsupported format spec %q (only a width, e.g. {x:6})", part.Spec)})
+				panic(rtErr{ex.Line, fmt.Sprintf("unsupported format spec %q (only a width, e.g. {x:6})", part.Spec)})
 			}
 			s = fmt.Sprintf("%*s", w, s)
 		}
