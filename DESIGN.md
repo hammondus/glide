@@ -383,6 +383,35 @@ formatting:
 - **Comparison is byte equality.** No locale collation or case-folding
   in `==` — Turkish-i has ended careers. Locale is a library invoked on
   purpose.
+- **Builtin prints are unbuffered: no `flush()` exists.** Each call
+  formats the whole string in memory, then issues one atomic write
+  (Go's model). Nothing to flush means the two classic footguns can't
+  exist: a no-newline prompt always appears before the stdin read, and
+  a debug print always lands even if the process dies on the next
+  instruction — buffered schemes fail exactly when output is most
+  load-bearing (debugging). Behavior is identical for tty, pipe, and
+  file — C's tty-detection ("works in my terminal, silent under
+  `| tee`") is a second footgun layered on the first, declined.
+  Rust's line-buffered `print!` + documented `flush()` incantation is
+  choosing to have the problem and documenting the way out. One write
+  per call also gives per-call atomicity under green threads — no
+  interleaved half-lines. **Sacrifice recorded**: naive print loops
+  are syscall-bound (~µs/call; a million-line loop takes seconds, not
+  tens of ms). Bulk output opts into an explicit stdlib buffered
+  writer whose `flush`/`close` is visible at the use site via `defer`.
+- **The print family is exactly four names**: `print`, `println`,
+  `eprint`, `eprintln` — a closed 2×2 grid (`e` prefix = stderr, `ln`
+  suffix = newline; Rust's set). Not two functions with a
+  `newline: Bool` param: that knob has no good default (`true` makes
+  `print`'s name lie; `false` taxes every call), and a bool that picks
+  between two behaviors is two functions hiding in one signature — the
+  same shape the boolean-trap lint exists to catch. No Python-style
+  `end:` either: the terminator is string content, and the string is
+  already the general mechanism (`println(s)` ≡ `print("{s}\n")`).
+  The grid cannot grow — formatting variants are impossible
+  (interpolation owns formatting; no printf family) and stream
+  variants go through writer APIs (no `fprint` row). Four is the
+  ceiling.
 
 ## Generics syntax
 
@@ -1657,3 +1686,33 @@ traps → explicit checks in emitted code.
 
 - (none currently — all original questions resolved; new ones land here
   as they arise)
+
+
+
+# Things I added as I had to look it up
+
+# Error Propagation Operator
+In languages like Rust and Zig, the ? operator is used to immediately return an error from the current function if a result or option fails, forwarding it up the call stack. This replaces bloated try/catch blocks or explicit error-checking statements
+
+This looks like comes from Rust
+Rust examples
+// The ? operator unwraps the value if Ok, or returns the error early if Err
+fn read_data() -> Result<String, std::io::Error> {
+    let mut file = File::open("info.txt")?; 
+    let mut content = String::new();
+    file.read_to_string(&mut content)?; 
+    Ok(content)
+}
+
+In Rust, Ok is a data variant that wraps a successful value inside a Result enum.
+Because the function header specifies it returns a Result<String, std::io::Error>, it must return either an Ok(success_value) or an Err(error_value).
+
+What Ok Does in That Example
+- Wraps the Final Output: It packages the final content string so the function can exit successfully.
+- Signals Success: It tells the calling function that no errors occurred during file operations.
+- Matches the Return Type: It satisfies Rust's strict type checker by returning the correct enum type (Result).
+
+How It Interacts With The ? Operator
+The ? operator and Ok work as a team to handle control flow:
+- The ? operator unwraps the data inside an Ok if a line succeeds so you can keep working with the raw data.
+- If all lines succeed, the final line Ok(content) wraps the finished data back up to safely send it out of the function.

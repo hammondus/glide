@@ -18,6 +18,14 @@ var builtins = map[string]*BuiltinV{
 		fmt.Fprintln(in.Stderr, displayArg("eprintln", args, line))
 		return UnitV{}
 	}},
+	"print": {Name: "print", Fn: func(in *Interp, args []Value, line int) Value {
+		fmt.Fprint(in.Stdout, displayArg("print", args, line))
+		return UnitV{}
+	}},
+	"eprint": {Name: "eprint", Fn: func(in *Interp, args []Value, line int) Value {
+		fmt.Fprint(in.Stderr, displayArg("eprint", args, line))
+		return UnitV{}
+	}},
 	"Ok": {Name: "Ok", Fn: func(in *Interp, args []Value, line int) Value {
 		return &ResultV{Ok: true, V: one("Ok", args, line)}
 	}},

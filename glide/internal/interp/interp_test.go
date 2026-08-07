@@ -75,6 +75,34 @@ func TestTryPropagatesWithContext(t *testing.T) {
 	}
 }
 
+func TestPrintFamilyNewlines(t *testing.T) {
+	f, err := parser.ParseFile(`
+fn main() {
+    print("a")
+    print("b")
+    println("c")
+    eprint("x")
+    eprintln("y")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut strings.Builder
+	in := New()
+	in.Stdout = &out
+	in.Stderr = &errOut
+	in.Args = []string{"prog"}
+	if err := in.Run(f); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "abc\n" {
+		t.Fatalf("stdout = %q, want %q", out.String(), "abc\n")
+	}
+	if errOut.String() != "xy\n" {
+		t.Fatalf("stderr = %q, want %q", errOut.String(), "xy\n")
+	}
+}
+
 func TestNullishDefault(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
