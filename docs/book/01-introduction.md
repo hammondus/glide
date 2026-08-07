@@ -1,10 +1,11 @@
 # The Glide Programming Language — Chapter 1: Introduction
 
-*For experienced programmers meeting Glide for the first time. The
-chapter opens by building one small program up from hello-world, a
-step at a time; the rest covers, systematically, only the language
-features used in the three example programs in `GRAMMAR.md`. There is
-more language than this, but not much more — smallness is a feature.*
+*A complete tour of the language. It opens by building one small
+program up from hello-world, a step at a time; the rest describes
+every feature in detail, assuming you know programming but have never
+met the feature — delete what you already know. There is more
+language than this chapter, but not much more: smallness is a
+feature.*
 
 Glide is a compiled, statically typed language in the Go tradition:
 garbage collected, green-threaded, one binary, boring on purpose. It
@@ -168,6 +169,12 @@ declare that: `-> Result<(), Error>` reads "either succeeds with
 nothing, or fails with an `Error`". The `()` is the **unit type** —
 the way "nothing" is spelled where the grammar requires a type.
 
+Which explains the odd-looking last line. `Ok(...)` constructs the
+success variant of a `Result`; what this one carries is `()`, the
+unit *value*. Outer parens: a call. Inner parens: the nothing being
+handed back. If `main` returned `Result<Int, Error>`, the line would
+be `Ok(42)`, and the symmetry is obvious.
+
 Both signatures of `main` are legal — step 1's plain `fn main()`, or
 this one. And returned to whom? `main`'s caller is the runtime: it
 turns `Ok(())` into exit code 0, and an `Err` into the error printed
@@ -175,12 +182,6 @@ on stderr and exit code 1. Without this, `?` would be unusable in
 `main`, and every CLI would open with a ceremonial `run()` wrapper
 existing only to give errors somewhere to go — Go's four-line
 `if err := run(); err != nil` ritual, deleted.
-
-Which explains the odd-looking last line. `Ok(...)` constructs the
-success variant of a `Result`; what this one carries is `()`, the
-unit *value*. Outer parens: a call. Inner parens: the nothing being
-handed back. If `main` returned `Result<Int, Error>`, the line would
-be `Ok(42)`, and the symmetry is obvious.
 
 ### Step 6 — counting words
 
@@ -258,101 +259,237 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-The rest of this chapter goes back over these features more
-carefully, then covers what a thirty-line CLI had no reason to use:
-sum types, pattern matching, traits, generators, `defer`, structured
-concurrency, and built-in tests.
+The rest of this chapter covers every feature properly — including
+several the walkthrough had no reason to touch.
 
-## 1.2 Values and bindings
+## 1.2 Reading Glide: lines, case, braces
 
-Variables are declared with `let` and are **immutable by default**:
+Three mechanical rules govern how any Glide file reads. They're
+usually absorbed unconsciously; here they are consciously.
+
+**Lines end statements.** There are no semicolons. A newline ends
+the statement when the last token on the line can end an expression —
+an identifier, a literal, `)`, `]`, `}`, or `?`. When it can't, the
+statement continues:
+
+```glide
+let total = price +
+    shipping            // fine: a line can't end with +
+
+let x = f(a, b)
+    .context("...")     // NOT fine: the first line ended at )
+```
+
+So a method chain keeps the dot at the end of the continuing line's
+predecessor — or, in practice, you don't think about it, because the
+canonical formatter (there is exactly one layout; no configuration)
+arranges line breaks for you. The one rule worth internalising:
+`else` sits on the same line as the `}` before it. This is Go's
+newline rule, and it has the same consequence: code pasted from
+anywhere formats to the same bytes.
+
+**Case is meaningful, and the compiler enforces it.** Capitalised
+names are types, variants, and constructors: `Tree`, `Circle`,
+`Some`, `None`. Lowercase names are values: bindings, functions,
+fields, modules. This is not a style suggestion — pattern matching
+(§1.8) *depends* on it: in `match shape { Circle(r) => …, point => … }`,
+the only way to know that `Circle` tests and `point` binds is the
+case of the first letter. One consequence: `pub` marks visibility
+(§1.13) rather than Go's capitalisation trick, because the case axis
+is already spent.
+
+**Braces are mandatory** — every `if`, `for`, and `fn` body takes a
+block, even one line. Comments are `//` to end of line. Source files
+end in `.gl`. Number literals take underscores for readability:
+`10_000_000`, `0..1_000_000`.
+
+## 1.3 Values and bindings
+
+`let` declares; `=` assigns; the two never blur. Assigning to a name
+that hasn't been declared is an error (there is no Go `:=`, no
+implicit declaration), and declaring is always visible on its line.
 
 ```glide
 let name = "glide"
 let port = 8080          // Int, inferred
-let debug: Bool = false  // annotation optional, inference is local
+let debug: Bool = false  // annotation optional; inference is local
 ```
 
-If you need to reassign, say so at the declaration:
+**Immutable by default.** A `let` binding cannot be reassigned. If a
+variable's value genuinely evolves, mark it at the declaration:
 
 ```glide
 let mut count = 0
 count += 1
 ```
 
-That `mut` is the single most useful audit mark in the language: skim
-any function and you know exactly which locals can change. There is no
-`:=`, no `var`, and no `++` — `count += 1` is the only increment.
-Assignment is a statement, not an expression, so `a = b = c` and
-`while x = next()` do not parse.
+`mut` is the single most useful audit mark in the language: skim any
+function and you know exactly which locals can change. There is no
+`++` — `count += 1` is the only increment. Assignment is a statement,
+not an expression, so `a = b = c` and `while x = next()` don't parse;
+an entire family of C cleverness is unspellable.
 
-You may redeclare a name in the *same* scope — this is idiomatic for
-refinement pipelines:
+**Redeclaration is not mutation.** You may redeclare a name in the
+*same* scope, and it's idiomatic — this is a *refinement pipeline*:
 
 ```glide
 let input = read_line()?
-let input = input.trim()          // fine: same scope, new binding
+let input = input.trim()           // new binding, same name
+let input = parse<Config>(input)?  // the type changed: String → Config
 ```
 
-But shadowing an outer variable from a *nested* block is a compile
-error. The Go bug where an inner `:=` silently creates a new variable
-cannot be written.
+Each `let` ends the old binding's life and starts a fresh, immutable
+one; nothing ever changes behind anyone's back, and after each line
+exactly one `input` is alive. This is why the example needs no `mut`
+and no `input_raw`/`input_trimmed` naming dance. The distinction has
+teeth: a closure that captured the old binding keeps it — capture
+binds to the *binding*, not the name (§1.10) — and redeclaration is
+same-scope only, which is why loop accumulators genuinely need `mut`
+(a loop body is a nested block; see next paragraph).
 
-## 1.3 There is no null — `T?` and friends
-
-Glide has no null, no nil, no zero-value fallback. A value that might
-be absent has an Option type, written `T?`:
+**Shadowing across scopes is banned.** Redeclaring a name from an
+*enclosing* block inside a nested block is a compile error:
 
 ```glide
-let found: Note? = db.first(id)
+let count = 0
+for x in xs {
+    let count = count + 1   // error: cannot shadow enclosing `count`
+}
 ```
 
-You cannot use a `T?` as a `T`; the compiler makes you handle the
-empty case, and the language gives you three ergonomic ways:
+This kills Go's classic bug — an inner `:=` silently declaring a new
+variable while the outer one stays unchanged — by making the shape
+unwritable. The two rules compose into an idiom: build with `mut`,
+then seal — `let mut acc = …; …; let acc = acc` — mutable during
+construction, immutable after.
+
+**Discarding.** `_` on the left of `=` evaluates and discards the
+right side, visibly: `_ = db.close()`. A function with no declared
+return type whose body ends in a meaningful value is an error — you
+either return it, or discard it explicitly. Silent discards don't
+exist.
+
+## 1.4 There is no null — `T?`
+
+Every mainstream C-lineage language has a value that lies about its
+type: `null`, `nil`, `None`-at-runtime. Any reference might secretly
+be it; the compiler can't tell you which; you find out in production.
+Glide removes the lie by moving "might be absent" into the type. A
+plain `T` is *always* a real `T`. A value that might be absent is a
+`T?` (an *Option*), and the compiler will not let you use a `T?`
+where a `T` is required — you must handle the empty case first.
+
+The point is not the extra `?` — it's that *presence becomes visible
+in signatures*. `fn find(id: UserId) -> User?` tells you at the
+boundary that absence is possible; `fn owner() -> User` tells you it
+isn't, and you don't defensively check. Three ways to handle a `T?`:
+
+**`??` — supply a default.** Reads "or else":
 
 ```glide
-// 1. `??` — provide a default
 let n = counts[word] ?? 0
-
-// 2. `if let` — bind and unwrap in one move (Swift-style, no `Some` ceremony)
-if let root = tree.root {
-    // root is a Node here, not a Node?
-}
-
-// 3. `let … else` — unwrap or bail out early
-let [_, path] = os.args() else {
-    eprintln("usage: wordfreq <file>")
-    os.exit(2)                     // the else-block must exit/return
-}
+let host = config["host"] ?? "localhost"
 ```
 
-Note what `??` did in that first line: map indexing `counts[word]`
-returns an `Int?` (the key might be absent). Go returns a zero value
-and hopes; Glide returns an Option and asks.
+Map indexing returns `V?` — the key might be absent — which is
+exactly the shape `??` was built for. Go returns a zero value and
+hopes; Glide returns an Option and asks.
 
-## 1.4 Errors are values — `Result` and `?`
-
-Functions that can fail return `Result<T, E>`. The `?` operator
-unwraps a success or returns the failure to the caller:
+**`if let` — unwrap into a scope.** Checks and binds in one move:
 
 ```glide
-fn main() -> Result<(), Error> {
-    let text = fs.read_string(path).context("reading input")?
-    // ... text is a String here
-    Ok(())
+if let user = find_user(id) {
+    // user is a User here, not a User?
+} else {
+    // absent; `user` doesn't exist here
 }
 ```
 
-This is Go's errors-as-values philosophy without the `if err != nil`
-skyline: the error path is still visible (every `?` is a possible
-early return) but costs one character. `.context("...")` wraps the
-error with a breadcrumb on the way up. `main` may return a `Result`;
-an error prints and exits nonzero.
+No `Some(...)` wrapper appears in the source — the pattern binds the
+inner value directly. (Swift users will recognise this exactly.)
 
-Error *types* are ordinary sum types (next section), so a function's
-signature tells you exactly what can go wrong.
+**`let … else` — unwrap or bail.** For guard clauses; keeps the
+happy path unindented:
 
-## 1.5 Declaring types
+```glide
+let config = load_config(path) else {
+    eprintln("no config at {path}")
+    os.exit(1)
+}
+// config is real from here on
+```
+
+The else-block must *diverge* — return, exit, or otherwise not fall
+through — because past it, the binding must exist. The compiler
+enforces the divergence, which is what makes the flat style safe
+rather than optimistic.
+
+Choosing between them: `??` when a default is meaningful, `if let`
+when both cases have code, `let … else` when absence aborts. Together
+they cover what null-checking does in other languages, except the
+compiler verifies you did it.
+
+## 1.5 Errors are values — `Result`, `?`, and `or`
+
+Glide's error philosophy is Go's — errors are ordinary values,
+visible in signatures, no invisible control flow — with the
+boilerplate removed and the failure modes made enumerable.
+
+**`Result<T, E>`** is a two-variant type: `Ok(T)` carrying a success,
+or `Err(E)` carrying a failure. A function that can fail *says so in
+its return type*:
+
+```glide
+fn read_config(path: String) -> Result<Config, Error>
+```
+
+There are no exceptions. Nothing propagates invisibly; every failure
+path is in a signature. Two operators then make handling cheap
+enough that you never resent writing it:
+
+**`?` propagates.** Unwrap the success, or return the failure to the
+caller — one character, placed exactly where the risk is:
+
+```glide
+let text = fs.read_string(path).context("reading input")?
+```
+
+A skim of any function shows every line that can exit early: look
+for `?`. The `.context("…")` call wraps an error with a breadcrumb
+as it passes ("reading input: open notes.txt: no such file"), so a
+deep failure surfaces with its route attached.
+
+**`or` handles in place.** The sibling of `?` for when you *don't*
+want to propagate — handle the error right here:
+
+```glide
+let input = req.json<Note>() or |e| { return Err(.BadInput("{e}")) }
+let cfg = load_config() or |e| { default_config() }
+```
+
+Read it as "or, given the error e, do this instead". The block
+receives the error and must either diverge (return/exit) or produce
+a fallback value of the success type — the same must-not-fall-through
+rule as `let … else`, and for the same reason: past that line, the
+binding must hold a real value.
+
+> **Unratified.** `or |e|` is the one construct in Glide with no
+> direct precedent in Rust, Swift, or Go — GRAMMAR.md flags it as
+> "the biggest thing to fight about in this sketch". Rust spells
+> these cases `.unwrap_or_else(...)` / `match`; Swift spells them
+> `do/catch`. Whether `or` earns its place is an open fight.
+
+**Error types are ordinary sum types** (§1.6), so a function can
+enumerate exactly what can go wrong — `Result<Note, ApiError>` where
+`ApiError = NotFound(…) | BadInput(…) | Db(…)` — and `match` can
+handle each shape. No `errors.Is` archaeology, no downcasting.
+
+**Panics exist, for bugs only.** Out-of-bounds indexing, a broken
+invariant — things a correct program never does. They are not
+control flow, they are not caught in ordinary code, and APIs never
+use them to report expected failures.
+
+## 1.6 Declaring types
 
 One keyword declares every shape of type:
 
@@ -371,167 +508,352 @@ type ApiError =                       // a sum type
     | Db(cause: Error)
 ```
 
-Three things deserve attention:
+**Structs** are the familiar record: named, typed fields. Two things
+differ from what you're used to. First, **there are no zero values**:
+a struct literal must account for every field, or it doesn't compile.
+Go's `User{}` — an "empty" user with a blank ID that type-checks and
+flows until something breaks far from the cause — is unwritable.
+(Types can opt in to a default via a trait, so a `Builder` or `Mutex`
+still constructs bare; *domain* types get no fake instances for
+free.) Second, fields are private unless marked `pub`, so a public
+type with private fields is the natural encapsulation story — no
+getter ceremony, no convention.
 
 **`distinct`** creates a new type with the same representation but no
-implicit conversion. A `NoteId` is stored as an `i64` but you cannot
-pass a plain `i64` (or an `OrderId`) where a `NoteId` is expected —
-`NoteId(raw)` converts explicitly. Ten characters of declaration, and
-an entire class of mixed-up-identifiers bugs is gone.
+implicit conversion. A `NoteId` is stored as an `i64`, but you cannot
+pass a plain `i64` — or an `OrderId` — where a `NoteId` is expected;
+`NoteId(raw)` converts, explicitly. Ten characters of declaration
+kill the entire class of transposed-identifier bugs, the ones that
+type-check fine and corrupt data quietly.
 
-**Sum types** say "a value is exactly one of these shapes", and each
-variant can carry data. Go has no equivalent — this is the feature
-you'd miss most going back. Where the expected type is known you can
-abbreviate a variant with a leading dot: `Err(.NotFound(id))`.
+**Sum types** are the star of the language, and if you've lived in
+the C lineage they are probably genuinely new, so slowly: a sum type
+says a value is **exactly one of these N shapes**, and each shape can
+carry its own data. `ApiError` above is one type with three shapes —
+a value of it is a `NotFound` holding an id, *or* a `BadInput`
+holding a message, *or* a `Db` holding a cause. Never two of them,
+never none of them, never a shape you didn't list.
 
-**`derive(...)`** generates implementations at compile time — JSON
-encoding, database row mapping, debug printing — by walking the
-struct's fields. It looks like magic; it is ordinary code generation,
-at compile time, with no runtime reflection anywhere in the language.
+If that sounds like an enum: it's an enum whose variants can carry
+payloads, checked by the compiler. If it sounds like a C union: it's
+a union that always knows which member is live and refuses to read
+the wrong one. The C lineage approximates this constantly — an enum
+tag plus a struct of mostly-unused fields, an interface plus type
+switches, "check the kind field before touching the payload" — and
+every approximation relies on discipline. The sum type makes the
+discipline a type.
 
-Structs must be fully initialised at construction — there are no zero
-values. `pub` marks what's visible outside the module (a directory of
-source files, as in Go); everything else is private. Note `pub` on
-fields: a public type with private fields is the normal encapsulation
-pattern.
+Where they change your designs: "one of N shapes" is what most
+domain data *is*. A payment is card or transfer or cash. A config
+value is a string or a number or a list. An AST node is one of the
+node kinds. Model those as a sum type and illegal states — a payment
+that's both, a node that's neither — stop being representable at
+all. You'll also stop writing boolean-flag pairs (`isLoaded`,
+`hasError`) that have four combinations of which two are meaningful:
+`Loading | Loaded(Data) | Failed(Error)` has exactly the three.
 
-## 1.6 Pattern matching
+Where the expected type is known, a variant can be abbreviated with
+a leading dot — `Err(.NotFound(id))` rather than
+`Err(ApiError.NotFound(id))`.
 
-`match` is the multi-way branch, and on sum types it is *exhaustive*:
-cover every variant or the compiler objects. Add a variant next year,
-and every match site that misses it becomes a compile error — the
-language tells you what the change touched.
+Using a sum type requires `match` (§1.8), and that pairing is where
+the payoff compounds — the compiler checks you handled every shape.
+
+**`derive(...)`** asks the compiler to generate implementations by
+walking a type's structure at compile time — JSON encoding, database
+row mapping, debug printing. It looks like magic; it is ordinary code
+generation with no runtime reflection anywhere in the language: what
+`derive(Json)` writes is what you'd have written, at zero runtime
+cost.
+
+## 1.7 Pattern matching
+
+Patterns are the disassembly half of the language, and one principle
+organises everything: **a pattern is construction run backwards.**
+Whatever syntax builds a value, the same syntax takes it apart:
 
 ```glide
-match found {
-    Some(n) => Ok(http.json(n))
-    None    => Err(.NotFound(id))
+let pair = (host, port)              // build a tuple…
+let (host, port) = parse_addr(s)?    // …and unbuild one
+
+let user = User{ name: n, age: a }   // build a struct…
+let User{ name, .. } = user          // …pull a field out
+
+Some(5)                              // build an Option…
+if let Some(n) = maybe { … }         // …take one apart
+```
+
+Anywhere a name can be bound, a pattern can stand: `let`, function
+of `for` headers, match arms. `for (word, n) in entries` destructures
+each element as it arrives. `_` discards; `..` in a struct or list
+pattern means "and the rest, deliberately" — unmentioned parts are
+an error without it, because patterns match exactly what they spell.
+
+## 1.8 `match`
+
+`match` is the only multi-way branch in the language (`if`/`else`
+covers two-way). It tests a value against patterns, top to bottom,
+and runs the first arm that fits:
+
+```glide
+match shape {
+    Circle(r)      => 3.14 * r * r
+    Square(w)      => w * w
+    Rect(w, h)     => w * h
 }
 ```
 
-Patterns nest arbitrarily and bind as they match. Guards add
-conditions; struct patterns pull out fields; `..` means "and the rest,
-deliberately":
+Three properties make it more than a switch:
 
-```glide
-match at {
-    None => Node{ value: value, left: None, right: None }
-    Some(n) if value < n.value =>
-        Node{ left: insert_node(n.left, value), ..n }
-    Some(n) =>
-        Node{ right: insert_node(n.right, value), ..n }
-}
-```
+**Arms bind as they match.** `Circle(r)` doesn't just test the
+variant — it extracts the radius into `r` for that arm's body. Test
+and disassembly are one step; there is no separate cast-and-hope.
+Case tells you which is which (§1.2): capitalised `Circle` tests,
+lowercase `r` binds. Nesting works: `Ok(User{ name, .. })` reaches
+two levels down in one pattern.
 
-That `Node{ left: ..., ..n }` is a **struct update**: a copy of `n`
-with one field replaced. In an immutable-first language this is the
-standard way data evolves.
+**Exhaustiveness is checked.** Match a sum type and miss a variant:
+compile error. The payoff arrives later, when you *add* a variant —
+every `match` in the codebase that doesn't handle it becomes a
+compile error, and the compiler hands you the complete list of
+places the change touches. In the C lineage, adding a case means
+grepping and praying; here it means fixing what the compiler lists.
+A `_ =>` arm is legal but spends this guarantee — write it only when
+"anything else" is genuinely the meaning.
 
-`match` and `if` are expressions — they produce values — which is why
-Glide has no ternary operator:
+**Arms take guards.** `Some(n) if n.value < limit => …` — an extra
+condition after the pattern. A guard that fails falls through to the
+next arm. (Guards are opaque to the exhaustiveness checker: it
+assumes any guard can fail, so a guarded arm never completes
+coverage — the compiler demands the unguarded case rather than
+trusting your predicate.)
+
+Patterns also match literals and ranges — `1..10 =>`, `'a'..'z' =>`,
+`"GET" =>` (equality only; no regexes in patterns).
+
+**`match` and `if` are expressions** — they produce values — which
+is why Glide has no ternary operator and no naked-mutable-then-assign
+dance:
 
 ```glide
 let status = if ok { "active" } else { "disabled" }
+
+let label = match n {
+    0 => "none"
+    1 => "one"
+    _ => "{n} items"
+}
 ```
 
-Destructuring works anywhere a binding does — including tuples, which
-Glide has and Go does not:
+**Struct update** is construction's answer to immutability: build a
+copy with some fields changed, sharing the rest —
 
 ```glide
-let (host, port) = parse_addr(s)?
-for (word, n) in entries.iter().take(20) { ... }
+let renamed = Note{ title: new_title, ..note }
 ```
 
-## 1.7 Strings
+In an immutable-first language this is *the* way data evolves; the
+recursive tree insert in GRAMMAR.md program 3 builds each modified
+node this way while untouched subtrees are shared as-is.
 
-Strings interpolate, always, with full expressions in the braces —
-and it's checked at compile time:
+One parser rule to know: struct literals are banned in control-flow
+headers — `if c == Red { … }` gives the brace to the body, so
+`if x == Point{ x: 0, y: 0 }` needs parens around the literal. (Same
+rule and same reason as Rust: variants are capitalised too, so case
+can't disambiguate.)
+
+## 1.9 Strings
+
+Strings interpolate, always, with full expressions in the braces,
+checked at compile time:
 
 ```glide
-println("{n:6}  {word}")            // width spec: right-align in 6
+println("{n:6}  {word}")             // width spec: right-align in 6
 log.info("swept", { count: n })
 return Err(.BadInput("{e}"))
 ```
 
-There is no `printf`, no format verbs, no runtime format parsing. A
-type that can't be displayed in a string is a compile error, not
-`%!v(MISSING)` in production output.
+There is no `printf`, no format verbs, no runtime format-string
+parsing. A type that can't be displayed is a compile error, not
+`%!v(MISSING)` in production logs. After the colon comes an optional
+format spec (`{n:6}` — width 6). Escapes are the backslash family:
+`\n`, `\t`, `\"`, `\\`, and `\{` for a literal brace.
 
-## 1.8 Functions, closures, named arguments
+Strings are immutable; building one incrementally is a named type
+(`StringBuilder`), not a loop of concatenations. Comparison is byte
+equality — locale-aware collation is a library concern, not an
+operator.
 
-Signatures are always explicit — they're documentation. Inside
-bodies, inference does the work.
+## 1.10 Functions and closures
+
+Signatures are always explicit — they're documentation, and they're
+what inference works *between*. Inside bodies, inference does the
+work.
 
 ```glide
 fn get_note(db: sql.Db, req: http.Request) -> Result<http.Response, ApiError>
 ```
 
-Arguments can be named at the call site, and parameters can have
-defaults; both together replace Go's functional-options ceremony and
-most constructor overloads:
+**The last expression is the return value.** Function bodies are
+blocks; blocks produce their final expression's value; `return`
+exists only for early exits. Small functions read as what they
+compute — `fn double(n: Int) -> Int { n * 2 }` — and since `if` and
+`match` are expressions, most "compute then return" shapes collapse
+into a tail expression. (Lineage: Lisp and the ML family, via Rust
+and Ruby. The C lineage never had it, so it reads oddly for about a
+week.) With no semicolons, the declared return type is the check: no
+arrow means a meaningful tail value is an error — discard with
+`_ =` if you mean to drop it.
 
-```glide
-http.serve(addr: ":8080", handler: r)
-```
-
-Closures use pipes and infer their parameter types:
+**Closures** are anonymous functions, written with pipes:
 
 ```glide
 entries.sort_by(|a, b| b.1.cmp(a.1))
 r.get("/notes/{id}", |req| get_note(db, req))
+let tick = || count += 1     // zero parameters; block body for statements
 ```
 
-(`b.1` is tuple field access: `.0`, `.1`.) A closure and a named
-function have the same type — `fn(A) -> B` — so refactoring one into
-the other is cut and paste.
+Parameter types are inferred from context (annotations allowed,
+rarely needed). A closure and a named function have the same type —
+`fn(A) -> B`, one function type for named functions, closures, and
+method values alike — so promoting a grown closure to a named
+function is cut-and-paste, no signature surgery. There is no
+`$0`/`it` implicit parameter: naming the parameter is documentation.
 
-## 1.9 Methods and traits
+**Closures capture by reference, and they capture *bindings*, not
+names.** Two consequences:
 
-Methods live in `impl` blocks. A method that mutates its receiver
-must say `mut self` — and can then only be called through a `mut`
-binding:
+```glide
+let mut total = 0
+let add = |n| { total += n }
+add(40); add(2)                 // total is 42 — the capture is live
+
+let name = "first"
+let who = || name
+let name = "second"             // new binding, same spelling
+who()                           // "first" — the closure kept its binding
+```
+
+Mutation through a captured `mut` binding is shared and visible;
+redeclaring a name afterwards cannot retarget a closure that
+captured the old binding, because redeclaration creates a *new*
+binding (§1.3) and the closure holds the old one.
+
+**Loop variables are fresh bindings per iteration.** Closures created
+in a loop each capture that iteration's value — Go's most expensive
+capture bug (fixed there in 1.22 as a semantic break) is correct here
+from day one.
+
+**Named arguments and defaults.** Any argument can be named at the
+call site, and parameters can declare defaults:
+
+```glide
+http.serve(addr: ":8080", handler: r)
+fn connect(host: String, port: Int = 5432, tls: Bool = true) -> Conn
+connect(host: "db.local", tls: false)
+```
+
+Together these replace Go's functional-options pattern and most
+constructor overloads: optional configuration is just parameters
+with defaults, and call sites say what each value means.
+
+**Mutation is marked at free-function call sites.** A function that
+mutates a parameter declares it — `fn sort(mut xs: List<Int>)` — and
+the *call site* repeats the marker: `sort(mut xs)`. Skimming a
+function shows every place your data can change under you. This is
+Rust's `&mut x` without the reference machinery. Method receivers
+are the recorded exception (§1.11): `xs.push(3)` takes no marker,
+because method names carry intent and marking every receiver trains
+people to ignore markers.
+
+## 1.11 Methods, `impl`, and traits
+
+Methods live in `impl` blocks, separate from the type declaration:
 
 ```glide
 impl Tree<T> {
     pub fn new() -> Tree<T> { Tree{ root: None } }
-    pub fn insert(mut self, value: T) { ... }
+    pub fn insert(mut self, value: T) { … }
+    pub fn len(self) -> Int { … }
 }
-
-let mut t = Tree.new()      // mut required...
-t.insert(3)                  // ...because insert mutates
 ```
 
-Interfaces are **traits**, and conformance is declared — one line —
-while satisfaction is structural (existing methods count):
+`Tree.new()` — no `self` parameter — is an *associated function*,
+called on the type itself: the constructor idiom. Methods take
+`self`, and **receiver mutability is declared**: `fn len(self)` is
+read-only; `fn insert(mut self, …)` may mutate, and is callable only
+through a `mut` path:
+
+```glide
+let mut t = Tree.new()     // mut required…
+t.insert(3)                // …because insert declares mut self
+let u = Tree.new()
+u.insert(3)                // compile error: u is not mut
+```
+
+This closes the loophole that would otherwise make immutability a
+lie — without it, `let` would mean "can't reassign, but anyone can
+gut the object through a method". Mutability is transitive through
+paths: `a.b.c` is assignable only if `a` is `mut`.
+
+**Traits** are Glide's interfaces, with one deliberate difference
+from Go: conformance is *declared*, one line, rather than inferred
+from method sets:
 
 ```glide
 impl Iterable<T> for Tree<T> {
-    fn iter(self) -> Iterator<T> { ... }
+    fn iter(self) -> Iterator<T> { … }
 }
 ```
 
-Generics use angle brackets with trait bounds: `Tree<T: Ord>` reads
-"a Tree of any T that is orderable". If you know Go's newer generics
-or Rust's, nothing here will surprise you except the absence of
-ceremony.
+Go's structural typing is friendlier at small scale but produces
+accidental conformance at large scale — types satisfying interfaces
+nobody intended, discovered by grep. Explicit `impl` gives
+findability ("who implements Iterable?" is answerable) and precise
+diagnostics ("Tree is missing method iter of Iterable").
 
-## 1.10 Loops, iterators, generators
+**There is no inheritance.** No base classes, no `extends`, no
+virtual dispatch hierarchies. Composition holds the data (a struct
+containing a struct); traits describe the capabilities. Inheritance
+is the feature every ecosystem regrets by year five — fragile base
+classes, diamond problems, "is-a" taxonomies that stop fitting — and
+its legitimate uses are covered by the other two mechanisms.
+
+**Generics** use angle brackets with trait bounds, and bounds are
+spelled inline: `Tree<T: Ord>` reads "a Tree of any T that can be
+ordered". Monomorphized (each instantiation compiles to concrete
+code, like Rust and unlike Java's erasure), inferred at call sites
+(you write `max(a, b)`, never `max<Int>(a, b)` — there is no
+turbofish), and unconstrained parameters are bare `<T>`.
+
+## 1.12 Loops, iterators, generators
 
 There is one loop:
 
 ```glide
-for { ... }                       // forever
-for cond { ... }                  // while
-for x in xs { ... }               // over anything iterable
-for x in 0..10_000 { ... }        // over a range
+for { … }                       // forever
+for cond { … }                  // while
+for x in xs { … }               // over anything iterable
+for (k, v) in m { … }           // patterns work in the header
+for i in 0..10_000 { … }        // over a range
 ```
 
-Anything with an `iter()` method works in `for … in`. Iterators are
-lazy and compose: `entries.iter().take(20)`.
+**Iterators** are lazy sequences. `xs.iter()` doesn't walk the list —
+it produces a value that yields elements on demand, and adapters
+compose without materialising anything: `entries.iter().take(20)`
+does no work until the loop pulls, and stops pulling after twenty.
+Laziness is what makes infinite sequences ordinary values and
+pipelines cheap. Anything with an `iter()` method works in
+`for … in`; `.collect()` materialises an iterator back into a list
+when you actually need one.
 
-Writing your own iterator is where Glide gets a feature Go and Rust
-struggle with — **generators**. A function containing `yield` *is* an
-iterator; the compiler builds the state machine:
+**Generators** are how you *write* an iterator, and they're the
+feature Go and Rust both struggle with. The problem: to write an
+iterator by hand you must turn your traversal inside-out into a
+`next()` method — externalised state, explicit stack, resume logic.
+For a tree, that's real code, and it looks nothing like a traversal.
+
+In Glide, a function containing `yield` *is* an iterator:
 
 ```glide
 fn walk<T>(n: Node<T>) -> Iterator<T> {
@@ -541,31 +863,69 @@ fn walk<T>(n: Node<T>) -> Iterator<T> {
 }
 ```
 
-An in-order tree traversal, written as the traversal it is. Try
-hand-writing this as a `next()` method with an explicit stack — that's
-the code you're not writing.
+`yield` hands the next value to whoever is consuming and *pauses the
+function mid-flight*; the next pull resumes it exactly where it
+stopped, locals intact. `yield from` delegates to a sub-iterator
+(here: recursion). The compiler builds the state machine you didn't
+write. In-order tree traversal — the canonical "iterators are hard"
+example — reads as the three lines it conceptually is.
 
-## 1.11 Cleanup: `defer`
+Generators compose with everything above: they're lazy, so
+`walk(root).take(5)` visits five nodes and stops, and an infinite
+generator (`for { yield n; n += 1 }`) is a perfectly good value.
+
+## 1.13 Modules, imports, visibility
+
+**A directory is a module.** All `.gl` files in a directory share one
+namespace — no intra-module imports, no per-file declarations, no
+`mod.rs` tree. Go's model, kept.
+
+**Imports are by module name, used qualified:**
+
+```glide
+import http                          // stdlib: bare name
+import "github.com/x/y" as y         // external: URL, aliased
+```
+
+Importing executes nothing — no init functions, no registration
+magic, no what-runs-on-import. A module you import is inert until
+you call it. (Runtime state like database drivers is passed
+explicitly, created in `main` — nothing global materialises behind
+your back.)
+
+**`pub` is the visibility system, and it's two-level:** private to
+the module by default, `pub` visible outside. No `pub(crate)` zoo,
+no friend classes; wanting a third level usually means the module
+boundary is drawn wrong. Fields take `pub` individually, so a public
+type with private fields is the default encapsulation shape. And a
+visibility change is a one-line diff that says "this became public" —
+reviewable, unlike a capitalisation rename touching every use site.
+
+## 1.14 Cleanup: `defer`
 
 `defer` schedules a block to run when the enclosing scope exits —
-success, error, or panic:
+success, error, or panic — so acquisition and cleanup sit together:
 
 ```glide
 let db = sql.open("sqlite:notes.db")?
 defer { _ = db.close() }
 ```
 
-It is block-scoped (a defer in a loop body runs each iteration — the
-Go fd-exhaustion bug is not reproducible), takes a block rather than
-a call (no argument-evaluation puzzle), and discarding an error
-inside one is visible (`_ =`).
+Differences from Go's, each fixing a known trap: it is
+**block-scoped**, not function-scoped — a defer in a loop body runs
+each iteration, so the open-files-pile-up-until-the-function-ends
+bug is not reproducible. It takes a **block**, not a call, so
+there's no argument-evaluation-time puzzle. And discarding an error
+inside one is visible (`_ =`), not silent. Its sibling `errdefer`
+runs only when the scope exits *with an error* — the missing
+construct behind Go's awkward multi-step-initialisation cleanup.
 
-## 1.12 Concurrency in one paragraph
+## 1.15 Concurrency in one paragraph (for now)
 
-Glide is green-threaded like Go — no async, no await, no function
-coloring — but tasks are **structured**: they belong to a scope, and
-the scope's end waits for them; a failing child cancels its siblings;
-nothing leaks.
+Glide is green-threaded like Go — cheap tasks, no `async`/`await`,
+no function colouring — but tasks are **structured**: every task
+belongs to a scope, the scope's end waits for its tasks, and a
+failing child cancels its siblings. Nothing leaks.
 
 ```glide
 scope s {
@@ -575,13 +935,15 @@ scope s {
 ```
 
 If `serve` returns with an error, the sweeper is cancelled — no
-`context.Context` threading, no orphaned goroutine. Cancellation is
-ambient: blocking calls inside a cancelled scope (like the sweeper's
-`time.sleep`) simply stop waiting.
+`context.Context` threaded through every signature, no orphaned
+goroutine discovered in a heap dump. Cancellation is ambient:
+blocking calls inside a cancelled scope (the sweeper's
+`time.sleep(1.min)`) simply stop waiting and unwind. Channels and
+`select` exist for communication; they arrive in a later chapter.
 
-## 1.13 Tests live with the code
+## 1.16 Tests live with the code
 
-Tests are a language construct, in any source file:
+Tests are a language construct, legal in any source file:
 
 ```glide
 test "in-order traversal is sorted" (xs: List<Int>) {
@@ -591,24 +953,58 @@ test "in-order traversal is sorted" (xs: List<Int>) {
 }
 ```
 
-Two things to notice: `expect(a == b)` needs no assertion library —
-on failure the compiler-instrumented expression reports both sides.
-And this test takes a *parameter*: the runner generates hundreds of
-input lists, and on failure shrinks to the smallest one that breaks —
-property-based testing, built in. `bench "..." { }` blocks are
-benchmarks; the runner owns the timing loop.
+**`expect(…)` needs no assertion library.** The compiler instruments
+the expression: on failure you see both sides — `left: [2, 1]`,
+`right: [1, 2]` — not "assertion failed". The stdlib therefore ships
+no `assertEqual` zoo, and the ecosystem never grows one.
+
+**That test takes a parameter, which makes it a property test** —
+and if example-based testing is all you've used, this is the feature
+to sit with. You don't choose inputs; you state a *property* that
+should hold for all of them ("inserting anything, in any order,
+iterates back sorted"), and the runner generates hundreds of inputs
+trying to falsify it. When one succeeds, the runner doesn't hand you
+the 27-element monster it found first — it **shrinks**, re-running
+with structurally smaller variants until the failure is minimal:
+you're told the property, and the smallest input that breaks it
+(`xs = [0, 0, 0, 0, 0]` tells you "exactly five elements" *is* the
+bug). Properties catch the cases you'd never think to write —
+empties, duplicates, negatives, orderings — because nobody writes
+them; the generator finds them.
+
+`bench "…" { }` blocks are benchmarks; the runner owns the timing
+loop, so the measure-around-the-loop boilerplate doesn't exist.
 
 `glide test` runs it all — and also enforces formatting, unused-code
 hygiene, and doc-link validity. The compiler stays quiet while you
 edit; the test boundary is where the standards apply.
 
-## 1.14 Where the rest lives
+## 1.17 Odds and ends
 
-What this chapter skipped (because the examples did): channels and
-`select`, `errdefer`, comptime, labeled loops, the unsafe boundary,
-embedding. The design rationale for everything — including every
-deliberate rejection — is in `DESIGN.md`, which is unusually honest
-about costs and is the recommended second read.
+- **Duration and date literals are method calls**: `1.min`, `30.d`,
+  `500.ms` — stdlib-defined methods on numbers, no language magic, no
+  bare-int timeouts (`sleep(1.min)` cannot be confused with
+  `sleep(60)` of unknown unit).
+- **Integer overflow**: traps in dev builds, wraps in release.
+  Constant arithmetic is exact at compile time (`1 << 100` is fine in
+  a constant; `let x: u8 = 300` is a compile error).
+- **Const names are `snake_case`** like any binding — there is no
+  SCREAMING_CASE convention; an earlier evaluation time is not a
+  siren.
+- **Flags are not enums**: "one of" is a sum type; "set of" is a
+  `Set<Color>` (or `BitSet` where performance demands). An enum
+  that's secretly a bitfield is the int costume again.
+
+## 1.18 Where the rest lives
+
+Skipped here and covered later: channels and `select`, `supervise`
+scopes, comptime, labeled loops, the unsafe boundary, embedding. The
+design rationale for everything above — including every deliberate
+rejection and its cost — is in `DESIGN.md`, which is unusually honest
+and is the recommended second read. (Implementation status, if you're
+following along with the interpreter: `glide/DESIGN-DECISIONS.md`
+tracks what runs today versus what's designed-but-pending — `defer`,
+concurrency, named arguments, and `or |e|` are in the latter set.)
 
 The shortest useful summary of Glide for a Go programmer might be:
 *your runtime, your tooling philosophy, your deployment story — the
