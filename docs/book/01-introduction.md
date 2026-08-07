@@ -151,7 +151,16 @@ fn main() -> Result<(), Error> {
 `Result<String, Error>`: a value that is *either* a success carrying
 a `String` *or* a failure carrying an `Error`. (`Result` is not a
 keyword and not magic — it's an ordinary two-variant type that
-happens to be built in, so the whole ecosystem agrees on one.)
+happens to be built in, so the whole ecosystem agrees on one.
+"Variant" gets its proper treatment in §1.6; for now: one value,
+exactly one of two shapes, and it remembers which.)
+
+If you come from Go, this is the `(string, error)` return pair fused
+into one value that cannot hold both. Go hands you both slots and
+trusts you to check `err` before touching the string — nothing stops
+the code that forgets. A `Result` is the either-or made physical:
+there is no string to touch until you've gone through the check. `?`
+is that check.
 
 The `?` at the end of the line unwraps it. Success: the expression
 produces the inner `String`, and `text` is a plain `String` from then
@@ -164,6 +173,15 @@ happens, but it no longer dominates the page.
 ("reading input: no such file") and passes successes through
 untouched.
 
+The whole line, in the Go it replaces:
+
+```go
+text, err := os.ReadFile(path)
+if err != nil {
+    return fmt.Errorf("reading input: %w", err)
+}
+```
+
 Because `?` can now return an error out of `main`, `main` must
 declare that: `-> Result<(), Error>` reads "either succeeds with
 nothing, or fails with an `Error`". The `()` is the **unit type** —
@@ -173,7 +191,8 @@ Which explains the odd-looking last line. `Ok(...)` constructs the
 success variant of a `Result`; what this one carries is `()`, the
 unit *value*. Outer parens: a call. Inner parens: the nothing being
 handed back. If `main` returned `Result<Int, Error>`, the line would
-be `Ok(42)`, and the symmetry is obvious.
+be `Ok(42)`, and the symmetry is obvious. `Ok`'s twin is `Err(...)`,
+which constructs the failure — you'll build one yourself in §1.5.
 
 Both signatures of `main` are legal — step 1's plain `fn main()`, or
 this one. And returned to whom? `main`'s caller is the runtime: it
@@ -219,8 +238,11 @@ for (word, n) in entries.iter().take(20) {
 - `counts.entries()` returns a list of *tuples* — `(String, Int)`
   pairs. Tuple fields are positional: `.0`, `.1`.
 - `|a, b| b.1.cmp(a.1)` is a closure: parameters between pipes,
-  types inferred from context. Comparing `b` to `a` — rather than
-  `a` to `b` — is what makes the sort descending.
+  types inferred from context. `cmp` is a three-way comparison —
+  negative, zero, or positive, like Go's `strings.Compare` — and
+  `sort_by` wants exactly that, not Go's boolean `less`. Comparing
+  `b` to `a` — rather than `a` to `b` — is what makes the sort
+  descending.
 - `.iter().take(20)` — iterators are lazy and compose; take the
   first twenty, stop.
 - `{n:6}` is interpolation with a width: right-aligned in six
@@ -981,6 +1003,12 @@ edit; the test boundary is where the standards apply.
 
 ## 1.17 Odds and ends
 
+- **Printing is four builtins**: `print`/`println` to stdout,
+  `eprint`/`eprintln` to stderr — `e` marks the stream, `ln` appends
+  the newline; that's the whole family, since formatting lives in
+  interpolation. All four are unbuffered: a `print("continue? ")`
+  prompt shows before the read, and a debug print lands even if the
+  program dies on the next line. There is no `flush()`.
 - **Duration and date literals are method calls**: `1.min`, `30.d`,
   `500.ms` — stdlib-defined methods on numbers, no language magic, no
   bare-int timeouts (`sleep(1.min)` cannot be confused with
