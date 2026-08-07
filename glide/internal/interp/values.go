@@ -30,8 +30,23 @@ type (
 		m    map[Value]Value
 	}
 
-	SomeV struct{ V Value }
+	// Option is UNBOXED in the interpreter: a T? is "the value, or
+	// NoneV". Implicit T -> T? coercion falls out for free; the cost
+	// is that Option<Option<T>> is unrepresentable here (a checker-
+	// era concern, recorded in DESIGN-DECISIONS.md).
 	NoneV struct{}
+
+	StructV struct {
+		Type   string
+		Order  []string // field order for display
+		Fields map[string]Value
+	}
+	VariantV struct {
+		Type string
+		Name string
+		Args []Value
+	}
+	TypeV string // a type name as a value: Tree.new()
 
 	ResultV struct {
 		Ok bool
@@ -82,7 +97,7 @@ func (m *MapV) set(k, v Value) {
 }
 
 func typeName(v Value) string {
-	switch v.(type) {
+	switch x := v.(type) {
 	case IntV:
 		return "Int"
 	case FloatV:
@@ -99,8 +114,14 @@ func typeName(v Value) string {
 		return "List"
 	case *MapV:
 		return "Map"
-	case SomeV, NoneV:
+	case NoneV:
 		return "Option"
+	case *StructV:
+		return x.Type
+	case *VariantV:
+		return x.Type
+	case TypeV:
+		return "type"
 	case *ResultV:
 		return "Result"
 	case *ErrV:
@@ -157,10 +178,25 @@ func render(v Value, quoted bool) string {
 			parts[i] = render(k, true) + ": " + render(x.m[k], true)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
-	case SomeV:
-		return "Some(" + render(x.V, true) + ")"
 	case NoneV:
 		return "None"
+	case *StructV:
+		parts := make([]string, len(x.Order))
+		for i, f := range x.Order {
+			parts[i] = f + ": " + render(x.Fields[f], true)
+		}
+		return x.Type + "{ " + strings.Join(parts, ", ") + " }"
+	case *VariantV:
+		if len(x.Args) == 0 {
+			return x.Name
+		}
+		parts := make([]string, len(x.Args))
+		for i, a := range x.Args {
+			parts[i] = render(a, true)
+		}
+		return x.Name + "(" + strings.Join(parts, ", ") + ")"
+	case TypeV:
+		return "<type " + string(x) + ">"
 	case *ResultV:
 		if x.Ok {
 			return "Ok(" + render(x.V, true) + ")"
@@ -181,6 +217,60 @@ func render(v Value, quoted bool) string {
 		return fmt.Sprintf("%d..%d", x.Lo, x.Hi)
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// eq is deep structural equality; functions and iterators are not
+// comparable (runtime error at the call site's line).
+func eq(a, b Value, line int) bool {
+	switch x := a.(type) {
+	case IntV, FloatV, StrV, BoolV, UnitV, NoneV:
+		return a == b
+	case TupleV:
+		y, ok := b.(TupleV)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !eq(x[i], y[i], line) {
+				return false
+			}
+		}
+		return true
+	case *ListV:
+		y, ok := b.(*ListV)
+		if !ok || len(x.Elems) != len(y.Elems) {
+			return false
+		}
+		for i := range x.Elems {
+			if !eq(x.Elems[i], y.Elems[i], line) {
+				return false
+			}
+		}
+		return true
+	case *VariantV:
+		y, ok := b.(*VariantV)
+		if !ok || x.Type != y.Type || x.Name != y.Name || len(x.Args) != len(y.Args) {
+			return false
+		}
+		for i := range x.Args {
+			if !eq(x.Args[i], y.Args[i], line) {
+				return false
+			}
+		}
+		return true
+	case *StructV:
+		y, ok := b.(*StructV)
+		if !ok || x.Type != y.Type {
+			return false
+		}
+		for f, v := range x.Fields {
+			if !eq(v, y.Fields[f], line) {
+				return false
+			}
+		}
+		return true
+	}
+	panic(rtErr{line, fmt.Sprintf("%s values are not comparable with ==", typeName(a))})
 }
 
 // Environments

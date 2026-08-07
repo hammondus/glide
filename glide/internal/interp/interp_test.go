@@ -262,3 +262,155 @@ fn main() {
 		t.Fatalf("out = %q", out)
 	}
 }
+
+// --- M2 ---
+
+func TestTreeProgramProperty(t *testing.T) {
+	src, err := os.ReadFile("../../examples/tree.gl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parser.ParseFile(string(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if failed := RunTests(f, &out); failed != 0 {
+		t.Fatalf("tree.gl tests failed:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "100 cases") {
+		t.Fatalf("expected property cases, got:\n%s", out.String())
+	}
+}
+
+func TestMatchGuardsAndVariants(t *testing.T) {
+	out, err := runProg(t, `
+type Shape = Circle(Int) | Square(Int) | Dot
+
+fn area(s: Shape) -> Int {
+    match s {
+        Circle(r) if r > 10 => 999
+        Circle(r) => r * 3
+        Square(w) => w * w
+        Dot => 0
+    }
+}
+fn main() {
+    println("{area(Circle(4))} {area(Circle(11))} {area(Square(5))} {area(Dot)}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "12 999 25 0\n" {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestStructUpdateIsACopy(t *testing.T) {
+	out, err := runProg(t, `
+type P = struct {
+    x: Int
+    y: Int
+}
+fn main() {
+    let a = P{ x: 1, y: 2 }
+    let b = P{ x: 10, ..a }
+    println("{a.x} {b.x} {b.y}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "1 10 2\n" {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestMandatoryInit(t *testing.T) {
+	_, err := runProg(t, "type P = struct {\n x: Int\n y: Int\n}\nfn main() {\n let p = P{ x: 1 }\n println(\"{p.x}\")\n}")
+	if err == nil || !strings.Contains(err.Error(), "missing field") {
+		t.Fatalf("want missing-field error, got %v", err)
+	}
+}
+
+func TestMutSelfNeedsMutPath(t *testing.T) {
+	src := `
+type Counter = struct {
+    n: Int
+}
+impl Counter {
+    fn new() -> Counter { Counter{ n: 0 } }
+    fn bump(mut self) { self.n += 1 }
+}
+fn main() {
+    let c = Counter.new()
+    c.bump()
+}`
+	_, err := runProg(t, src)
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("mut self through let binding should fail, got %v", err)
+	}
+	out, err := runProg(t, strings.Replace(src, "let c", "let mut c", 1)+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = out
+}
+
+func TestGeneratorIsLazy(t *testing.T) {
+	// An infinite generator only computes what take() demands.
+	out, err := runProg(t, `
+fn naturals() -> Iterator<Int> {
+    let mut n = 0
+    for {
+        yield n
+        n += 1
+    }
+}
+fn main() {
+    for x in naturals().take(5) {
+        println(x)
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "0\n1\n2\n3\n4\n" {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestIfLetElse(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let m: Map<String, Int> = [:]
+    let k = "missing"
+    if let v = m[k] {
+        println("{v}")
+    } else {
+        println("absent")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "absent\n" {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+func TestShrinkFindsMinimalCase(t *testing.T) {
+	f, err := parser.ParseFile(`
+test "short lists" (xs: List<Int>) {
+    expect(xs.len() <= 4)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if failed := RunTests(f, &out); failed != 1 {
+		t.Fatalf("want 1 failure, got %d:\n%s", failed, out.String())
+	}
+	if !strings.Contains(out.String(), "[0, 0, 0, 0, 0]") {
+		t.Fatalf("want minimal counterexample [0, 0, 0, 0, 0], got:\n%s", out.String())
+	}
+}

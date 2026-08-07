@@ -8,11 +8,15 @@ deliberately cut because the real compiler makes them obsolete.
 
 1. **M1 (done): run `wordfreq`** (GRAMMAR.md program 1) — the whole
    expression language, zero user-defined types.
-2. **M2: run program 3 (Tree)** — `type`, sum types, `match`, `impl`,
-   traits, generators. Generators early: DESIGN.md names them a
-   top-three semantic risk.
-3. **M3: run program 2 (HTTP + SQL)** — host shims + structured
-   concurrency.
+2. **M2 (done): run program 3 (Tree)** — `type` (structs + simple
+   sum types), `match` with guards, `impl` (inherent + trait),
+   `mut self` with call-path checks, `if let`, generators
+   (`yield` / `yield from`), `test` blocks with property-based
+   generation and shrinking, `expect` with both-sides reporting.
+3. **M3: run program 2 (HTTP + SQL)** — named-field variants,
+   dot-shorthand (`.NotFound(id)`), `distinct` types, named
+   arguments, `defer`, structured concurrency, http/sql/json host
+   shims, `derive` doing real work.
 
 ## Decisions
 
@@ -52,13 +56,38 @@ deliberately cut because the real compiler makes them obsolete.
   same-scope redeclare from retargeting the closure. The first
   implementation shared the live env map (call-time name lookup) and
   got redeclare-straddling closures wrong.
+- **Option is unboxed**: a `T?` is "the value, or None". The sketch
+  assigns a `Node` straight to a `Node?` field, so the language has
+  implicit `T -> T?` coercion; without static types the interpreter
+  can't see the wrap points, and unboxing makes coercion a no-op.
+  `Some` is the identity function; `Some(p)` patterns match any
+  non-None value. Cost: `Option<Option<T>>` is unrepresentable in
+  this tier — the checker era must box.
+- **Generators run on a goroutine + channel.** Cheapest correct lazy
+  implementation for a tree-walker: `yield` sends, `Next` receives;
+  body panics are forwarded to the consumer; an abandoned iterator's
+  producer is unblocked by a GC cleanup hook closing a stop channel.
+  This proves generator *semantics* only — the transpiler needs CPS
+  or a state machine, and DESIGN.md records that lowering as the
+  thing to prototype early. `yield from` recursion costs a goroutine
+  per delegation level; fine here, irrelevant to the compiled tier.
+- **Property tests**: fixed seed (reproducible), 100 cases, case 0
+  is always the type's simplest value (empty list, 0, "") because
+  empty-case bugs dominate. Shrinking is greedy: structurally
+  smaller first (shorter lists), then simpler values (ints toward
+  0), rerunning the test body each step.
+- **Test/bench are contextual keywords**: `test` only starts a
+  declaration at top level when followed by a string, so `let test =`
+  stays legal. Benches parse and are skipped (`glide bench` later).
 - **Known lexer limitation**: nested tuple access `x.0.1` lexes
   `0.1` as a float. Rust special-cases this; we will when it matters.
   Same bucket: string literals inside interpolation are unsupported.
 
-## Deliberately absent (M1)
+## Deliberately absent (after M2)
 
-`match`, user types, traits/impl, generics, generators, concurrency,
+Named-field variants and dot-shorthand, `distinct` types, static
+generics (parsed, ignored), trait *checking* (impl blocks register
+methods; conformance is asserted, not verified), concurrency,
 `defer`/`errdefer`, `or |e|` blocks, named arguments, parameter
-defaults, `break`/`continue`, floats beyond literals/arithmetic,
-method values as closures (`x.method` unapplied), struct literals.
+defaults, `break`/`continue`, method values as closures (`x.method`
+unapplied), `else if let`, struct patterns in `match`.

@@ -895,6 +895,11 @@ Go's model, with its defects designed out:
 - **Interpolation escape: `\{` for a literal brace**, joining the
   existing backslash family (`\n`, `\"`) — not Rust's `{{` doubling,
   which is a second escaping mechanism for one character.
+- **Struct literals are banned in control-flow headers** (`if`, `for`,
+  `match` scrutinees) — `if c == Red {` must give the brace to the
+  body, and variants are capitalised too, so case can't disambiguate.
+  Rust's rule, hit for Rust's reason; parenthesise to force a literal.
+  (Forced by the interpreter; ratified.)
 - Source files: `.gl`.
 - Expression-oriented: `if`, `match`, blocks return values.
 - **A function body is a block; its tail expression is the return

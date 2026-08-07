@@ -14,6 +14,10 @@ import (
 type parser struct {
 	toks []lexer.Token
 	pos  int
+	// noStruct disables struct literals while parsing control-flow
+	// headers (`if c == Red {` must not read `Red {` as a literal —
+	// Rust's rule). Parens and argument lists re-enable them.
+	noStruct bool
 }
 
 func ParseFile(src string) (*ast.File, error) {
@@ -45,6 +49,34 @@ func parseExprSrc(src string, line int) (ast.Expr, error) {
 
 func (p *parser) cur() lexer.Token  { return p.toks[p.pos] }
 func (p *parser) next() lexer.Token { t := p.toks[p.pos]; p.pos++; return t }
+
+func (p *parser) peek() lexer.Token {
+	if p.pos+1 < len(p.toks) {
+		return p.toks[p.pos+1]
+	}
+	return p.toks[len(p.toks)-1]
+}
+
+// headerExpr parses an expression with struct literals disabled.
+func (p *parser) headerExpr() (ast.Expr, error) {
+	saved := p.noStruct
+	p.noStruct = true
+	e, err := p.parseExpr()
+	p.noStruct = saved
+	return e, err
+}
+
+// structsOK runs fn with struct literals re-enabled (inside parens,
+// argument lists, literal fields — anywhere braces are unambiguous).
+func structsOK[T any](p *parser, fn func() (T, error)) (T, error) {
+	saved := p.noStruct
+	p.noStruct = false
+	v, err := fn()
+	p.noStruct = saved
+	return v, err
+}
+
+func isCapitalized(s string) bool { return s != "" && s[0] >= 'A' && s[0] <= 'Z' }
 
 func (p *parser) accept(k lexer.Kind) bool {
 	if p.cur().Kind == k {
@@ -79,6 +111,7 @@ func (p *parser) parseFile() (*ast.File, error) {
 	f := &ast.File{}
 	for {
 		p.skipSemis()
+		p.accept(lexer.KwPub) // visibility is the checker's business; parsed, ignored
 		switch p.cur().Kind {
 		case lexer.EOF:
 			return f, nil
@@ -95,10 +128,256 @@ func (p *parser) parseFile() (*ast.File, error) {
 				return nil, err
 			}
 			f.Funcs = append(f.Funcs, fn)
+		case lexer.KwType:
+			td, err := p.parseTypeDecl()
+			if err != nil {
+				return nil, err
+			}
+			f.Types = append(f.Types, td)
+		case lexer.KwImpl:
+			im, err := p.parseImpl()
+			if err != nil {
+				return nil, err
+			}
+			f.Impls = append(f.Impls, im)
+		case lexer.Ident:
+			// test/bench are contextual: keywords only at top level
+			// followed by a string, so `let test = …` stays legal.
+			if p.cur().Text == "test" && p.peek().Kind == lexer.String {
+				td, err := p.parseTest()
+				if err != nil {
+					return nil, err
+				}
+				f.Tests = append(f.Tests, td)
+				continue
+			}
+			if p.cur().Text == "bench" && p.peek().Kind == lexer.String {
+				bd, err := p.parseBench()
+				if err != nil {
+					return nil, err
+				}
+				f.Benches = append(f.Benches, bd)
+				continue
+			}
+			return nil, p.errf("expected a declaration at top level, found %q", p.cur().Text)
 		default:
-			return nil, p.errf("expected 'import' or 'fn' at top level, found %s", p.cur().Kind)
+			return nil, p.errf("expected a declaration at top level, found %s", p.cur().Kind)
 		}
 	}
+}
+
+// skipGenerics consumes `<...>` type-parameter lists (parsed for
+// shape, ignored: the interpreter is dynamically checked).
+func (p *parser) skipGenerics() error {
+	if p.cur().Kind != lexer.Lt {
+		return nil
+	}
+	depth := 0
+	for {
+		switch p.cur().Kind {
+		case lexer.Lt:
+			depth++
+		case lexer.Gt:
+			depth--
+			if depth == 0 {
+				p.next()
+				return nil
+			}
+		case lexer.EOF, lexer.LBrace, lexer.Semi:
+			return p.errf("unclosed type parameter list")
+		}
+		p.next()
+	}
+}
+
+func (p *parser) parseTypeDecl() (*ast.TypeDecl, error) {
+	line := p.next().Line // type
+	name, err := p.expect(lexer.Ident, "type declaration")
+	if err != nil {
+		return nil, err
+	}
+	if !isCapitalized(name.Text) {
+		return nil, p.errf("type names are capitalised: %q", name.Text)
+	}
+	if err := p.skipGenerics(); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Assign, "type declaration"); err != nil {
+		return nil, err
+	}
+	td := &ast.TypeDecl{Name: name.Text, Line: line}
+	if p.cur().Kind == lexer.KwStruct {
+		p.next()
+		if _, err := p.expect(lexer.LBrace, "struct declaration"); err != nil {
+			return nil, err
+		}
+		for {
+			p.skipSemis()
+			if p.accept(lexer.RBrace) {
+				break
+			}
+			pub := p.accept(lexer.KwPub)
+			fn, err := p.expect(lexer.Ident, "struct field")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon, "struct field"); err != nil {
+				return nil, err
+			}
+			ft, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			td.Fields = append(td.Fields, ast.FieldDecl{Name: fn.Text, Type: ft, Pub: pub})
+			if !p.accept(lexer.Comma) {
+				p.skipSemis()
+			}
+		}
+		// derive(...) trails the declaration; meaningless until the
+		// compile-time half exists, so parse and drop.
+		if p.cur().Kind == lexer.Ident && p.cur().Text == "derive" {
+			p.next()
+			if _, err := p.expect(lexer.LParen, "derive"); err != nil {
+				return nil, err
+			}
+			for p.cur().Kind != lexer.RParen {
+				p.next()
+			}
+			p.next()
+		}
+		return td, nil
+	}
+	if p.cur().Kind == lexer.Ident && p.cur().Text == "distinct" {
+		return nil, p.errf("distinct types are not implemented yet (M3)")
+	}
+	// Sum type: Variant [ (T, T) ] | Variant | …
+	for {
+		vn, err := p.expect(lexer.Ident, "sum type variant")
+		if err != nil {
+			return nil, err
+		}
+		if !isCapitalized(vn.Text) {
+			return nil, p.errf("variant names are capitalised: %q", vn.Text)
+		}
+		v := ast.VariantDecl{Name: vn.Text}
+		if p.accept(lexer.LParen) {
+			for p.cur().Kind != lexer.RParen {
+				if _, err := p.parseType(); err != nil {
+					return nil, err
+				}
+				v.Arity++
+				if !p.accept(lexer.Comma) {
+					break
+				}
+			}
+			if _, err := p.expect(lexer.RParen, "variant payload"); err != nil {
+				return nil, err
+			}
+		}
+		td.Variants = append(td.Variants, v)
+		p.skipSemis() // `|` may start the next line
+		if !p.accept(lexer.Pipe) {
+			return td, nil
+		}
+		p.skipSemis()
+	}
+}
+
+func (p *parser) parseImpl() (*ast.ImplBlock, error) {
+	line := p.next().Line // impl
+	first, err := p.expect(lexer.Ident, "impl")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.skipGenerics(); err != nil {
+		return nil, err
+	}
+	im := &ast.ImplBlock{Target: first.Text, Line: line}
+	if p.accept(lexer.KwFor) {
+		im.Trait = first.Text
+		target, err := p.expect(lexer.Ident, "impl … for")
+		if err != nil {
+			return nil, err
+		}
+		if err := p.skipGenerics(); err != nil {
+			return nil, err
+		}
+		im.Target = target.Text
+	}
+	if _, err := p.expect(lexer.LBrace, "impl block"); err != nil {
+		return nil, err
+	}
+	for {
+		p.skipSemis()
+		if p.accept(lexer.RBrace) {
+			return im, nil
+		}
+		p.accept(lexer.KwPub)
+		if p.cur().Kind != lexer.KwFn {
+			return nil, p.errf("impl blocks hold fn declarations, found %s", p.cur().Kind)
+		}
+		fn, err := p.parseFn()
+		if err != nil {
+			return nil, err
+		}
+		im.Fns = append(im.Fns, fn)
+	}
+}
+
+func (p *parser) parseTest() (*ast.TestDecl, error) {
+	line := p.next().Line // "test" ident
+	name := p.next()      // string; caller checked
+	td := &ast.TestDecl{Name: strLitText(name), Line: line}
+	if p.accept(lexer.LParen) {
+		for p.cur().Kind != lexer.RParen {
+			pn, err := p.expect(lexer.Ident, "test parameters")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon, "test parameters"); err != nil {
+				return nil, err
+			}
+			pt, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			td.Params = append(td.Params, ast.Param{Name: pn.Text, Type: pt})
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+		if _, err := p.expect(lexer.RParen, "test parameters"); err != nil {
+			return nil, err
+		}
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	td.Body = body
+	return td, nil
+}
+
+func (p *parser) parseBench() (*ast.BenchDecl, error) {
+	line := p.next().Line // "bench" ident
+	name := p.next()
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.BenchDecl{Name: strLitText(name), Body: body, Line: line}, nil
+}
+
+// strLitText flattens a string token that names a test/bench —
+// interpolation makes no sense there, so literal parts only.
+func strLitText(t lexer.Token) string {
+	var sb strings.Builder
+	for _, part := range t.Parts {
+		if !part.IsExpr {
+			sb.WriteString(part.S)
+		}
+	}
+	return sb.String()
 }
 
 func (p *parser) parseFn() (*ast.FuncDecl, error) {
@@ -108,8 +387,22 @@ func (p *parser) parseFn() (*ast.FuncDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := p.skipGenerics(); err != nil {
+		return nil, err
+	}
 	if _, err := p.expect(lexer.LParen, "function declaration"); err != nil {
 		return nil, err
+	}
+	selfMode := ast.NoSelf
+	if p.cur().Kind == lexer.KwMut && p.peek().Kind == lexer.Ident && p.peek().Text == "self" {
+		p.next()
+		p.next()
+		selfMode = ast.MutSelf
+		p.accept(lexer.Comma)
+	} else if p.cur().Kind == lexer.Ident && p.cur().Text == "self" {
+		p.next()
+		selfMode = ast.Self
+		p.accept(lexer.Comma)
 	}
 	var params []ast.Param
 	for p.cur().Kind != lexer.RParen {
@@ -143,12 +436,23 @@ func (p *parser) parseFn() (*ast.FuncDecl, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FuncDecl{Name: name.Text, Params: params, RetType: ret, Body: body, Line: line}, nil
+	return &ast.FuncDecl{Name: name.Text, Self: selfMode, Params: params, RetType: ret, Body: body, Line: line}, nil
 }
 
 // Types are kept as display strings for now (dynamically checked
 // interpreter; annotations are documentation until the checker).
 func (p *parser) parseType() (string, error) {
+	t, err := p.parseTypeCore()
+	if err != nil {
+		return "", err
+	}
+	if p.accept(lexer.Question) {
+		return t + "?", nil
+	}
+	return t, nil
+}
+
+func (p *parser) parseTypeCore() (string, error) {
 	switch p.cur().Kind {
 	case lexer.Ident:
 		name := p.next().Text
@@ -236,6 +540,20 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		return &ast.ReturnStmt{E: e, Line: line}, nil
 	case lexer.KwImport:
 		return nil, p.errf("imports are only allowed at the top of the file")
+	case lexer.KwYield:
+		line := p.next().Line
+		from := false
+		if p.cur().Kind == lexer.Ident && p.cur().Text == "from" {
+			// Contextual: `yield from expr` delegates. A variable
+			// literally named "from" cannot be yielded bare.
+			p.next()
+			from = true
+		}
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.YieldStmt{E: e, From: from, Line: line}, nil
 	}
 	line := p.cur().Line
 	e, err := p.parseExpr()
@@ -266,8 +584,10 @@ func validAssignTarget(e ast.Expr, op string) error {
 		return nil
 	case *ast.Index:
 		return nil
+	case *ast.Field:
+		return nil
 	}
-	return fmt.Errorf("invalid assignment target: assign to a name or an index")
+	return fmt.Errorf("invalid assignment target: assign to a name, a field, or an index")
 }
 
 func (p *parser) parseLet() (ast.Stmt, error) {
@@ -313,7 +633,7 @@ func (p *parser) parseFor() (ast.Stmt, error) {
 	save := p.pos
 	if pat, err := p.parsePattern(); err == nil && p.cur().Kind == lexer.KwIn {
 		p.next() // in
-		iter, err := p.parseExpr()
+		iter, err := p.headerExpr()
 		if err != nil {
 			return nil, err
 		}
@@ -324,7 +644,7 @@ func (p *parser) parseFor() (ast.Stmt, error) {
 		return &ast.ForStmt{Pat: pat, Iter: iter, Body: body, Line: line}, nil
 	}
 	p.pos = save
-	cond, err := p.parseExpr()
+	cond, err := p.headerExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -348,11 +668,34 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 		if t.Text == "_" {
 			return nil, p.errf("mut _ makes no sense")
 		}
+		if isCapitalized(t.Text) {
+			return nil, p.errf("%q is a constructor (capitalised names match; lowercase names bind)", t.Text)
+		}
 		return &ast.IdentPat{Name: t.Text, Mut: true}, nil
 	case lexer.Ident:
 		t := p.next()
 		if t.Text == "_" {
 			return &ast.WildPat{}, nil
+		}
+		// Case is load-bearing: Circle(r) matches, point binds.
+		if isCapitalized(t.Text) {
+			cp := &ast.CtorPat{Name: t.Text}
+			if p.accept(lexer.LParen) {
+				for p.cur().Kind != lexer.RParen {
+					arg, err := p.parsePattern()
+					if err != nil {
+						return nil, err
+					}
+					cp.Args = append(cp.Args, arg)
+					if !p.accept(lexer.Comma) {
+						break
+					}
+				}
+				if _, err := p.expect(lexer.RParen, "constructor pattern"); err != nil {
+					return nil, err
+				}
+			}
+			return cp, nil
 		}
 		return &ast.IdentPat{Name: t.Text}, nil
 	case lexer.LParen:
@@ -482,16 +825,22 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 		switch p.cur().Kind {
 		case lexer.LParen:
 			line := p.next().Line
-			var args []ast.Expr
-			for p.cur().Kind != lexer.RParen {
-				a, err := p.parseExpr()
-				if err != nil {
-					return nil, err
+			args, err := structsOK(p, func() ([]ast.Expr, error) {
+				var args []ast.Expr
+				for p.cur().Kind != lexer.RParen {
+					a, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					args = append(args, a)
+					if !p.accept(lexer.Comma) {
+						break
+					}
 				}
-				args = append(args, a)
-				if !p.accept(lexer.Comma) {
-					break
-				}
+				return args, nil
+			})
+			if err != nil {
+				return nil, err
 			}
 			if _, err := p.expect(lexer.RParen, "call"); err != nil {
 				return nil, err
@@ -499,7 +848,7 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 			e = &ast.Call{Fn: e, Args: args, Line: line}
 		case lexer.LBrack:
 			line := p.next().Line
-			idx, err := p.parseExpr()
+			idx, err := structsOK(p, p.parseExpr)
 			if err != nil {
 				return nil, err
 			}
@@ -558,9 +907,16 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		return lit, nil
 	case lexer.Ident:
 		p.next()
+		// Capitalised name + `{` = struct literal, except in control
+		// headers where the brace belongs to the body.
+		if isCapitalized(t.Text) && p.cur().Kind == lexer.LBrace && !p.noStruct {
+			return p.parseStructLit(t)
+		}
 		return &ast.IdentExpr{Name: t.Text, Line: t.Line}, nil
 	case lexer.KwIf:
 		return p.parseIf()
+	case lexer.KwMatch:
+		return p.parseMatch()
 	case lexer.Pipe, lexer.OrOr:
 		return p.parseClosure()
 	case lexer.LParen:
@@ -568,7 +924,7 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		if p.accept(lexer.RParen) {
 			return &ast.UnitLit{}, nil
 		}
-		first, err := p.parseExpr()
+		first, err := structsOK(p, p.parseExpr)
 		if err != nil {
 			return nil, err
 		}
@@ -701,7 +1057,10 @@ func (p *parser) parseClosure() (ast.Expr, error) {
 
 func (p *parser) parseIf() (ast.Expr, error) {
 	line := p.next().Line // if
-	cond, err := p.parseExpr()
+	if p.accept(lexer.KwLet) {
+		return p.parseIfLet(line)
+	}
+	cond, err := p.headerExpr()
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +1075,11 @@ func (p *parser) parseIf() (ast.Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			node.ElseIf = ei.(*ast.If)
+			chained, ok := ei.(*ast.If)
+			if !ok {
+				return nil, p.errf("`else if let` is not supported yet; nest the if-let in an else block")
+			}
+			node.ElseIf = chained
 		} else {
 			eb, err := p.parseBlock()
 			if err != nil {
@@ -726,4 +1089,119 @@ func (p *parser) parseIf() (ast.Expr, error) {
 		}
 	}
 	return node, nil
+}
+
+// parseIfLet: `if let <pattern> = <expr> { … } [else { … }]` —
+// checks the Option and unwraps in one move.
+func (p *parser) parseIfLet(line int) (ast.Expr, error) {
+	pat, err := p.parsePattern()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.Assign, "if let"); err != nil {
+		return nil, err
+	}
+	x, err := p.headerExpr()
+	if err != nil {
+		return nil, err
+	}
+	then, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	node := &ast.IfLet{Pat: pat, X: x, Then: then, Line: line}
+	if p.accept(lexer.KwElse) {
+		eb, err := p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+		node.ElseBlock = eb
+	}
+	return node, nil
+}
+
+// parseStructLit: name token consumed, cur is `{`.
+func (p *parser) parseStructLit(name lexer.Token) (ast.Expr, error) {
+	p.next() // {
+	lit := &ast.StructLit{Type: name.Text, Line: name.Line}
+	return structsOK(p, func() (ast.Expr, error) {
+		for {
+			p.skipSemis()
+			if p.accept(lexer.RBrace) {
+				return lit, nil
+			}
+			if p.accept(lexer.DotDot) {
+				base, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				lit.Base = base
+				p.skipSemis()
+				if _, err := p.expect(lexer.RBrace, "struct literal (`..base` comes last)"); err != nil {
+					return nil, err
+				}
+				return lit, nil
+			}
+			fn, err := p.expect(lexer.Ident, "struct literal field")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon, "struct literal field"); err != nil {
+				return nil, err
+			}
+			v, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			lit.Names = append(lit.Names, fn.Text)
+			lit.Vals = append(lit.Vals, v)
+			if !p.accept(lexer.Comma) {
+				p.skipSemis()
+			}
+		}
+	})
+}
+
+func (p *parser) parseMatch() (ast.Expr, error) {
+	line := p.next().Line // match
+	x, err := p.headerExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LBrace, "match"); err != nil {
+		return nil, err
+	}
+	m := &ast.Match{X: x, Line: line}
+	return structsOK(p, func() (ast.Expr, error) {
+		for {
+			p.skipSemis()
+			if p.accept(lexer.RBrace) {
+				if len(m.Arms) == 0 {
+					return nil, p.errf("match needs at least one arm")
+				}
+				return m, nil
+			}
+			armLine := p.cur().Line
+			pat, err := p.parsePattern()
+			if err != nil {
+				return nil, err
+			}
+			var guard ast.Expr
+			if p.accept(lexer.KwIf) {
+				guard, err = p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+			}
+			if _, err := p.expect(lexer.FatArrow, "match arm"); err != nil {
+				return nil, err
+			}
+			p.skipSemis() // body may start on the next line
+			body, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			m.Arms = append(m.Arms, ast.MatchArm{Pat: pat, Guard: guard, Body: body, Line: armLine})
+		}
+	})
 }

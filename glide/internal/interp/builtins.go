@@ -24,8 +24,10 @@ var builtins = map[string]*BuiltinV{
 	"Err": {Name: "Err", Fn: func(in *Interp, args []Value, line int) Value {
 		return &ResultV{Ok: false, V: one("Err", args, line)}
 	}},
+	// Option is unboxed here, so Some is the identity function; it
+	// exists so the spelling stays legal.
 	"Some": {Name: "Some", Fn: func(in *Interp, args []Value, line int) Value {
-		return SomeV{V: one("Some", args, line)}
+		return one("Some", args, line)
 	}},
 }
 
@@ -117,6 +119,22 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 		switch name {
 		case "len":
 			return IntV(len(r.Elems))
+		case "sorted":
+			if len(args) != 0 {
+				panic(rtErr{line, "sorted takes no arguments"})
+			}
+			out := &ListV{Elems: append([]Value{}, r.Elems...)}
+			var sortErr any
+			func() {
+				defer func() { sortErr = recover() }()
+				sort.SliceStable(out.Elems, func(i, j int) bool {
+					return naturalLess(out.Elems[i], out.Elems[j], line)
+				})
+			}()
+			if sortErr != nil {
+				panic(sortErr)
+			}
+			return out
 		case "push":
 			r.Elems = append(r.Elems, one("push", args, line))
 			return UnitV{}
@@ -212,11 +230,40 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 	panic(rtErr{line, fmt.Sprintf("%s has no method %q", typeName(recv), name)})
 }
 
+func naturalLess(a, b Value, line int) bool {
+	if x, ok := a.(IntV); ok {
+		if y, ok := b.(IntV); ok {
+			return x < y
+		}
+	}
+	if x, ok := a.(StrV); ok {
+		if y, ok := b.(StrV); ok {
+			return x < y
+		}
+	}
+	if x, ok := a.(FloatV); ok {
+		if y, ok := b.(FloatV); ok {
+			return x < y
+		}
+	}
+	panic(rtErr{line, fmt.Sprintf("cannot order %s against %s", typeName(a), typeName(b))})
+}
+
 // iterate adapts any iterable to a next() function for `for … in`.
 func (in *Interp) iterate(v Value, line int) func() (Value, bool) {
 	switch it := v.(type) {
 	case *IterV:
 		return it.Next
+	case *StructV:
+		// Anything with an iter() method is iterable.
+		if m := in.methods[it.Type]["iter"]; m != nil {
+			res := in.callFuncSelf(m, it, nil)
+			iv, ok := res.(*IterV)
+			if !ok {
+				panic(rtErr{line, fmt.Sprintf("%s.iter() must return an Iterator, got %s", it.Type, typeName(res))})
+			}
+			return iv.Next
+		}
 	case *ListV:
 		i := 0
 		return func() (Value, bool) {

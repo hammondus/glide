@@ -33,6 +33,12 @@ const (
 	KwReturn
 	KwTrue
 	KwFalse
+	KwType
+	KwStruct
+	KwImpl
+	KwMatch
+	KwYield
+	KwPub
 
 	LParen
 	RParen
@@ -65,6 +71,7 @@ const (
 	Pipe
 	Question
 	QQ
+	FatArrow
 )
 
 var kindNames = map[Kind]string{
@@ -80,6 +87,8 @@ var kindNames = map[Kind]string{
 	Star: "'*'", Slash: "'/'", Percent: "'%'", Eq: "'=='", Ne: "'!='",
 	Lt: "'<'", Le: "'<='", Gt: "'>'", Ge: "'>='", Not: "'!'",
 	AndAnd: "'&&'", OrOr: "'||'", Pipe: "'|'", Question: "'?'", QQ: "'??'",
+	FatArrow: "'=>'", KwType: "'type'", KwStruct: "'struct'", KwImpl: "'impl'",
+	KwMatch: "'match'", KwYield: "'yield'", KwPub: "'pub'",
 }
 
 func (k Kind) String() string {
@@ -92,7 +101,8 @@ func (k Kind) String() string {
 var keywords = map[string]Kind{
 	"fn": KwFn, "let": KwLet, "mut": KwMut, "if": KwIf, "else": KwElse,
 	"for": KwFor, "in": KwIn, "import": KwImport, "return": KwReturn,
-	"true": KwTrue, "false": KwFalse,
+	"true": KwTrue, "false": KwFalse, "type": KwType, "struct": KwStruct,
+	"impl": KwImpl, "match": KwMatch, "yield": KwYield, "pub": KwPub,
 }
 
 // StrPart is one segment of an interpolated string literal: either
@@ -239,6 +249,7 @@ func (lx *lexer) lexOp() error {
 	twoKinds := map[string]Kind{
 		"->": Arrow, "..": DotDot, "??": QQ, "&&": AndAnd, "||": OrOr,
 		"==": Eq, "!=": Ne, "<=": Le, ">=": Ge, "+=": PlusEq, "-=": MinusEq,
+		"=>": FatArrow,
 	}
 	if k, ok := twoKinds[two]; ok {
 		lx.emit(k, two)

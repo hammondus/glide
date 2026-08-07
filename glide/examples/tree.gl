@@ -1,0 +1,56 @@
+// package tree: an ordered binary tree.
+
+pub type Tree<T: Ord> = struct {
+    root: Node<T>?                       // private field
+}
+
+type Node<T> = struct {
+    value: T
+    left: Node<T>?
+    right: Node<T>?
+}
+
+impl Tree<T> {
+    pub fn new() -> Tree<T> {
+        Tree{ root: None }
+    }
+
+    pub fn insert(mut self, value: T) {
+        self.root = insert_node(self.root, value)
+    }
+}
+
+impl Iterable<T> for Tree<T> {
+    fn iter(self) -> Iterator<T> {
+        if let root = self.root {
+            yield from walk(root)        // generator: body contains yield
+        }
+    }
+}
+
+fn walk<T>(n: Node<T>) -> Iterator<T> {
+    if let l = n.left  { yield from walk(l) }
+    yield n.value
+    if let r = n.right { yield from walk(r) }
+}
+
+fn insert_node<T: Ord>(at: Node<T>?, value: T) -> Node<T> {
+    match at {
+        None => Node{ value: value, left: None, right: None }
+        Some(n) if value < n.value =>
+            Node{ left: insert_node(n.left, value), ..n }
+        Some(n) =>
+            Node{ right: insert_node(n.right, value), ..n }
+    }
+}
+
+test "in-order traversal is sorted" (xs: List<Int>) {
+    let mut t = Tree.new()
+    for x in xs { t.insert(x) }
+    expect(t.iter().collect() == xs.sorted())
+}
+
+bench "insert 10k" {
+    let mut t = Tree.new()
+    for x in 0..10_000 { t.insert(x) }
+}

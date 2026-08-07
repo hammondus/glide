@@ -7,14 +7,66 @@ package ast
 type File struct {
 	Imports []string
 	Funcs   []*FuncDecl
+	Types   []*TypeDecl
+	Impls   []*ImplBlock
+	Tests   []*TestDecl
+	Benches []*BenchDecl
 }
+
+type SelfMode int
+
+const (
+	NoSelf SelfMode = iota
+	Self
+	MutSelf
+)
 
 type FuncDecl struct {
 	Name    string
+	Self    SelfMode
 	Params  []Param
 	RetType string // "" = declares no return value
 	Body    *Block
 	Line    int
+}
+
+type FieldDecl struct {
+	Name string
+	Type string
+	Pub  bool
+}
+
+type VariantDecl struct {
+	Name  string
+	Arity int // positional payload count; 0 = bare variant
+}
+
+// TypeDecl: exactly one of Fields (struct) / Variants (sum) is set.
+type TypeDecl struct {
+	Name     string
+	Fields   []FieldDecl
+	Variants []VariantDecl
+	Line     int
+}
+
+type ImplBlock struct {
+	Target string // type the methods attach to
+	Trait  string // "" for inherent impls
+	Fns    []*FuncDecl
+	Line   int
+}
+
+type TestDecl struct {
+	Name   string
+	Params []Param
+	Body   *Block
+	Line   int
+}
+
+type BenchDecl struct {
+	Name string
+	Body *Block
+	Line int
 }
 
 type Param struct{ Name, Type string }
@@ -58,11 +110,20 @@ type ForStmt struct {
 	Line int
 }
 
+// YieldStmt makes the enclosing function a generator. From delegates
+// to a sub-iterator (`yield from`).
+type YieldStmt struct {
+	E    Expr
+	From bool
+	Line int
+}
+
 func (*LetStmt) stmt()    {}
 func (*AssignStmt) stmt() {}
 func (*ExprStmt) stmt()   {}
 func (*ReturnStmt) stmt() {}
 func (*ForStmt) stmt()    {}
+func (*YieldStmt) stmt()  {}
 
 // Patterns
 
@@ -84,10 +145,19 @@ type ListPat struct {
 	RestName string
 }
 
+// CtorPat matches a constructor: None, Some(x), or a sum-type
+// variant. In patterns, case is load-bearing: capitalised names are
+// constructors, lowercase names bind.
+type CtorPat struct {
+	Name string
+	Args []Pattern
+}
+
 func (*IdentPat) pat() {}
 func (*WildPat) pat()  {}
 func (*TuplePat) pat() {}
 func (*ListPat) pat()  {}
+func (*CtorPat) pat()  {}
 
 // Expressions
 
@@ -163,6 +233,39 @@ type If struct {
 	Line      int
 }
 
+// IfLet unwraps an Option: pattern binds the inner value when the
+// scrutinee is not None.
+type IfLet struct {
+	Pat       Pattern
+	X         Expr
+	Then      *Block
+	ElseBlock *Block
+	Line      int
+}
+
+// StructLit: Type{ name: expr, ..Base }. Base (may be nil) supplies
+// the unmentioned fields — copy-with-changes.
+type StructLit struct {
+	Type  string
+	Names []string
+	Vals  []Expr
+	Base  Expr
+	Line  int
+}
+
+type MatchArm struct {
+	Pat   Pattern
+	Guard Expr // nil = unguarded
+	Body  Expr
+	Line  int
+}
+
+type Match struct {
+	X    Expr
+	Arms []MatchArm
+	Line int
+}
+
 func (*IntLit) expr()     {}
 func (*FloatLit) expr()   {}
 func (*BoolLit) expr()    {}
@@ -182,3 +285,6 @@ func (*TupleIndex) expr() {}
 func (*Try) expr()        {}
 func (*Closure) expr()    {}
 func (*If) expr()         {}
+func (*IfLet) expr()      {}
+func (*StructLit) expr()  {}
+func (*Match) expr()      {}
