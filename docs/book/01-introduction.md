@@ -327,8 +327,12 @@ case of the first letter. One consequence: `pub` marks visibility
 is already spent.
 
 **Braces are mandatory** — every `if`, `for`, and `fn` body takes a
-block, even one line. Comments are `//` to end of line. Source files
-end in `.gl`. Number literals take underscores for readability:
+block, even one line. Comments are `//` to end of line — there is no
+`/* */` form, on purpose: block comments either don't nest (C, Go —
+commenting out code that contains one leaves live code behind) or
+break on a stray `*/` in prose (Rust), and their real job, deadening
+a region while debugging, is your editor's toggle-comment key. Source
+files end in `.gl`. Number literals take underscores for readability:
 `10_000_000`, `0..1_000_000`.
 
 ## 1.3 Values and bindings

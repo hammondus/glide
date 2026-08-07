@@ -924,6 +924,18 @@ Go's model, with its defects designed out:
 - **Interpolation escape: `\{` for a literal brace**, joining the
   existing backslash family (`\n`, `\"`) — not Rust's `{{` doubling,
   which is a second escaping mechanism for one character.
+- **Comments: `//` only; no `/* */`** (Zig's position). Block comments
+  are a trap whichever way they're specified: C/Go's don't nest, so
+  commenting out code that contains one ends the comment early and
+  leaves live code behind; Rust's nest, so a stray `*/` in prose
+  breaks the file. Their real job — deadening a region mid-debug —
+  moved into the editor (toggle-comment on a selection), which
+  produces lines that are individually, greppably dead in any diff
+  hunk. No other customer exists: doc comments are ordinary `//` above
+  the declaration. A second comment spelling is delimiter synonymy —
+  the same purchase the string section refuses. (Zig's bonus — every
+  line lexes standalone — is not claimed: backtick raw strings already
+  span lines. Forced by the interpreter; ratified.)
 - **Struct literals are banned in control-flow headers** (`if`, `for`,
   `match` scrutinees) — `if c == Red {` must give the brace to the
   body, and variants are capitalised too, so case can't disambiguate.
