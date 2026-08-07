@@ -67,6 +67,13 @@ deliberately cut because the real compiler makes them obsolete.
   implementation for a tree-walker: `yield` sends, `Next` receives;
   body panics are forwarded to the consumer; an abandoned iterator's
   producer is unblocked by a GC cleanup hook closing a stop channel.
+  The `Next` closure must keep its `IterV` reachable
+  (`runtime.KeepAlive`): `iterate()` hands the bare func around
+  (`yield from`, `for … in`), and when only the func was live the
+  cleanup fired mid-loop and silently truncated the stream at a
+  GC-chosen point — seen as the tree property test failing on a
+  *prefix* of the sorted list, nondeterministically despite the fixed
+  seed.
   This proves generator *semantics* only — the transpiler needs CPS
   or a state machine, and DESIGN.md records that lowering as the
   thing to prototype early. `yield from` recursion costs a goroutine

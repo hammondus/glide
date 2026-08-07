@@ -114,6 +114,11 @@ func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
 
 	it := &IterV{}
 	it.Next = func() (Value, bool) {
+		// This closure must keep `it` reachable: iterate() hands the
+		// bare Next func around (yield from, for-in), and if the IterV
+		// dies mid-loop the cleanup below halts the producer and the
+		// stream silently truncates at a GC-chosen point.
+		defer runtime.KeepAlive(it)
 		v, ok := <-ch
 		if !ok {
 			if crash != nil {
