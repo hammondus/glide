@@ -756,6 +756,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		return in.evalStructLit(ex, env)
 	case *ast.Match:
 		return in.evalMatch(ex, env)
+	case *ast.CondMatch:
+		return in.evalCondMatch(ex, env)
 	case *ast.IfLet:
 		return in.evalIfLet(ex, env)
 	case *ast.Call:
@@ -888,6 +890,27 @@ func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
 		return in.eval(arm.Body, armEnv)
 	}
 	panic(rtErr{ex.Line, fmt.Sprintf("no match arm matched %s (exhaustiveness checking arrives with the compiler)", render(x, true))})
+}
+
+func (in *Interp) evalCondMatch(ex *ast.CondMatch, env *Env) (Value, *sig) {
+	for i := range ex.Arms {
+		arm := &ex.Arms[i]
+		if arm.Cond != nil {
+			c, sg := in.eval(arm.Cond, env)
+			if sg != nil {
+				return UnitV{}, sg
+			}
+			cb, isBool := c.(BoolV)
+			if !isBool {
+				panic(rtErr{arm.Line, fmt.Sprintf("subjectless match arm must be Bool, got %s", typeName(c))})
+			}
+			if !cb {
+				continue
+			}
+		}
+		return in.eval(arm.Body, newEnv(env, false))
+	}
+	panic(rtErr{ex.Line, "no match arm was true (add a `_ =>` arm)"})
 }
 
 func (in *Interp) evalIfLet(ex *ast.IfLet, env *Env) (Value, *sig) {

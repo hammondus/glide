@@ -194,7 +194,9 @@ path). Discard is explicit: `_ = expr` ✓.
   arms); exhaustiveness checked dynamically on sum types ✓.
   Multi-value arms (`1, 2 =>`) ✓ — Go-style value alternatives; none
   may bind a name (parse error). Literal / range / string patterns ✓
-  (see Patterns). Subjectless `match { cond => … }` ○.
+  (see Patterns). Subjectless `match { cond => … }` ✓ — arms are
+  Bool conditions, first true wins, `_` is always-true; falls through
+  to a runtime error if no arm is true.
 - Closures: `|x| expr`, `|x| { … }`, `||` for no args ✓. Capture by
   reference, by *binding* (a redeclare doesn't retarget) ✓. Closures
   may reuse outer names (function boundary resets the shadow rule) ✓.

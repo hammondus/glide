@@ -760,3 +760,63 @@ func TestMatchTypeMismatchFallsThrough(t *testing.T) {
 		t.Fatalf("want fall-through panic, got %v", err)
 	}
 }
+
+func TestSubjectlessMatch(t *testing.T) {
+	out, err := runProg(t, `
+fn grade(score: Int) -> String {
+    match {
+        score >= 90 => "A"
+        score >= 80 => "B"
+        score >= 0  => "pass"
+        _           => "invalid"
+    }
+}
+fn main() {
+    println(grade(95))
+    println(grade(85))
+    println(grade(3))
+    println(grade(0 - 1))
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "A\nB\npass\ninvalid\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+
+	// A non-Bool arm is an error at that arm.
+	_, err = runProg(t, "fn main() {\n _ = match {\n  5 => 1\n }\n}")
+	if err == nil || !strings.Contains(err.Error(), "must be Bool") {
+		t.Fatalf("want Bool-arm error, got %v", err)
+	}
+
+	// No true arm and no `_`: the fall-through panic names the fix.
+	_, err = runProg(t, "fn main() {\n _ = match {\n  false => 1\n }\n}")
+	if err == nil || !strings.Contains(err.Error(), "no match arm was true") {
+		t.Fatalf("want fall-through panic, got %v", err)
+	}
+}
+
+func TestYieldInsideMatchArmDetected(t *testing.T) {
+	// Generator detection must look inside match arms (both forms).
+	out, err := runProg(t, `
+fn evens(xs: List<Int>) -> Iterator<Int> {
+    for x in xs {
+        match x % 2 {
+            0 => { yield x }
+            _ => ()
+        }
+    }
+}
+fn main() {
+    for x in evens([1, 2, 3, 4]) {
+        println(x)
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "2\n4\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}

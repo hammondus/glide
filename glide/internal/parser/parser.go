@@ -1282,6 +1282,9 @@ func (p *parser) parseStructLit(name lexer.Token) (ast.Expr, error) {
 
 func (p *parser) parseMatch() (ast.Expr, error) {
 	line := p.next().Line // match
+	if p.cur().Kind == lexer.LBrace {
+		return p.parseCondMatch(line)
+	}
 	x, err := p.headerExpr()
 	if err != nil {
 		return nil, err
@@ -1335,6 +1338,44 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 				return nil, err
 			}
 			m.Arms = append(m.Arms, ast.MatchArm{Pats: pats, Guard: guard, Body: body, Line: armLine})
+		}
+	})
+}
+
+// parseCondMatch parses subjectless `match { cond => … }`. The `{`
+// belongs to the match — a block expression cannot be the subject.
+func (p *parser) parseCondMatch(line int) (ast.Expr, error) {
+	p.next() // {
+	m := &ast.CondMatch{Line: line}
+	return structsOK(p, func() (ast.Expr, error) {
+		for {
+			p.skipSemis()
+			if p.accept(lexer.RBrace) {
+				if len(m.Arms) == 0 {
+					return nil, p.errf("match needs at least one arm")
+				}
+				return m, nil
+			}
+			armLine := p.cur().Line
+			var cond ast.Expr
+			if p.cur().Kind == lexer.Ident && p.cur().Text == "_" {
+				p.next()
+			} else {
+				var err error
+				cond, err = p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+			}
+			if _, err := p.expect(lexer.FatArrow, "match arm"); err != nil {
+				return nil, err
+			}
+			p.skipSemis() // body may start on the next line
+			body, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			m.Arms = append(m.Arms, ast.CondArm{Cond: cond, Body: body, Line: armLine})
 		}
 	})
 }

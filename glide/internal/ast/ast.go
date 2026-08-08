@@ -300,6 +300,18 @@ type Match struct {
 	Line int
 }
 
+// CondMatch is subjectless `match { cond => … }`: Go's expressionless
+// switch. First true arm wins; a `_` arm (nil Cond) is always true.
+type CondArm struct {
+	Cond Expr // nil = the `_` arm
+	Body Expr
+	Line int
+}
+type CondMatch struct {
+	Arms []CondArm
+	Line int
+}
+
 func (*IntLit) expr()     {}
 func (*FloatLit) expr()   {}
 func (*BoolLit) expr()    {}
@@ -323,3 +335,4 @@ func (*If) expr()         {}
 func (*IfLet) expr()      {}
 func (*StructLit) expr()  {}
 func (*Match) expr()      {}
+func (*CondMatch) expr()  {}

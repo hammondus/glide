@@ -81,6 +81,18 @@ func exprYields(e ast.Expr) bool {
 		return ex.ElseBlock != nil && blockYields(ex.ElseBlock)
 	case *ast.BlockExpr:
 		return blockYields(ex.Body)
+	case *ast.Match:
+		for i := range ex.Arms {
+			if exprYields(ex.Arms[i].Body) {
+				return true
+			}
+		}
+	case *ast.CondMatch:
+		for i := range ex.Arms {
+			if exprYields(ex.Arms[i].Body) {
+				return true
+			}
+		}
 	}
 	return false
 }
