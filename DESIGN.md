@@ -901,6 +901,39 @@ Go's model, with its defects designed out:
   `scope s { let a = s.spawn(|| fetch(u)); … }` — scope exit waits for
   children; one failure cancels siblings and propagates. Leaks are
   unrepresentable.
+- **One spawn primitive; errors stay values; the scope is the safety
+  net** (ratified 2026-08-09). `s.spawn(f)` returns a `Task` handle;
+  `t.join()` blocks and returns exactly what the closure returned — if
+  `f` returns `Result`, the caller gets the `Result` and `?`s it like
+  any call. Four rules make the model:
+  1. *Scope exit always joins every child* — normal exit, `?`, `return`,
+     `break`, panic. Early exit cancels children first, waits, then
+     continues propagating. The scope is a super-`defer`: no exit path
+     skips it.
+  2. *A child's `Err` is a value, not an event* — it sits in the handle
+     until joined. Partial success is trivial: join each, keep what
+     worked.
+  3. *Errors can't vanish* — at normal exit, any unjoined child that
+     finished with `Err` fails the scope, as if the body `?`'d it at
+     the closing brace. First failure wins. Ignoring an error takes an
+     explicit discard, e.g. `let _ = t.join()`.
+  4. *A child's panic is a bug, and bugs don't wait to be observed* —
+     it cancels siblings immediately; the scope re-panics at exit.
+  Slogan: **values wait, bugs don't.** There is no fail-fast *mode* —
+  errgroup semantics fall out of composition: `a.join()?` exits the
+  body and rule 1 cancels the rest. No `supervisorScope`, no Loom-style
+  policy objects. Why one primitive and not Kotlin's `launch`/`async`
+  split: Kotlin needed two because exceptions are invisible control
+  flow, and its `async` carries the library's most-complained-about
+  gotcha (a child's failure kills the scope *before* the planned
+  `await`-and-handle). Our `Result`s are visible, so one primitive
+  covers both roles. Accepted costs: no early cancellation on `Err`
+  (child A at 60 s, child B fails at 1 s → `a.join()?` waits out the
+  60 s; outcome identical, waste bounded; joining in completion order
+  is `select` territory); first error wins, the rest are dropped (M2
+  simplification — revisit if real code shows the dropped errors
+  mattered); no ambient spawn — `spawn` exists only on a scope handle,
+  main included.
 - **`context.Context` is function coloring by hand.** Go escaped async's
   viral annotation, then cancellation forced `ctx` as first parameter of
   every serious function — the same disease, manual and unchecked.

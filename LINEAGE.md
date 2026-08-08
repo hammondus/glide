@@ -712,6 +712,21 @@ workload is conceded.
 - **2015** — Rust's `Mutex<T>` (wrapping the *data*, not sitting
   beside it) proves the best non-borrow-checker race mitigation:
   unguarded access doesn't compile.
+- **How values leave a nursery** — every adopter answered differently,
+  and the differences are the evidence. Trio (2018): no values from
+  spawn at all; results travel via captured mutables or a channel —
+  the same wart as Go's `errgroup`, where every user writes
+  `results[i] = …` by hand. Kotlin: split into `launch` (no value) and
+  `async` (a `Deferred` you `await`) — needed because JVM exceptions
+  are invisible control flow, and its `async` carries the library's
+  most-complained-about gotcha: a child's failure cancels the scope
+  *immediately*, even when the parent was about to `await` and handle
+  it. Java Loom: `fork` returns a `Subtask`, but reading it before
+  `scope.join()` throws `IllegalStateException`, and failure handling
+  grew a policy zoo (`ShutdownOnFailure`, `ShutdownOnSuccess`). Swift
+  task groups (2021): child results/throws surface when awaited, and
+  anything unawaited is implicitly awaited at group exit — the closest
+  relative to what Glide does.
 
 **Glide takes** nurseries as the *primitive* (`scope s { s.spawn(…) }`
 — scope exit waits, one failure cancels siblings, leaks
@@ -720,7 +735,15 @@ threading), Go's channels and `select` (the crown jewel) with the
 sharp edges typed away — sender/receiver halves distinct, sender
 closes, ownership transfers on send — and Rust's `Mutex<T>`. Race
 detector in `glide test` by default, not behind a flag learned after
-the incident.
+the incident. For values-out (ratified 2026-08-09): one spawn
+primitive returning a `Task` handle; `t.join()` yields exactly what
+the closure returned, so a child's `Err` is a value in the handle,
+not an event — but any *unjoined* `Err` fails the scope at exit, so
+errors can't vanish; a panic cancels siblings immediately ("values
+wait, bugs don't"). Swift's group-exit surfacing is the near
+precedent; Kotlin's immediate-cancel gotcha is the evidence for
+errors-as-values; Trio and errgroup are the evidence that values-out
+must be first-class.
 
 ## Comptime, not macros
 
