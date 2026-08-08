@@ -339,6 +339,25 @@ Comparison is byte equality — Turkish-i has ended careers; locale is
 a library invoked on purpose. Building is `StringBuilder`, a named
 type, because loop `+` is the O(n²) classic and costs shouldn't hide.
 
+Two glosses the sentence above compresses:
+- **U+FFFD** is Unicode's REPLACEMENT CHARACTER (�), *defined* for
+  this job: stand in for bytes that don't decode. The three options
+  on invalid input are throw (Python's decade of
+  `UnicodeDecodeError` on real-world data), silently delete
+  (Unicode's own security report TR-36 forbids it — deleted junk
+  bytes let `<scr␡ipt>` reassemble into `<script>` after the
+  filter), or substitute U+FFFD and continue — the WHATWG-mandated
+  browser behavior, and Go's (`utf8.RuneError` is U+FFFD).
+- **Turkish-i**: Turkish has four letter-i's — dotted `i`↔`İ` and
+  dotless `ı`↔`I` are *different letters*. In a Turkish locale,
+  `uppercase("quit")` is `"QUİT"`, so every case-insensitive
+  comparison via locale-aware folding (`command.toUpperCase() ==
+  "QUIT"`) silently fails — only on Turkish machines, unreproducible
+  from your desk. Java is the canonical victim (`toUpperCase()` uses
+  the platform locale); "the Turkey test" became shorthand for
+  locale-safety. Byte-equality `==` makes the bug unwritable by
+  accident.
+
 ## String interpolation
 
 - **1957–72** — the format-string era: Fortran's FORMAT, then C's
