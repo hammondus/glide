@@ -185,7 +185,9 @@ Assignment (statements, not expressions): `=` ✓, `+=` `-=` ✓,
 - `for { }` / `for cond { }` / `for pat in iterable { }` ✓.
   Iterables: List, Map (yields `(k, v)`), Range, any Iterator, any
   value with an `iter()` method ✓. Fresh binding per iteration ✓.
-  `break` / `continue` ○; labeled forms ○.
+  `break` / `continue` ✓ (parse error outside a loop; a closure body
+  is its own function, so an enclosing loop is out of reach); labeled
+  forms ○.
 - `match subject { pattern [if guard] => expr … }` ✓ — arms are
   single expressions (use a block expression for multi-statement
   arms); exhaustiveness checked dynamically on sum types ✓.

@@ -67,3 +67,31 @@ func TestClosureForms(t *testing.T) {
 		t.Fatalf("stmts = %d", len(f.Funcs[0].Body.Stmts))
 	}
 }
+
+func TestBreakContinueOnlyInLoops(t *testing.T) {
+	bad := []string{
+		"fn main() {\n break\n}",
+		"fn main() {\n continue\n}",
+		"fn main() {\n if true { break }\n}",
+		// A closure body is its own function; the enclosing loop is
+		// out of reach.
+		"fn main() {\n for i in 0..3 { spawn(|| { break }) }\n}",
+	}
+	for _, src := range bad {
+		if _, err := ParseFile(src); err == nil {
+			t.Errorf("should not parse:\n%s", src)
+		}
+	}
+	good := []string{
+		"fn main() {\n for { break }\n}",
+		"fn main() {\n for i in 0..3 { continue }\n}",
+		"fn main() {\n for true { if x { break } }\n}",
+		// A loop inside the closure makes break legal again.
+		"fn main() {\n for i in 0..3 { spawn(|| { for { break } }) }\n}",
+	}
+	for _, src := range good {
+		if _, err := ParseFile(src); err != nil {
+			t.Errorf("should parse: %v\n%s", err, src)
+		}
+	}
+}

@@ -39,6 +39,8 @@ const (
 	KwMatch
 	KwYield
 	KwPub
+	KwBreak
+	KwContinue
 
 	LParen
 	RParen
@@ -89,6 +91,7 @@ var kindNames = map[Kind]string{
 	AndAnd: "'&&'", OrOr: "'||'", Pipe: "'|'", Question: "'?'", QQ: "'??'",
 	FatArrow: "'=>'", KwType: "'type'", KwStruct: "'struct'", KwImpl: "'impl'",
 	KwMatch: "'match'", KwYield: "'yield'", KwPub: "'pub'",
+	KwBreak: "'break'", KwContinue: "'continue'",
 }
 
 func (k Kind) String() string {
@@ -103,6 +106,7 @@ var keywords = map[string]Kind{
 	"for": KwFor, "in": KwIn, "import": KwImport, "return": KwReturn,
 	"true": KwTrue, "false": KwFalse, "type": KwType, "struct": KwStruct,
 	"impl": KwImpl, "match": KwMatch, "yield": KwYield, "pub": KwPub,
+	"break": KwBreak, "continue": KwContinue,
 }
 
 // StrPart is one segment of an interpolated string literal: either
@@ -128,6 +132,7 @@ type Token struct {
 var endsExpr = map[Kind]bool{
 	Ident: true, Int: true, Float: true, String: true,
 	KwTrue: true, KwFalse: true, KwReturn: true,
+	KwBreak: true, KwContinue: true,
 	RParen: true, RBrack: true, RBrace: true, Question: true,
 }
 

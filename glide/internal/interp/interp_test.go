@@ -543,3 +543,73 @@ test "short lists" (xs: List<Int>) {
 		t.Fatalf("want minimal counterexample [0, 0, 0, 0, 0], got:\n%s", out.String())
 	}
 }
+
+func TestBreakContinue(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    // break in an infinite loop
+    let mut i = 0
+    for {
+        i += 1
+        if i >= 3 { break }
+    }
+    println("{i}")
+
+    // continue in a for-in: sum the odd values only
+    let mut total = 0
+    for n in [1, 2, 3, 4, 5] {
+        if n % 2 == 0 { continue }
+        total += n
+    }
+    println("{total}")
+
+    // continue in a conditional loop
+    let mut k = 0
+    let mut odds = 0
+    for k < 10 {
+        k += 1
+        if k % 2 == 0 { continue }
+        odds += 1
+    }
+    println("{odds}")
+
+    // break exits the inner loop only
+    let mut hits = 0
+    for _ in [1, 2, 3] {
+        for j in [1, 2, 3] {
+            if j == 2 { break }
+            hits += 1
+        }
+    }
+    println("{hits}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "3\n9\n5\n3\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestBreakInGeneratorLoop(t *testing.T) {
+	// break belongs to the loop inside the generator body; the
+	// generator finishes normally when its loop ends.
+	out, err := runProg(t, `
+fn firsts() -> Iterator<Int> {
+    for n in [1, 2, 3, 4] {
+        if n > 2 { break }
+        yield n
+    }
+}
+fn main() {
+    for x in firsts() {
+        println(x)
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "1\n2\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}

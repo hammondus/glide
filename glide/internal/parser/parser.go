@@ -18,6 +18,11 @@ type parser struct {
 	// headers (`if c == Red {` must not read `Red {` as a literal —
 	// Rust's rule). Parens and argument lists re-enable them.
 	noStruct bool
+	// loopDepth counts enclosing `for` bodies, so `break`/`continue`
+	// outside a loop is a parse error. Closure bodies reset it: a
+	// closure is its own function, and a break inside one cannot
+	// target the loop it happens to be written in.
+	loopDepth int
 }
 
 func ParseFile(src string) (*ast.File, error) {
@@ -546,6 +551,16 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		return &ast.ReturnStmt{E: e, Line: line}, nil
 	case lexer.KwImport:
 		return nil, p.errf("imports are only allowed at the top of the file")
+	case lexer.KwBreak:
+		if p.loopDepth == 0 {
+			return nil, p.errf("break outside a loop")
+		}
+		return &ast.BreakStmt{Line: p.next().Line}, nil
+	case lexer.KwContinue:
+		if p.loopDepth == 0 {
+			return nil, p.errf("continue outside a loop")
+		}
+		return &ast.ContinueStmt{Line: p.next().Line}, nil
 	case lexer.KwYield:
 		line := p.next().Line
 		from := false
@@ -629,7 +644,7 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 func (p *parser) parseFor() (ast.Stmt, error) {
 	line := p.next().Line // for
 	if p.cur().Kind == lexer.LBrace {
-		body, err := p.parseBlock()
+		body, err := p.parseLoopBody()
 		if err != nil {
 			return nil, err
 		}
@@ -643,7 +658,7 @@ func (p *parser) parseFor() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		body, err := p.parseBlock()
+		body, err := p.parseLoopBody()
 		if err != nil {
 			return nil, err
 		}
@@ -654,11 +669,18 @@ func (p *parser) parseFor() (ast.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := p.parseBlock()
+	body, err := p.parseLoopBody()
 	if err != nil {
 		return nil, err
 	}
 	return &ast.ForStmt{Cond: cond, Body: body, Line: line}, nil
+}
+
+func (p *parser) parseLoopBody() (*ast.Block, error) {
+	p.loopDepth++
+	b, err := p.parseBlock()
+	p.loopDepth--
+	return b, err
 }
 
 // Patterns
@@ -1057,6 +1079,10 @@ func (p *parser) parseClosure() (ast.Expr, error) {
 			return nil, err
 		}
 	}
+	// The body is a new function: an enclosing loop is out of reach.
+	outer := p.loopDepth
+	p.loopDepth = 0
+	defer func() { p.loopDepth = outer }()
 	if p.cur().Kind == lexer.LBrace {
 		b, err := p.parseBlock()
 		if err != nil {

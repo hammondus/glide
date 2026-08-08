@@ -41,9 +41,24 @@ type testFail struct {
 	msg  string
 }
 
-// sig carries Glide control flow up the evaluator: an early return,
-// either explicit (`return`) or from `?` propagating an Err.
-type sig struct{ val Value }
+// sig carries Glide control flow up the evaluator: an early return —
+// explicit (`return`) or from `?` propagating an Err — or a loop
+// break/continue on its way to the nearest enclosing `for`. The zero
+// kind is return, so `&sig{val: v}` reads as a return signal. The
+// parser guarantees break/continue signals never escape a function:
+// they only arise inside a loop body, and evalFor consumes them.
+type sig struct {
+	kind sigKind
+	val  Value
+}
+
+type sigKind int
+
+const (
+	sigReturn sigKind = iota
+	sigBreak
+	sigContinue
+)
 
 // rtErr is a runtime error; exitPanic is os.exit in flight.
 type rtErr struct {
@@ -283,6 +298,12 @@ func (in *Interp) evalStmt(s ast.Stmt, env *Env) (Value, *sig) {
 
 	case *ast.YieldStmt:
 		return UnitV{}, in.evalYield(st, env)
+
+	case *ast.BreakStmt:
+		return UnitV{}, &sig{kind: sigBreak, val: UnitV{}}
+
+	case *ast.ContinueStmt:
+		return UnitV{}, &sig{kind: sigContinue, val: UnitV{}}
 	}
 	panic(rtErr{0, fmt.Sprintf("unhandled statement %T", s)})
 }
@@ -422,7 +443,12 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 				iterEnv.declare(b.name, b.val, b.mut, st.Line)
 			}
 			if _, sg := in.evalBlock(st.Body, iterEnv); sg != nil {
-				return sg
+				if sg.kind == sigBreak {
+					return nil
+				}
+				if sg.kind != sigContinue {
+					return sg
+				}
 			}
 		}
 	case st.Cond != nil:
@@ -439,13 +465,23 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 				return nil
 			}
 			if _, sg := in.evalBlock(st.Body, newEnv(env, false)); sg != nil {
-				return sg
+				if sg.kind == sigBreak {
+					return nil
+				}
+				if sg.kind != sigContinue {
+					return sg
+				}
 			}
 		}
 	default:
 		for {
 			if _, sg := in.evalBlock(st.Body, newEnv(env, false)); sg != nil {
-				return sg
+				if sg.kind == sigBreak {
+					return nil
+				}
+				if sg.kind != sigContinue {
+					return sg
+				}
 			}
 		}
 	}

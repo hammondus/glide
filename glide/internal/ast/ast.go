@@ -118,12 +118,18 @@ type YieldStmt struct {
 	Line int
 }
 
-func (*LetStmt) stmt()    {}
-func (*AssignStmt) stmt() {}
-func (*ExprStmt) stmt()   {}
-func (*ReturnStmt) stmt() {}
-func (*ForStmt) stmt()    {}
-func (*YieldStmt) stmt()  {}
+type BreakStmt struct{ Line int }
+
+type ContinueStmt struct{ Line int }
+
+func (*LetStmt) stmt()      {}
+func (*AssignStmt) stmt()   {}
+func (*ExprStmt) stmt()     {}
+func (*ReturnStmt) stmt()   {}
+func (*ForStmt) stmt()      {}
+func (*YieldStmt) stmt()    {}
+func (*BreakStmt) stmt()    {}
+func (*ContinueStmt) stmt() {}
 
 // Patterns
 
