@@ -57,7 +57,14 @@ policy. Committed items from DESIGN.md marked ✓.
   core
 - `x/yaml` — reading other people's configs (the format is a horror;
   quarantined on the porch)
-- `x/markdown` — rendering (glide doc uses one internally anyway)
+- `x/markdown` — the general-purpose library (CommonMark/GFM-class:
+  big spec, extension churn, HTML-sanitization surface — porch
+  cadence; Go's Blackfriday→Goldmark ecosystem migration is what
+  freezing a dialect into core would have prevented). Distinct from
+  `glide doc`'s renderer, which is toolchain-*internal* on purpose:
+  the doc-comment subset is tiny and frozen, versions with the
+  toolchain, and must never grow a dialect — different masters, two
+  artifacts.
 - `x/term` + `x/tui` — raw mode, events, widgets: the TUI toolkit
   (cross-compiled TUIs are a first-class Glide use case)
 - `x/oauth2` / `x/oidc` — client side; every backend eventually needs it
