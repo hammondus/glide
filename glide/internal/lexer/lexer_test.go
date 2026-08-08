@@ -81,6 +81,31 @@ func TestInterpolation(t *testing.T) {
 	}
 }
 
+func TestNestedStringInInterpolation(t *testing.T) {
+	// A string literal inside an interpolation is captured raw; its
+	// quotes, colons, and braces must not confuse the outer scan.
+	toks, err := Lex(`"{"espresso":10}{m["a:b"]}{f("{x}")}"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := toks[0].Parts
+	if len(parts) != 3 {
+		t.Fatalf("parts = %+v", parts)
+	}
+	if !parts[0].IsExpr || parts[0].S != `"espresso"` || parts[0].Spec != "10" {
+		t.Fatalf("part 0 = %+v", parts[0])
+	}
+	if !parts[1].IsExpr || parts[1].S != `m["a:b"]` || parts[1].Spec != "" {
+		t.Fatalf("part 1 = %+v", parts[1])
+	}
+	if !parts[2].IsExpr || parts[2].S != `f("{x}")` || parts[2].Spec != "" {
+		t.Fatalf("part 2 = %+v", parts[2])
+	}
+	if _, err := Lex(`"{"unclosed}"`); err == nil {
+		t.Fatal("unterminated nested string not rejected")
+	}
+}
+
 func TestBraceEscape(t *testing.T) {
 	toks, err := Lex(`"a \{literal\} b"`)
 	if err != nil {

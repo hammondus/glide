@@ -323,7 +323,10 @@ func (lx *lexer) lexString() error {
 				}
 				ch := lx.src[lx.i]
 				if ch == '"' {
-					return lx.errf("string literals inside interpolation are not supported yet")
+					if err := lx.skipNestedString(); err != nil {
+						return err
+					}
+					continue
 				}
 				if ch == '(' || ch == '[' || ch == '{' {
 					depth++
@@ -356,6 +359,61 @@ func (lx *lexer) lexString() error {
 			lx.i++ // '}'
 		default:
 			lit.WriteByte(c)
+			lx.i++
+		}
+	}
+}
+
+// skipNestedString advances past a string literal (opening quote at lx.i)
+// found inside an interpolation. The text is captured raw and re-lexed by
+// the parser, so only the structure needed to locate the closing quote is
+// tracked here: escapes, and nested interpolations, whose braces may in
+// turn hide further strings.
+func (lx *lexer) skipNestedString() error {
+	lx.i++ // opening quote
+	for {
+		if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
+			return lx.errf("unterminated string")
+		}
+		switch lx.src[lx.i] {
+		case '"':
+			lx.i++
+			return nil
+		case '\\':
+			if lx.i+1 >= len(lx.src) || lx.src[lx.i+1] == '\n' {
+				return lx.errf("unterminated escape")
+			}
+			lx.i += 2
+		case '{':
+			lx.i++
+			depth := 0
+			for {
+				if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
+					return lx.errf("unterminated interpolation")
+				}
+				ch := lx.src[lx.i]
+				if ch == '"' {
+					if err := lx.skipNestedString(); err != nil {
+						return err
+					}
+					continue
+				}
+				if ch == '(' || ch == '[' || ch == '{' {
+					depth++
+				}
+				if ch == ')' || ch == ']' {
+					depth--
+				}
+				if ch == '}' {
+					if depth == 0 {
+						break
+					}
+					depth--
+				}
+				lx.i++
+			}
+			lx.i++ // '}'
+		default:
 			lx.i++
 		}
 	}
