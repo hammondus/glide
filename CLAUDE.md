@@ -25,6 +25,14 @@ recorded sacrifice unless new evidence turns up.
 
 - Decisions get recorded in `DESIGN.md` when made (with the *why*), and
   open questions live in its final section. Keep both current.
+- **`docs/reference/` is the lookup reference** (language.md +
+  stdlib.md, Go's spec/stdlib split): every feature and stdlib
+  surface carries a status marker — ✓ runs in the interpreter, ○
+  designed only. When a feature, builtin, method, or module lands in
+  the interpreter, flip/add its entry in the same commit; when a
+  design decision changes the language, update the ○ rows to match.
+  Stale reference docs are worse than none — Craig codes against
+  these.
 - **`LINEAGE.md` is DESIGN.md's companion**: for each significant
   decision, it carries the short history — who invented the feature,
   who adopted it, who tried living without it, what that evidence
