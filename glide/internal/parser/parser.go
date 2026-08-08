@@ -529,6 +529,9 @@ func (p *parser) parseBlock() (*ast.Block, error) {
 		if err != nil {
 			return nil, err
 		}
+		if _, isDefer := s.(*ast.DeferStmt); isDefer {
+			b.HasDefer = true
+		}
 		b.Stmts = append(b.Stmts, s)
 	}
 }
@@ -551,6 +554,18 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		return &ast.ReturnStmt{E: e, Line: line}, nil
 	case lexer.KwImport:
 		return nil, p.errf("imports are only allowed at the top of the file")
+	case lexer.KwDefer, lexer.KwErrdefer:
+		t := p.next()
+		// The body runs at scope exit, outside loop flow — an
+		// enclosing loop is out of reach, like a closure body.
+		outer := p.loopDepth
+		p.loopDepth = 0
+		body, err := p.parseBlock()
+		p.loopDepth = outer
+		if err != nil {
+			return nil, err
+		}
+		return &ast.DeferStmt{Body: body, Err: t.Kind == lexer.KwErrdefer, Line: t.Line}, nil
 	case lexer.KwBreak:
 		if p.loopDepth == 0 {
 			return nil, p.errf("break outside a loop")

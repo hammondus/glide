@@ -71,7 +71,12 @@ type BenchDecl struct {
 
 type Param struct{ Name, Type string }
 
-type Block struct{ Stmts []Stmt }
+// Block: HasDefer is set at parse when a DeferStmt sits directly in
+// Stmts, so evalBlock's hot path skips defer bookkeeping entirely.
+type Block struct {
+	Stmts    []Stmt
+	HasDefer bool
+}
 
 // Statements
 
@@ -122,6 +127,14 @@ type BreakStmt struct{ Line int }
 
 type ContinueStmt struct{ Line int }
 
+// DeferStmt: Err marks `errdefer` — runs only when the enclosing
+// block exits on the error path.
+type DeferStmt struct {
+	Body *Block
+	Err  bool
+	Line int
+}
+
 func (*LetStmt) stmt()      {}
 func (*AssignStmt) stmt()   {}
 func (*ExprStmt) stmt()     {}
@@ -130,6 +143,7 @@ func (*ForStmt) stmt()      {}
 func (*YieldStmt) stmt()    {}
 func (*BreakStmt) stmt()    {}
 func (*ContinueStmt) stmt() {}
+func (*DeferStmt) stmt()    {}
 
 // Patterns
 

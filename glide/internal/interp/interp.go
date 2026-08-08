@@ -28,6 +28,7 @@ type Interp struct {
 	variants map[string]variantInfo              // variant name -> owning type
 	genCache map[*ast.FuncDecl]bool
 	global   *Env
+	exiting  bool // os.exit in flight: skip defers (Go's rule)
 }
 
 type variantInfo struct {
@@ -241,6 +242,9 @@ func (in *Interp) callValue(fnv Value, args []Value, line int) Value {
 // Statements
 
 func (in *Interp) evalBlock(b *ast.Block, env *Env) (Value, *sig) {
+	if b.HasDefer {
+		return in.evalBlockDeferred(b, env)
+	}
 	var last Value = UnitV{}
 	for _, s := range b.Stmts {
 		var sg *sig
@@ -250,6 +254,64 @@ func (in *Interp) evalBlock(b *ast.Block, env *Env) (Value, *sig) {
 		}
 	}
 	return last, nil
+}
+
+// evalBlockDeferred is evalBlock for blocks that register defers:
+// they run LIFO at block exit — normal, signal (return/break/
+// continue), or panic unwind. errdefer bodies run only on the error
+// path: a return signal carrying an Err, or a panic. os.exit skips
+// defers entirely (Go's rule).
+func (in *Interp) evalBlockDeferred(b *ast.Block, env *Env) (val Value, sg *sig) {
+	var defers []*ast.DeferStmt
+	unwound := false
+	defer func() {
+		if unwound || in.exiting {
+			return
+		}
+		// Still panicking: release-as-you-unwind, and a crash counts
+		// as the error path (rollback must happen).
+		in.runDefers(defers, env, true)
+	}()
+	var last Value = UnitV{}
+	for _, s := range b.Stmts {
+		if d, ok := s.(*ast.DeferStmt); ok {
+			defers = append(defers, d)
+			last = UnitV{}
+			continue
+		}
+		var sg2 *sig
+		last, sg2 = in.evalStmt(s, env)
+		if sg2 != nil {
+			unwound = true
+			in.runDefers(defers, env, isErrSig(sg2))
+			return UnitV{}, sg2
+		}
+	}
+	unwound = true
+	in.runDefers(defers, env, false)
+	return last, nil
+}
+
+// isErrSig reports an error-path exit: a return signal carrying an
+// Err Result — what `?` propagates and `return Err(…)` produces.
+func isErrSig(sg *sig) bool {
+	if sg.kind != sigReturn {
+		return false
+	}
+	r, ok := sg.val.(*ResultV)
+	return ok && !r.Ok
+}
+
+func (in *Interp) runDefers(defers []*ast.DeferStmt, env *Env, errPath bool) {
+	for i := len(defers) - 1; i >= 0; i-- {
+		d := defers[i]
+		if d.Err && !errPath {
+			continue
+		}
+		if _, sg := in.evalBlock(d.Body, newEnv(env, false)); sg != nil {
+			panic(rtErr{d.Line, "a defer block cannot return"})
+		}
+	}
 }
 
 // evalStmt returns the statement's value (unit for everything except

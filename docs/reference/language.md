@@ -63,8 +63,8 @@ Designed, not yet in the lexer:
 
 | Keyword | Meaning | Status |
 |---|---|---|
-| `defer` | block-scoped cleanup: `defer { … }` | ○ |
-| `errdefer` | cleanup only on the error path | ○ |
+| `defer` | block-scoped cleanup: `defer { … }` — runs LIFO at exit of the *enclosing block* (per-iteration in a loop body), on normal exit, `return`/`break`/`continue`, and panic unwind; skipped by `os.exit`. Body may not `return` (runtime error) or `break`/`continue` an enclosing loop (parse error) | ✓ |
+| `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
 | `const` | comptime-evaluated binding; the only module-level state | ○ |
 | `trait` | trait declaration | ○ |
 | `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |

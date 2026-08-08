@@ -52,6 +52,8 @@ func stmtYields(s ast.Stmt) bool {
 		return blockYields(st.Body)
 	case *ast.ExprStmt:
 		return exprYields(st.E)
+	case *ast.DeferStmt:
+		return blockYields(st.Body)
 	case *ast.LetStmt:
 		if exprYields(st.Init) {
 			return true

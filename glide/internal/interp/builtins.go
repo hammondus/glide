@@ -77,6 +77,7 @@ func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
 		if !ok {
 			panic(rtErr{line, "os.exit takes an Int"})
 		}
+		in.exiting = true
 		panic(exitPanic{code: int(code)})
 	case "fs.read_string":
 		path, ok := one("fs.read_string", args, line).(StrV)

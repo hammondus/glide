@@ -1002,3 +1002,107 @@ func TestFormatSpecTypeErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestDeferBasics(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    println("start")
+    defer { println("cleanup 1") }
+    defer { println("cleanup 2") }
+    {
+        defer { println("inner block") }
+        println("in block")
+    }
+    // Block-scoped: a defer in a loop body runs every iteration —
+    // Go's fd-exhaustion bug cannot be written.
+    for i in 0..2 {
+        defer { println("iter {i} done") }
+        println("iter {i}")
+    }
+    println("end")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "start\nin block\ninner block\niter 0\niter 0 done\niter 1\niter 1 done\nend\ncleanup 2\ncleanup 1\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestErrdefer(t *testing.T) {
+	out, err := runProg(t, `
+fn work(fail: Bool) -> Result<Int, Error> {
+    defer { println("always") }
+    errdefer { println("rollback") }
+    if fail {
+        return Err("boom")
+    }
+    Ok(1)
+}
+fn main() {
+    _ = work(false)
+    println("--")
+    _ = work(true)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "always\n--\nrollback\nalways\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestDeferRunsOnPanicAndBreak(t *testing.T) {
+	// break exits the loop body block: its defers run, errdefer not
+	// (loop control is not failure).
+	out, err := runProg(t, `
+fn main() {
+    for {
+        defer { println("released") }
+        errdefer { println("not this") }
+        break
+    }
+    println("after")
+}`)
+	if err != nil || out != "released\nafter\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+
+	// Panic unwind runs defers, and a crash is the error path.
+	out, err = runProg(t, `
+fn main() {
+    defer { println("unwound") }
+    errdefer { println("crash rollback") }
+    let xs = [1]
+    println(xs[5])
+}`)
+	if err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("want index panic, got %v", err)
+	}
+	if out != "crash rollback\nunwound\n" {
+		t.Fatalf("panic unwind output:\n%q", out)
+	}
+}
+
+func TestDeferRestrictions(t *testing.T) {
+	// A defer body cannot return.
+	_, err := runProg(t, "fn main() {\n defer { return }\n}")
+	if err == nil || !strings.Contains(err.Error(), "cannot return") {
+		t.Fatalf("return in defer should fail, got %v", err)
+	}
+	// break cannot target a loop from inside a defer body.
+	if _, perr := parser.ParseFile("fn main() {\n for {\n  defer { break }\n }\n}"); perr == nil {
+		t.Fatal("break in defer should be a parse error")
+	}
+	// os.exit skips defers (Go's rule).
+	out, err := runProg(t, "import os\nfn main() {\n defer { println(\"skipped\") }\n os.exit(3)\n}")
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 3 {
+		t.Fatalf("want exit 3, got %v", err)
+	}
+	if out != "" {
+		t.Fatalf("defers must not run on os.exit, got %q", out)
+	}
+}
