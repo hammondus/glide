@@ -820,3 +820,65 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+func TestIteratorAdapters(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    // map/filter/collect chain
+    let doubled_evens = [1, 2, 3, 4, 5].iter().filter(|n| n % 2 == 0).map(|n| n * 10).collect()
+    println("{doubled_evens[0]} {doubled_evens[1]} {doubled_evens.len()}")
+
+    // enumerate yields (index, value)
+    for (i, name) in ["a", "b"].iter().enumerate() {
+        println("{i}:{name}")
+    }
+
+    // zip stops at the shorter side; takes a bare iterable
+    for (x, y) in [1, 2, 3].iter().zip(["one", "two"]) {
+        println("{x}={y}")
+    }
+
+    // consumers
+    println([1, 2, 3].iter().sum())
+    println([1.5, 2.5].iter().sum())
+    println((0..100).iter().filter(|n| n % 7 == 0).count())
+
+    // the aliasing-safe fill: fresh inner list per slot
+    let mut grid = (0..2).iter().map(|_| []).collect()
+    grid[0].push(1)
+    println("{grid[0].len()} {grid[1].len()}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "20 40 2\n0:a\n1:b\n1=one\n2=two\n6\n4\n15\n1 0\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestAdaptersAreLazy(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let it = [1, 2, 3].iter().map(|n| {
+        println("mapping {n}")
+        n * 2
+    })
+    println("nothing yet")
+    println(it.take(2).collect().len())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "nothing yet\nmapping 1\nmapping 2\n2\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestFilterPredicateMustBeBool(t *testing.T) {
+	_, err := runProg(t, "fn main() {\n _ = [1].iter().filter(|n| n).collect()\n}")
+	if err == nil || !strings.Contains(err.Error(), "must return Bool") {
+		t.Fatalf("want Bool-predicate error, got %v", err)
+	}
+}

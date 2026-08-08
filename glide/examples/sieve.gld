@@ -19,9 +19,5 @@ fn main() {
         i += 1
     }
 
-    let mut count = 0
-    for f in is_prime {
-        count += f
-    }
-    println("glide primes={count}")
+    println("glide primes={is_prime.iter().sum()}")
 }

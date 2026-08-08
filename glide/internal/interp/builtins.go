@@ -210,8 +210,21 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 			}
 			return UnitV{}
 		}
+	case RangeV:
+		switch name {
+		case "iter":
+			if len(args) != 0 {
+				panic(rtErr{line, "iter takes no arguments"})
+			}
+			return &IterV{Next: in.iterate(r, line)}
+		}
 	case *MapV:
 		switch name {
+		case "iter":
+			if len(args) != 0 {
+				panic(rtErr{line, "iter takes no arguments"})
+			}
+			return &IterV{Next: in.iterate(r, line)}
 		case "len":
 			return IntV(len(r.keys))
 		case "entries":
@@ -262,6 +275,87 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 					return l
 				}
 				l.Elems = append(l.Elems, v)
+			}
+		case "map":
+			f := one("map", args, line)
+			return &IterV{Next: func() (Value, bool) {
+				v, ok := r.Next()
+				if !ok {
+					return nil, false
+				}
+				return in.callValue(f, []Value{v}, line), true
+			}}
+		case "filter":
+			f := one("filter", args, line)
+			return &IterV{Next: func() (Value, bool) {
+				for {
+					v, ok := r.Next()
+					if !ok {
+						return nil, false
+					}
+					keep, isBool := in.callValue(f, []Value{v}, line).(BoolV)
+					if !isBool {
+						panic(rtErr{line, "filter predicate must return Bool"})
+					}
+					if bool(keep) {
+						return v, true
+					}
+				}
+			}}
+		case "enumerate":
+			if len(args) != 0 {
+				panic(rtErr{line, "enumerate takes no arguments"})
+			}
+			i := int64(0)
+			return &IterV{Next: func() (Value, bool) {
+				v, ok := r.Next()
+				if !ok {
+					return nil, false
+				}
+				t := TupleV{IntV(i), v}
+				i++
+				return t, true
+			}}
+		case "zip":
+			other := in.iterate(one("zip", args, line), line)
+			return &IterV{Next: func() (Value, bool) {
+				a, ok := r.Next()
+				if !ok {
+					return nil, false
+				}
+				b, ok := other()
+				if !ok {
+					return nil, false
+				}
+				return TupleV{a, b}, true
+			}}
+		case "count":
+			if len(args) != 0 {
+				panic(rtErr{line, "count takes no arguments"})
+			}
+			n := 0
+			for {
+				if _, ok := r.Next(); !ok {
+					return IntV(n)
+				}
+				n++
+			}
+		case "sum":
+			if len(args) != 0 {
+				panic(rtErr{line, "sum takes no arguments"})
+			}
+			// Fold `+` from the first element, so Int, Float and
+			// String all work; empty sums to Int 0.
+			acc, ok := r.Next()
+			if !ok {
+				return IntV(0)
+			}
+			for {
+				v, ok := r.Next()
+				if !ok {
+					return acc
+				}
+				acc = binop("+", acc, v, line)
 			}
 		}
 	}

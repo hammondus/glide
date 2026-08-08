@@ -84,7 +84,7 @@ etc.)
 | `push(v)` | `(T) -> ()` | append; requires a `mut` path |
 | `sorted()` | `-> List<T>` | copy, natural ascending order (Int/Float/String) |
 | `sort_by(cmp)` | `(fn(T, T) -> Int) -> ()` | in place, **stable**; requires a `mut` path; comparator is three-way (`\|a, b\| a.1.cmp(b.1)`) |
-| `repeat(k)` | `(Int) -> List<T>` | new list, elements repeated k times (`[0].repeat(n)` is the fill constructor; Go 1.23's `slices.Repeat`). **Shallow**: repeats the value, so `[[]].repeat(2)` is two slots sharing one inner list — build fresh inner values with the adapter form (○) instead. k < 0 panics |
+| `repeat(k)` | `(Int) -> List<T>` | new list, elements repeated k times (`[0].repeat(n)` is the fill constructor; Go 1.23's `slices.Repeat`). **Shallow**: repeats the value, so `[[]].repeat(2)` is two slots sharing one inner list — build fresh inner values with `(0..n).iter().map(\|_\| []).collect()` instead. k < 0 panics |
 | `iter()` | `-> Iterator<T>` | |
 
 Indexing: `xs[i]` reads ✓; `xs[i] = v` and the compound forms (`+=`
@@ -115,13 +115,19 @@ Consume with `?` (propagate) or `match Ok(v) / Err(e)`.
 | Method | Signature | Notes |
 |---|---|---|
 | `take(n)` | `(Int) -> Iterator<T>` | lazy; stops the source after n |
+| `map(f)` | `(fn(T) -> U) -> Iterator<U>` | lazy |
+| `filter(pred)` | `(fn(T) -> Bool) -> Iterator<T>` | lazy; non-Bool predicate result is an error |
+| `enumerate()` | `-> Iterator<(Int, T)>` | lazy; indexes from 0 |
+| `zip(other)` | `(iterable) -> Iterator<(T, U)>` | lazy; other may be any iterable (List, Range, Iterator, …); stops at the shorter side |
 | `collect()` | `-> List<T>` | drains into a List |
+| `count()` | `-> Int` | drains |
+| `sum()` | `-> T` | drains; folds `+` from the first element, so Int, Float and String all work; empty sums to Int 0 |
 
-Iterators come from `.iter()`, generators (`yield`), or any type
-with an `iter()` method (which is also what makes a user type
-`for`-able). Adapters are lazy: nothing runs until consumed.
-(○: `map`, `filter`, `zip`, `enumerate`, … — the designed adapter
-set rides the Iterator trait.)
+Iterators come from `.iter()` — on List, Map (yields `(k, v)`), and
+Range — from generators (`yield`), or from any type with an `iter()`
+method (which is also what makes a user type `for`-able). Adapters
+are lazy: nothing runs until consumed. (Further adapters — `skip`,
+`take_while`, `fold`, … — arrive on demand ○.)
 
 ## Testing runner
 
