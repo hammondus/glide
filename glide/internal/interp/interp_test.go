@@ -425,7 +425,7 @@ fn area(s: Shape) -> Int {
     }
 }
 fn main() {
-    println("{area(Circle(4))} {area(Circle(11))} {area(Square(5))} {area(Dot)}")
+    println("{area(.Circle(4))} {area(Shape.Circle(11))} {area(.Square(5))} {area(.Dot)}")
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -741,7 +741,7 @@ func TestMatchMultiPatternCtors(t *testing.T) {
 	out, err := runProg(t, `
 type Color = Red | Green | Blue
 fn main() {
-    let c = Green
+    let c = .Green
     println(match c {
         Red, Green => "warm"
         Blue       => "cool"
@@ -1188,5 +1188,103 @@ fn main() {
 	want := "[1, 2, 3, 4, 0, 1]\n[20, 30]\n[2, 3]\nx.io 5 30\n"
 	if out != want {
 		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestNamedFieldVariants(t *testing.T) {
+	out, err := runProg(t, `
+type ApiError = NotFound{ id: Int } | Timeout{ ms: Int } | Canceled
+fn describe(e: ApiError) -> String {
+    match e {
+        NotFound{ id }  => "no record {id}"
+        Timeout{ .. }   => "too slow"
+        Canceled        => "gave up"
+    }
+}
+fn main() {
+    println(describe(.NotFound{ id: 7 }))
+    println(describe(.Timeout{ ms: 3000 }))
+    println(describe(.Canceled))
+    // field access and Debug render
+    let e = .NotFound{ id: 42 }
+    println(e.id)
+    println("{e:?}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "no record 7\ntoo slow\ngave up\n42\nNotFound{ id: 42 }\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestVariantNamespacing(t *testing.T) {
+	decl := "type Color = Red | Green | Blue\n"
+	// Bare variant names are pattern-only; expressions must qualify.
+	_, err := runProg(t, decl+"fn main() {\n let c = Green\n _ = c\n}")
+	if err == nil || !strings.Contains(err.Error(), "namespaced") {
+		t.Fatalf("bare variant in expression should fail, got %v", err)
+	}
+	// .Green, Color.Green, and bare-in-pattern all work.
+	out, err := runProg(t, decl+`
+fn main() {
+    let a = .Green
+    let b = Color.Green
+    println(a == b)
+    println(match a {
+        Green => "bare pattern"
+        _     => "?"
+    })
+    println(match b {
+        .Blue, .Green => "dotted pattern"
+        _             => "?"
+    })
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "true\nbare pattern\ndotted pattern\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+	// Wrong namespace is an error.
+	_, err = runProg(t, decl+"type Size = Big | Small\nfn main() {\n _ = Color.Big\n}")
+	if err == nil || !strings.Contains(err.Error(), "no variant") {
+		t.Fatalf("cross-type access should fail, got %v", err)
+	}
+	// Named-field variant needs braces.
+	_, err = runProg(t, "type E = Nf{ id: Int }\nfn main() {\n _ = .Nf\n}")
+	if err == nil || !strings.Contains(err.Error(), "named fields") {
+		t.Fatalf("braceless named-field variant should fail, got %v", err)
+	}
+	// Missing field at construction.
+	_, err = runProg(t, "type E = Nf{ id: Int, why: String }\nfn main() {\n _ = .Nf{ id: 1 }\n}")
+	if err == nil || !strings.Contains(err.Error(), "missing field") {
+		t.Fatalf("missing field should fail, got %v", err)
+	}
+}
+
+func TestDotShorthandVsLineContinuation(t *testing.T) {
+	// `.Variant` at line start begins a statement (capitalised after
+	// dot); `.method` at line start continues the previous one.
+	out, err := runProg(t, `
+type Color = Red | Green
+fn main() {
+    let xs = [1, 2, 3].iter()
+        .map(|n| n * 2)
+        .collect()
+    let c =
+        .Green
+    println(xs.len())
+    println(match c {
+        .Green => "g"
+        _      => "?"
+    })
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "3\ng\n" {
+		t.Fatalf("output:\n%q", out)
 	}
 }

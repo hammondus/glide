@@ -42,9 +42,10 @@ type (
 		Fields map[string]Value
 	}
 	VariantV struct {
-		Type string
-		Name string
-		Args []Value
+		Type       string
+		Name       string
+		Args       []Value
+		FieldNames []string // named-field variants; parallel to Args
 	}
 	TypeV string // a type name as a value: Tree.new()
 
@@ -193,6 +194,12 @@ func render(v Value, quoted bool) string {
 		parts := make([]string, len(x.Args))
 		for i, a := range x.Args {
 			parts[i] = render(a, true)
+			if x.FieldNames != nil {
+				parts[i] = x.FieldNames[i] + ": " + parts[i]
+			}
+		}
+		if x.FieldNames != nil {
+			return x.Name + "{ " + strings.Join(parts, ", ") + " }"
 		}
 		return x.Name + "(" + strings.Join(parts, ", ") + ")"
 	case TypeV:

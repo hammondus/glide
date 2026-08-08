@@ -271,7 +271,34 @@ func (p *parser) parseTypeDecl() (*ast.TypeDecl, error) {
 			return nil, p.errf("variant names are capitalised: %q", vn.Text)
 		}
 		v := ast.VariantDecl{Name: vn.Text}
-		if p.accept(lexer.LParen) {
+		if p.cur().Kind == lexer.LBrace {
+			// Named-field variant: NotFound{ id: Int }
+			p.next()
+			for {
+				p.skipSemis()
+				if p.accept(lexer.RBrace) {
+					break
+				}
+				fn, err := p.expect(lexer.Ident, "variant field")
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(lexer.Colon, "variant field"); err != nil {
+					return nil, err
+				}
+				ft, err := p.parseType()
+				if err != nil {
+					return nil, err
+				}
+				v.Fields = append(v.Fields, ast.FieldDecl{Name: fn.Text, Type: ft})
+				if !p.accept(lexer.Comma) {
+					p.skipSemis()
+				}
+			}
+			if len(v.Fields) == 0 {
+				return nil, p.errf("named-field variant %s{} needs at least one field (a bare variant has no braces)", vn.Text)
+			}
+		} else if p.accept(lexer.LParen) {
 			for p.cur().Kind != lexer.RParen {
 				if _, err := p.parseType(); err != nil {
 					return nil, err
@@ -723,28 +750,20 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 		}
 		// Case is load-bearing: Circle(r) matches, point binds.
 		if isCapitalized(t.Text) {
-			if p.cur().Kind == lexer.LBrace {
-				return p.parseStructPat(t.Text, t.Line)
-			}
-			cp := &ast.CtorPat{Name: t.Text}
-			if p.accept(lexer.LParen) {
-				for p.cur().Kind != lexer.RParen {
-					arg, err := p.parsePattern()
-					if err != nil {
-						return nil, err
-					}
-					cp.Args = append(cp.Args, arg)
-					if !p.accept(lexer.Comma) {
-						break
-					}
-				}
-				if _, err := p.expect(lexer.RParen, "constructor pattern"); err != nil {
-					return nil, err
-				}
-			}
-			return cp, nil
+			return p.parseCtorTail(t)
 		}
 		return &ast.IdentPat{Name: t.Text}, nil
+	case lexer.Dot:
+		// `.Variant` pattern — same shorthand as in expressions.
+		p.next()
+		t, err := p.expect(lexer.Ident, "pattern")
+		if err != nil {
+			return nil, err
+		}
+		if !isCapitalized(t.Text) {
+			return nil, p.errf("`.%s`: dot shorthand names a variant (capitalised)", t.Text)
+		}
+		return p.parseCtorTail(t)
 	case lexer.LParen:
 		p.next()
 		tp := &ast.TuplePat{}
@@ -825,6 +844,31 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 		return &ast.BoolPat{V: false}, nil
 	}
 	return nil, p.errf("expected a pattern, found %s", p.cur().Kind)
+}
+
+// parseCtorTail finishes a constructor pattern whose (capitalised)
+// name token is consumed: `Name`, `Name(pats…)`, or `Name{ fields }`.
+func (p *parser) parseCtorTail(t lexer.Token) (ast.Pattern, error) {
+	if p.cur().Kind == lexer.LBrace {
+		return p.parseStructPat(t.Text, t.Line)
+	}
+	cp := &ast.CtorPat{Name: t.Text}
+	if p.accept(lexer.LParen) {
+		for p.cur().Kind != lexer.RParen {
+			arg, err := p.parsePattern()
+			if err != nil {
+				return nil, err
+			}
+			cp.Args = append(cp.Args, arg)
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+		if _, err := p.expect(lexer.RParen, "constructor pattern"); err != nil {
+			return nil, err
+		}
+	}
+	return cp, nil
 }
 
 // parseStructPat parses `Type{ field, other: pat, .. }` (the `{` is
@@ -1088,6 +1132,21 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 			return p.parseStructLit(t)
 		}
 		return &ast.IdentExpr{Name: t.Text, Line: t.Line}, nil
+	case lexer.Dot:
+		// `.Variant` — Swift's dot shorthand (variants only; fields
+		// and methods are lowercase and need a value on the left).
+		line := p.next().Line
+		t, err := p.expect(lexer.Ident, "dot shorthand")
+		if err != nil {
+			return nil, err
+		}
+		if !isCapitalized(t.Text) {
+			return nil, p.errf("`.%s`: dot shorthand names a variant (capitalised)", t.Text)
+		}
+		if p.cur().Kind == lexer.LBrace && !p.noStruct {
+			return p.parseStructLit(t)
+		}
+		return &ast.DotName{Name: t.Text, Line: line}, nil
 	case lexer.KwIf:
 		return p.parseIf()
 	case lexer.KwMatch:

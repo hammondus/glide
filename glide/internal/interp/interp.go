@@ -34,6 +34,7 @@ type Interp struct {
 type variantInfo struct {
 	typeName string
 	arity    int
+	fields   []string // named-field form; nil for positional/bare
 }
 
 // testFail aborts a test case; the runner reports it.
@@ -115,7 +116,11 @@ func (in *Interp) load(f *ast.File) error {
 			if prev, dup := in.variants[v.Name]; dup {
 				return fmt.Errorf("line %d: variant %q already declared by type %s", td.Line, v.Name, prev.typeName)
 			}
-			in.variants[v.Name] = variantInfo{typeName: td.Name, arity: v.Arity}
+			vi := variantInfo{typeName: td.Name, arity: v.Arity}
+			for _, fd := range v.Fields {
+				vi.fields = append(vi.fields, fd.Name)
+			}
+			in.variants[v.Name] = vi
 		}
 	}
 	for _, im := range f.Impls {
@@ -590,6 +595,36 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 		}
 		return all, true
 	case *ast.StructPat:
+		// Named-field variant: NotFound{ id } — same field rules.
+		if vv, isVar := v.(*VariantV); isVar {
+			if vv.Name != pt.Type || vv.FieldNames == nil {
+				return nil, false
+			}
+			if !pt.Rest && len(pt.Fields) != len(vv.FieldNames) {
+				panic(rtErr{pt.Line, fmt.Sprintf(
+					"variant pattern %s{…} names %d of %d fields; mention them all, or end with `..` for a deliberate partial match",
+					pt.Type, len(pt.Fields), len(vv.FieldNames))})
+			}
+			var all []bound
+			for _, f := range pt.Fields {
+				idx := -1
+				for i, fn := range vv.FieldNames {
+					if fn == f.Name {
+						idx = i
+						break
+					}
+				}
+				if idx < 0 {
+					panic(rtErr{pt.Line, fmt.Sprintf("%s has no field %q", pt.Type, f.Name)})
+				}
+				bs, ok := match(f.Pat, vv.Args[idx])
+				if !ok {
+					return nil, false
+				}
+				all = append(all, bs...)
+			}
+			return all, true
+		}
 		sv, ok := v.(*StructV)
 		if !ok || sv.Type != pt.Type {
 			return nil, false
@@ -845,6 +880,21 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		if sg != nil {
 			return UnitV{}, sg
 		}
+		if tv, isType := v.(TypeV); isType {
+			// Namespaced variant: Color.Red, Shape.Circle (ctor).
+			if vi, ok := in.variants[ex.Name]; ok && vi.typeName == string(tv) {
+				return in.variantValue(ex.Name, vi, ex.Line), nil
+			}
+			panic(rtErr{ex.Line, fmt.Sprintf("%s has no variant %q", tv, ex.Name)})
+		}
+		if vv, isVar := v.(*VariantV); isVar {
+			for i, fn := range vv.FieldNames {
+				if fn == ex.Name {
+					return vv.Args[i], nil
+				}
+			}
+			panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q", vv.Name, ex.Name)})
+		}
 		st, ok := v.(*StructV)
 		if !ok {
 			panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q (methods need call parens)", typeName(v), ex.Name)})
@@ -856,6 +906,12 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		return fv, nil
 	case *ast.StructLit:
 		return in.evalStructLit(ex, env)
+	case *ast.DotName:
+		vi, ok := in.variants[ex.Name]
+		if !ok {
+			panic(rtErr{ex.Line, fmt.Sprintf(".%s: no type declares a variant %q", ex.Name, ex.Name)})
+		}
+		return in.variantValue(ex.Name, vi, ex.Line), nil
 	case *ast.Match:
 		return in.evalMatch(ex, env)
 	case *ast.CondMatch:
@@ -888,16 +944,9 @@ func (in *Interp) evalIdent(ex *ast.IdentExpr, env *Env) (Value, *sig) {
 		return TypeV(ex.Name), nil
 	}
 	if vi, ok := in.variants[ex.Name]; ok {
-		if vi.arity == 0 {
-			return &VariantV{Type: vi.typeName, Name: ex.Name}, nil
-		}
-		name := ex.Name
-		return &BuiltinV{Name: name, Fn: func(_ *Interp, args []Value, line int) Value {
-			if len(args) != vi.arity {
-				panic(rtErr{line, fmt.Sprintf("%s takes %d argument(s), got %d", name, vi.arity, len(args))})
-			}
-			return &VariantV{Type: vi.typeName, Name: name, Args: args}
-		}}, nil
+		panic(rtErr{ex.Line, fmt.Sprintf(
+			"variants are namespaced: write .%s or %s.%s (bare variant names are pattern-only)",
+			ex.Name, vi.typeName, ex.Name)})
 	}
 	if b, ok := builtins[ex.Name]; ok {
 		return b, nil
@@ -908,6 +957,9 @@ func (in *Interp) evalIdent(ex *ast.IdentExpr, env *Env) (Value, *sig) {
 func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
 	td, ok := in.types[ex.Type]
 	if !ok || td.Fields == nil {
+		if vi, isVar := in.variants[ex.Type]; isVar && vi.fields != nil {
+			return in.evalVariantLit(ex, vi, env)
+		}
 		panic(rtErr{ex.Line, fmt.Sprintf("%q is not a struct type", ex.Type)})
 	}
 	sv := &StructV{Type: ex.Type, Fields: map[string]Value{}}
@@ -952,6 +1004,53 @@ func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
 		}
 	}
 	return sv, nil
+}
+
+// evalVariantLit constructs a named-field variant: NotFound{ id: 7 }.
+// Every declared field, exactly once; ..base is a struct affair.
+func (in *Interp) evalVariantLit(ex *ast.StructLit, vi variantInfo, env *Env) (Value, *sig) {
+	if ex.Base != nil {
+		panic(rtErr{ex.Line, fmt.Sprintf("..base is for structs; %s is a variant of %s", ex.Type, vi.typeName)})
+	}
+	given := map[string]Value{}
+	for i, name := range ex.Names {
+		v, sg := in.eval(ex.Vals[i], env)
+		if sg != nil {
+			return UnitV{}, sg
+		}
+		given[name] = v
+	}
+	vv := &VariantV{Type: vi.typeName, Name: ex.Type, FieldNames: vi.fields}
+	for _, f := range vi.fields {
+		v, ok := given[f]
+		if !ok {
+			panic(rtErr{ex.Line, fmt.Sprintf("%s is missing field %q (no zero values — every field is named)", ex.Type, f)})
+		}
+		vv.Args = append(vv.Args, v)
+		delete(given, f)
+	}
+	for name := range given {
+		panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q", ex.Type, name)})
+	}
+	return vv, nil
+}
+
+// variantValue resolves a variant reference: an arity-0 variant is
+// its value; a positional-payload variant is its constructor; a
+// named-field variant needs braces.
+func (in *Interp) variantValue(name string, vi variantInfo, line int) Value {
+	if vi.fields != nil {
+		panic(rtErr{line, fmt.Sprintf("%s has named fields; construct it with %s{ … }", name, name)})
+	}
+	if vi.arity == 0 {
+		return &VariantV{Type: vi.typeName, Name: name}
+	}
+	return &BuiltinV{Name: name, Fn: func(_ *Interp, args []Value, l int) Value {
+		if len(args) != vi.arity {
+			panic(rtErr{l, fmt.Sprintf("%s takes %d argument(s), got %d", name, vi.arity, len(args))})
+		}
+		return &VariantV{Type: vi.typeName, Name: name, Args: args}
+	}}
 }
 
 func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
@@ -1395,6 +1494,10 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 		}
 		// Associated functions: Tree.new()
 		if tv, isType := recv.(TypeV); isType {
+			// Namespaced variant constructor: Shape.Circle(2).
+			if vi, ok := in.variants[f.Name]; ok && vi.typeName == string(tv) {
+				return in.callValue(in.variantValue(f.Name, vi, ex.Line), args, ex.Line), nil
+			}
 			m := in.methods[string(tv)][f.Name]
 			if m == nil {
 				panic(rtErr{ex.Line, fmt.Sprintf("type %s has no associated function %q", tv, f.Name)})

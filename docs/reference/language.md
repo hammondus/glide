@@ -23,8 +23,11 @@ dynamically (mut, shadowing, let-else divergence, tail values).
   can end an expression (identifier, literal, `)`, `]`, `}`, `?`);
   a trailing operator or `.` continues the line, and so does a line
   *beginning* with `.` — multi-line adapter chains put each
-  `.filter(…)` on its own line (`..` at line start does not
-  continue). `else` sits on the same line as its `}`. ✓
+  `.filter(…)` on its own line. Two exceptions, both case-decided:
+  `..` at line start is a range token, and `.Red` (capitalised after
+  the dot) is the variant shorthand starting a new statement —
+  methods and fields are lowercase, so the cases cannot collide.
+  `else` sits on the same line as its `}`. ✓
 - Braces are mandatory on every block, even one-line bodies. ✓
 - Case is meaningful: Capitalised = type / variant / constructor;
   lowercase = binding / function / field. In patterns, `Circle(r)`
@@ -177,8 +180,15 @@ path). Discard is explicit: `_ = expr` ✓.
   ○. No overloading, no variadics — permanent.
 - `type Name = struct { field: Type, … }` ✓ — mandatory init: every
   field, no zero values ✓.
-- `type Name = VariantA | VariantB(T) | …` — sum type ✓ (positional
-  payloads; named-field variants ○, dot-shorthand `.NotFound` ○).
+- `type Name = VariantA | VariantB(T) | NotFound{ id: Int } | …` —
+  sum type with positional or named-field payloads ✓. Variants are
+  namespaced: `Color.Red` in full, `.Red` where the shorthand reads
+  (M2 resolves it in the global variant namespace; the checker era
+  resolves in the expected type). Bare variant names are
+  pattern-only — in an expression they error with the fix. Named
+  fields: construct `.NotFound{ id: 7 }`, read `e.id`, match
+  `NotFound{ id }` under the same mention-all-or-`..` rule as
+  structs.
 - `impl TypeName { fn method(self) … }` ✓; `impl Trait for Type` ✓
   (conformance asserted, not verified, until the checker).
 - Module-level: functions and types only, order-independent ✓;

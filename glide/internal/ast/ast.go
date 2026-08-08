@@ -37,8 +37,9 @@ type FieldDecl struct {
 }
 
 type VariantDecl struct {
-	Name  string
-	Arity int // positional payload count; 0 = bare variant
+	Name   string
+	Arity  int         // positional payload count; 0 = bare variant
+	Fields []FieldDecl // named-field form: NotFound{ id: Int }
 }
 
 // TypeDecl: exactly one of Fields (struct) / Variants (sum) is set.
@@ -250,6 +251,14 @@ type Spread struct {
 	Line int
 }
 
+// DotName is `.Variant` — Swift's dot shorthand. M2 resolves it in
+// the global variant namespace (variant names are file-unique); the
+// checker era resolves it in the expected type instead.
+type DotName struct {
+	Name string
+	Line int
+}
+
 type Binary struct {
 	Op   string
 	L, R Expr
@@ -361,6 +370,7 @@ func (*IdentExpr) expr()  {}
 func (*TupleLit) expr()   {}
 func (*ListLit) expr()    {}
 func (*Spread) expr()     {}
+func (*DotName) expr()    {}
 func (*MapLit) expr()     {}
 func (*Binary) expr()     {}
 func (*Unary) expr()      {}

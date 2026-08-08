@@ -948,7 +948,11 @@ Go's model, with its defects designed out:
   are written one `.adapter(…)` per line and Rust/JS muscle memory
   puts the dot at line start; trailing-dot-only survived exactly as
   long as the first real adapter chain. `..` at line start is a
-  range token, not a continuation. `else` sits on the same line as
+  range token, not a continuation — and `.Red` (capitalised after
+  the dot) is the variant shorthand starting a new statement, not a
+  continuation: the case rule (methods/fields lowercase, variants
+  capitalised) keeps the two dot meanings from ever colliding.
+  `else` sits on the same line as
   its `}` — the canonical formatter guarantees it, so the rule never
   bites. (Forced by the interpreter; ratified.)
 - **Interpolation escape: `\{` for a literal brace**, joining the

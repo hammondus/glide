@@ -288,10 +288,15 @@ func (lx *lexer) lexOp() error {
 		// its own line. Every Semi is newline-synthesized (there is
 		// no `;`), so retracting it here cannot eat explicit
 		// punctuation. `..` at line start is DotDot and stays a
-		// statement break.
+		// statement break — and so does `.Variant`: case is
+		// load-bearing, methods/fields are lowercase, so a
+		// capitalised name after the dot is the variant shorthand
+		// starting a new statement, not a continuation.
 		if k == Dot {
 			if p := lx.prev(); p != nil && p.Kind == Semi {
-				lx.toks = lx.toks[:len(lx.toks)-1]
+				if !(lx.i+1 < len(lx.src) && lx.src[lx.i+1] >= 'A' && lx.src[lx.i+1] <= 'Z') {
+					lx.toks = lx.toks[:len(lx.toks)-1]
+				}
 			}
 		}
 		lx.emit(k, string(c))
