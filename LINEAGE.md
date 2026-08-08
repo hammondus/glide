@@ -1268,3 +1268,40 @@ defer, channels all prepaid and battle-tested, cross-compilation and
 static binaries free, bootstrap chain auditable from a mainstream
 toolchain. No binary seed, no trusting-trust anxiety. LLVM + own
 runtime stays the someday-mountain, optional.
+
+## Embedding: the interpreter as a scripting library
+
+- **1988** — Tcl. John Ousterhout builds the first language designed
+  as a C *library* first, application second: embed the interpreter,
+  extend the host. The "extension language" category starts here.
+- **1993** — Lua, at PUC-Rio: a small embeddable extension language
+  built for Petrobras data-entry tools becomes *the* game-industry
+  scripting layer. Its premise matches Glide's: the host provides the
+  capabilities, the script provides the logic.
+- **1994** — GNU declares Guile its official extension language;
+  adoption stays thin for decades. Evidence that embedding is won by
+  being small and pinnable, not by decree.
+- **2006→today** — Lua 5.1 freezes in the wild: LuaJIT never leaves
+  5.1, Redis embeds 5.1 and stays there, World of Warcraft likewise,
+  while Lua-the-language moves on to 5.4. Proof that a *frozen*
+  embedded version is a fully-lived life — the precedent for Glide's
+  freeze-at-self-hosting plan.
+- **2012–2024** — JS interpreters written in Go: otto (2012), goja
+  (2016, ES5.1 in pure Go, much of ES6+ later), sobek (2024, Grafana's
+  goja fork that scripts k6). The exact structural precedent — an interpreter in Go,
+  embedded in Go programs, pinned as an ordinary Go module — except
+  the language they embed is untyped.
+- **Counter-evidence** — embedding CPython: a large runtime, a GIL,
+  and an embedding API that tracks the evolving language. Blender and
+  GIMP carry it; nobody calls it light. Tracking a moving language
+  from inside host binaries is the expensive branch — the one Glide
+  declines by freezing.
+
+**Glide takes** the Lua/goja lane: the tree-walking interpreter (which
+must exist for bootstrap anyway) gets a small public Go embedding API;
+hosts pin it as a Go module version; stdlib shims are injectable so
+the embedder chooses capabilities (untrusted scripts are never handed
+`fs` or `net`); and at self-hosting the embedded interpreter freezes
+rather than tracking the language, so the evolving language keeps
+exactly one implementation. Embedding never argues a language change —
+influence flows one way, compiled language to script, by decree.

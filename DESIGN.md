@@ -1712,7 +1712,8 @@ The bootstrap sequence:
    family was designed for this). The compiler in Glide will be nicer
    code than the interpreter that runs it.
 3. **First native backend: a Glide→Go transpiler**, which then
-   compiles itself; the interpreter retires to bootstrap seed. Our
+   compiles itself; the interpreter retires to bootstrap seed (and
+   lives on, frozen, as the embedding library — next section). Our
    runtime model was Go's from day one — green threads, tracing GC,
    defer, channels, value structs — so Glide lowers onto Go source
    nearly 1:1 and every hellish part is prepaid: GC + scheduler (Go's,
@@ -1735,10 +1736,44 @@ sum types → tagged structs (mechanical), matches → switches
 prototype before depending on the transpiler)**, dev-tier overflow
 traps → explicit checks in emitted code.
 
+## Embedding: Glide as a scripting library
+
+Host programs (other Go projects) need an embedded scripting language;
+the incumbent plan was sobek (Grafana's goja fork — embedded JS in Go).
+If Glide is the better language, the hosts should get it — without the
+scripting tail wagging the compiled dog. Decided:
+
+- **The interpreter gets a small public Go API.** It exists anyway
+  (bootstrap phases 1–2 require it): construct a VM, run source, bind
+  Go functions, convert values, context cancellation for runaway
+  scripts. Best-effort stability pre-1.0; hosts pin the interpreter as
+  an ordinary Go module version — toolchain pinning for free.
+- **Influence is one-way.** The compiled language is the design
+  authority; embedding takes what it gets. No semantics bent because
+  they're awkward to marshal to Go, no dynamic-eval softening of the
+  type story. The moment embedding argues *for* a language change, it
+  loses.
+- **Post-self-hosting, the embedded interpreter freezes** at the
+  then-current language version instead of tracking — the evolving
+  language keeps exactly one implementation. Frozen ≠ dead: it remains
+  a complete, type-checked scripting language (the Lua 5.1 precedent —
+  see LINEAGE).
+- **Stdlib shims are injectable per host.** They are already Go code
+  behind Glide interfaces; making the provided set *chosen by the
+  embedder, not hard-wired* buys capability-style sandboxing for free —
+  untrusted scripts are simply never handed `fs` or `net`. This is the
+  one embedding requirement worth honouring while building the
+  interpreter, because it is painful to retrofit.
+- **Accepted cost**: the value-marshaling layer (sum types, `Result`,
+  `Option` ↔ Go values) and the host-control surface (interrupt,
+  resource limits) are real design work that JS-in-Go never had to do
+  at this richness.
+
 ## Open questions (decide before/while building)
 
-- (none currently — all original questions resolved; new ones land here
-  as they arise)
+- **Embedding API shape** — Glide↔Go value-marshaling rules (sum
+  types/`Result`/`Option` as Go values), interrupt and resource-limit
+  surface. Decide while wrapping the interpreter, not before.
 
 
 

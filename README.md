@@ -13,12 +13,33 @@ Nothing here is really new — and that's deliberate. The aim is the best
 features from a whole range of languages, minus their worst ones. Glide is a
 clean slate, so no baggage has to be kept. [`LINEAGE.md`](LINEAGE.md) traces
 every borrowed idea back to its source. Inspiration has come from:
-- Go
-- Rust
-- Zig
-- Swift
-- Haskell
-- JavaScript (only joking)
+
+- **Go** — kept: the whole runtime model (green threads, channels, GC,
+  `defer`), sub-second builds, one static binary, one canonical formatter,
+  errors as values. Rejected: `nil`, zero values, implicit interfaces,
+  `init()`, runtime reflection.
+- **Rust** — kept: `Result` + `?`, sum types with exhaustive `match`,
+  `let`/`mut` immutability, `|x|` closures, `Mutex<T>` that owns its data.
+  Rejected: the borrow checker, lifetimes, macros, async/await, the
+  turbofish.
+- **Zig** — kept: comptime instead of macros, `errdefer`, `test` blocks in
+  the language itself, overflow traps in dev builds. Rejected: manual
+  memory management, comptime-as-generics, errors on every unused variable.
+- **Swift** — kept: `T?` optionals, `if let` and `let … else`, declared
+  trait conformance, leading-dot enum shorthand, block-scoped `defer`.
+  Rejected: trailing closures, `$0`, the two-name parameter split.
+- **Haskell & the ML family** — kept: the data model — sum types, pattern
+  matching, no null, type classes (as traits), typed holes. Rejected:
+  whole-program type inference, user-invented operators.
+- **Kotlin** — kept: named arguments and default values, wholesale.
+  Rejected: trailing closures and `it`.
+- **JavaScript** — (only joking)
+
+Smaller debts, all recorded in [`LINEAGE.md`](LINEAGE.md): C# (`??`, and
+generics that parse without a turbofish), Java (`java.time`, the one part
+stolen without irony), Erlang (supervision policies), Lua (the embedding
+model), CLU (generators), Python's Trio library (nurseries for structured
+concurrency).
 
 The result:
 
@@ -31,7 +52,10 @@ Today it is a tree-walking interpreter written in Go, but the goal is
 self-hosting: the compiler will be written in Glide, with a Glide→Go
 transpiler as the first native backend. Until then the interpreter is the
 dev tier — and it makes type-checked scripting nearly free:
-`glide run tool.gld`, or a `#!/usr/bin/env glide run` shebang.
+`glide run tool.gld`, or a `#!/usr/bin/env glide run` shebang. The
+interpreter will also be embeddable as a Go library, so Go programs can
+use Glide as their scripting language (see the embedding section of
+[`DESIGN.md`](DESIGN.md)).
 
 **The ubiquitous hello world**
 ```glide
