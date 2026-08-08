@@ -56,6 +56,9 @@ const (
 	Assign
 	PlusEq
 	MinusEq
+	StarEq
+	SlashEq
+	PercentEq
 	Plus
 	Minus
 	Star
@@ -85,7 +88,8 @@ var kindNames = map[Kind]string{
 	LParen: "'('", RParen: "')'", LBrack: "'['", RBrack: "']'",
 	LBrace: "'{'", RBrace: "'}'", Comma: "','", Colon: "':'",
 	Dot: "'.'", DotDot: "'..'", Arrow: "'->'", Assign: "'='",
-	PlusEq: "'+='", MinusEq: "'-='", Plus: "'+'", Minus: "'-'",
+	PlusEq: "'+='", MinusEq: "'-='", StarEq: "'*='", SlashEq: "'/='",
+	PercentEq: "'%='", Plus: "'+'", Minus: "'-'",
 	Star: "'*'", Slash: "'/'", Percent: "'%'", Eq: "'=='", Ne: "'!='",
 	Lt: "'<'", Le: "'<='", Gt: "'>'", Ge: "'>='", Not: "'!'",
 	AndAnd: "'&&'", OrOr: "'||'", Pipe: "'|'", Question: "'?'", QQ: "'??'",
@@ -259,6 +263,7 @@ func (lx *lexer) lexOp() error {
 	twoKinds := map[string]Kind{
 		"->": Arrow, "..": DotDot, "??": QQ, "&&": AndAnd, "||": OrOr,
 		"==": Eq, "!=": Ne, "<=": Le, ">=": Ge, "+=": PlusEq, "-=": MinusEq,
+		"*=": StarEq, "/=": SlashEq, "%=": PercentEq,
 		"=>": FatArrow,
 	}
 	if k, ok := twoKinds[two]; ok {

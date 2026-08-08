@@ -613,3 +613,43 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+func TestCompoundAssignFullSet(t *testing.T) {
+	out, err := runProg(t, `
+type Point = struct { x: Int }
+fn main() {
+    let mut a = 7
+    a *= 6
+    a /= 2
+    a %= 4
+    println("{a}")
+
+    let mut xs = [10, 20]
+    xs[1] *= 3
+    xs[0] /= 5
+    xs[0] %= 4
+    println("{xs[0]} {xs[1]}")
+
+    let mut m = ["n": 9]
+    m["n"] %= 5
+    println("{m["n"]}")
+
+    let mut p = Point{ x: 8 }
+    p.x /= 2
+    println("{p.x}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 7*6=42, 42/2=21, 21%4=1
+	if out != "1\n2 60\n4\n4\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestCompoundDivideByZero(t *testing.T) {
+	_, err := runProg(t, "fn main() {\n let mut a = 1\n a /= 0\n}")
+	if err == nil || !strings.Contains(err.Error(), "division by zero") {
+		t.Fatalf("want division by zero, got: %v", err)
+	}
+}

@@ -145,8 +145,9 @@ index `xs[i]` / `m[k]`, field `.name`, tuple field `.0`, try `?` ✓.
 - `or |e| { … }` — handle-in-place error block — ○ **and unratified**
   (GRAMMAR.md flags it as the biggest open fight).
 
-Assignment (statements, not expressions): `=` ✓, `+=` `-=` ✓,
-`*=` `/=` `%=` ○. Discard is explicit: `_ = expr` ✓.
+Assignment (statements, not expressions): `=` ✓, `+=` `-=` `*=`
+`/=` `%=` ✓ (on names, fields, and index targets; requires a `mut`
+path). Discard is explicit: `_ = expr` ✓.
 
 ## Declarations
 

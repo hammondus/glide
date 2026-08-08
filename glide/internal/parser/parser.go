@@ -582,7 +582,8 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		return nil, err
 	}
 	switch p.cur().Kind {
-	case lexer.Assign, lexer.PlusEq, lexer.MinusEq:
+	case lexer.Assign, lexer.PlusEq, lexer.MinusEq,
+		lexer.StarEq, lexer.SlashEq, lexer.PercentEq:
 		op := p.next().Text
 		if err := validAssignTarget(e, op); err != nil {
 			return nil, fmt.Errorf("line %d: %v", line, err)
