@@ -1548,3 +1548,104 @@ func TestLabelRules(t *testing.T) {
 		t.Fatal("label on a non-loop should not parse")
 	}
 }
+
+func TestTraitDefaultMethods(t *testing.T) {
+	out, err := runProg(t, `
+trait Greeter {
+    fn name(self) -> String
+    fn greet(self) -> String {
+        "Hello, {self.name()}!"
+    }
+}
+type Dog = struct { called: String }
+impl Greeter for Dog {
+    fn name(self) -> String { self.called }
+}
+type Robot = struct { id: Int }
+impl Greeter for Robot {
+    fn name(self) -> String { "unit {self.id}" }
+    // Overriding the default wins.
+    fn greet(self) -> String { "BEEP {self.name()}" }
+}
+fn main() {
+    println(Dog{ called: "Rex" }.greet())
+    println(Robot{ id: 7 }.greet())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Hello, Rex!\nBEEP unit 7\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestTraitRules(t *testing.T) {
+	// Two traits providing the same unoverridden default: ambiguous.
+	_, err := runProg(t, `
+trait A {
+    fn hi(self) -> String { "a" }
+}
+trait B {
+    fn hi(self) -> String { "b" }
+}
+type T = struct { x: Int }
+impl A for T {}
+impl B for T {}
+fn main() {
+    _ = T{ x: 1 }.hi()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("want ambiguity error, got %v", err)
+	}
+
+	// A required (body-less) method unimplemented: plain no-method.
+	_, err = runProg(t, `
+trait A {
+    fn hi(self) -> String
+}
+type T = struct { x: Int }
+impl A for T {}
+fn main() {
+    _ = T{ x: 1 }.hi()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "no method") {
+		t.Fatalf("want no-method error, got %v", err)
+	}
+
+	// Trait methods need a self receiver.
+	if _, perr := parser.ParseFile("trait A {\n fn free() -> Int { 1 }\n}\nfn main() {}"); perr == nil {
+		t.Fatal("selfless trait method should not parse")
+	}
+}
+
+func TestTraitDefaultIterMakesForable(t *testing.T) {
+	// A trait default iter() makes every implementor for-able.
+	out, err := runProg(t, `
+trait Pair {
+    fn a(self) -> Int
+    fn b(self) -> Int
+    fn iter(self) -> Iterator<Int> {
+        yield self.a()
+        yield self.b()
+    }
+}
+type Point = struct { x: Int, y: Int }
+impl Pair for Point {
+    fn a(self) -> Int { self.x }
+    fn b(self) -> Int { self.y }
+}
+fn main() {
+    // Struct literals are off in loop headers (the brace belongs to
+    // the body), so bind first.
+    let p = Point{ x: 4, y: 9 }
+    for v in p {
+        println(v)
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "4\n9\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}

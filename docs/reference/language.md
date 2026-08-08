@@ -56,6 +56,7 @@ Reserved words; none can be used as an identifier.
 | `break` / `continue` | loop control; parse error outside a loop | ✓ |
 | `defer` | block-scoped cleanup: `defer { … }` — runs LIFO at exit of the *enclosing block* (per-iteration in a loop body), on normal exit, `return`/`break`/`continue`, and panic unwind; skipped by `os.exit`. Body may not `return` (runtime error) or `break`/`continue` an enclosing loop (parse error) | ✓ |
 | `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
+| `trait` | trait declaration: bodied methods are defaults, inherited by any type declaring `impl Trait for Type` unless overridden; body-less methods are required signatures (unverified until the checker); all trait methods take `self`. Two traits supplying the same unoverridden default is an error at the call, naming both | ✓ |
 
 Contextual keywords — only special at top level, followed by a string
 literal; otherwise ordinary identifiers (`let test = …` is legal):
@@ -70,7 +71,6 @@ Designed, not yet in the lexer:
 | Keyword | Meaning | Status |
 |---|---|---|
 | `const` | comptime-evaluated binding; the only module-level state | ○ |
-| `trait` | trait declaration | ○ |
 | `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |
 | `unsafe` | `unsafe fn` / `unsafe { }` | ○ |
 | `scope` | structured-concurrency scope | ○ |
@@ -197,7 +197,9 @@ path). Discard is explicit: `_ = expr` ✓.
   `NotFound{ id }` under the same mention-all-or-`..` rule as
   structs.
 - `impl TypeName { fn method(self) … }` ✓; `impl Trait for Type` ✓
-  (conformance asserted, not verified, until the checker).
+  (conformance asserted, not verified, until the checker — but
+  declaring it inherits the trait's default methods; a trait default
+  `iter()` makes implementors `for`-able).
 - Module-level: functions and types only, order-independent ✓;
   `const` ○; no `init()`, no life before `main` — permanent.
 

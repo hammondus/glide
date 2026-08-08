@@ -137,11 +137,17 @@ func (p *parser) parseFile() (*ast.File, error) {
 			}
 			f.Imports = append(f.Imports, t.Text)
 		case lexer.KwFn:
-			fn, err := p.parseFn()
+			fn, err := p.parseFn(false)
 			if err != nil {
 				return nil, err
 			}
 			f.Funcs = append(f.Funcs, fn)
+		case lexer.KwTrait:
+			tr, err := p.parseTrait()
+			if err != nil {
+				return nil, err
+			}
+			f.Traits = append(f.Traits, tr)
 		case lexer.KwType:
 			td, err := p.parseTypeDecl()
 			if err != nil {
@@ -357,11 +363,48 @@ func (p *parser) parseImpl() (*ast.ImplBlock, error) {
 		if p.cur().Kind != lexer.KwFn {
 			return nil, p.errf("impl blocks hold fn declarations, found %s", p.cur().Kind)
 		}
-		fn, err := p.parseFn()
+		fn, err := p.parseFn(false)
 		if err != nil {
 			return nil, err
 		}
 		im.Fns = append(im.Fns, fn)
+	}
+}
+
+// parseTrait parses `trait Name { fn sig(self) -> T  fn dflt(self) { … } }`.
+// Bodies are default methods; body-less fns are required signatures.
+func (p *parser) parseTrait() (*ast.TraitDecl, error) {
+	line := p.next().Line // trait
+	name, err := p.expect(lexer.Ident, "trait declaration")
+	if err != nil {
+		return nil, err
+	}
+	if !isCapitalized(name.Text) {
+		return nil, p.errf("trait names are capitalised: %q", name.Text)
+	}
+	if err := p.skipGenerics(); err != nil {
+		return nil, err
+	}
+	tr := &ast.TraitDecl{Name: name.Text, Line: line}
+	if _, err := p.expect(lexer.LBrace, "trait body"); err != nil {
+		return nil, err
+	}
+	for {
+		p.skipSemis()
+		if p.accept(lexer.RBrace) {
+			return tr, nil
+		}
+		if p.cur().Kind != lexer.KwFn {
+			return nil, p.errf("trait bodies hold fn declarations, found %s", p.cur().Kind)
+		}
+		fn, err := p.parseFn(true)
+		if err != nil {
+			return nil, err
+		}
+		if fn.Self == ast.NoSelf {
+			return nil, p.errf("trait method %q needs a self receiver", fn.Name)
+		}
+		tr.Fns = append(tr.Fns, fn)
 	}
 }
 
@@ -421,7 +464,9 @@ func strLitText(t lexer.Token) string {
 	return sb.String()
 }
 
-func (p *parser) parseFn() (*ast.FuncDecl, error) {
+// parseFn parses a fn declaration; bodyOptional permits the
+// body-less required-method form inside trait blocks.
+func (p *parser) parseFn(bodyOptional bool) (*ast.FuncDecl, error) {
 	line := p.cur().Line
 	p.next() // fn
 	name, err := p.expect(lexer.Ident, "function declaration")
@@ -480,9 +525,12 @@ func (p *parser) parseFn() (*ast.FuncDecl, error) {
 			return nil, err
 		}
 	}
-	body, err := p.parseBlock()
-	if err != nil {
-		return nil, err
+	var body *ast.Block
+	if !bodyOptional || p.cur().Kind == lexer.LBrace {
+		body, err = p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &ast.FuncDecl{Name: name.Text, Self: selfMode, Params: params, RetType: ret, Body: body, Line: line}, nil
 }

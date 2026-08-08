@@ -30,6 +30,9 @@ type Interp struct {
 	genCache map[*ast.FuncDecl]bool
 	global   *Env
 	exiting  bool // os.exit in flight: skip defers (Go's rule)
+
+	traits     map[string]*ast.TraitDecl
+	typeTraits map[string][]string // type -> traits it declares impls for
 }
 
 type variantInfo struct {
@@ -89,6 +92,9 @@ func New() *Interp {
 		methods:  map[string]map[string]*ast.FuncDecl{},
 		variants: map[string]variantInfo{},
 		genCache: map[*ast.FuncDecl]bool{},
+
+		traits:     map[string]*ast.TraitDecl{},
+		typeTraits: map[string][]string{},
 	}
 }
 
@@ -125,9 +131,18 @@ func (in *Interp) load(f *ast.File) error {
 			in.variants[v.Name] = vi
 		}
 	}
+	for _, tr := range f.Traits {
+		if _, dup := in.traits[tr.Name]; dup {
+			return fmt.Errorf("line %d: trait %q declared twice", tr.Line, tr.Name)
+		}
+		in.traits[tr.Name] = tr
+	}
 	for _, im := range f.Impls {
 		if _, known := in.types[im.Target]; !known {
 			return fmt.Errorf("line %d: impl for unknown type %q", im.Line, im.Target)
+		}
+		if im.Trait != "" {
+			in.typeTraits[im.Target] = append(in.typeTraits[im.Target], im.Trait)
 		}
 		ms := in.methods[im.Target]
 		if ms == nil {
@@ -285,6 +300,34 @@ func (in *Interp) callValue(fnv Value, args []Value, line int) Value {
 		return v
 	}
 	panic(rtErr{line, fmt.Sprintf("%s is not callable", typeName(fnv))})
+}
+
+// findMethod resolves a self-method on a type: the type's own
+// (inherent or trait-impl) methods win; otherwise a default from a
+// trait the type declares. Two traits both providing an unoverridden
+// default is ambiguous — an error naming both.
+func (in *Interp) findMethod(typeName, method string, line int) *ast.FuncDecl {
+	if m := in.methods[typeName][method]; m != nil {
+		return m
+	}
+	var found *ast.FuncDecl
+	var from string
+	for _, trName := range in.typeTraits[typeName] {
+		tr := in.traits[trName]
+		if tr == nil {
+			continue // conformance asserted to an undeclared trait
+		}
+		for _, fn := range tr.Fns {
+			if fn.Name == method && fn.Body != nil {
+				if found != nil {
+					panic(rtErr{line, fmt.Sprintf("%s.%s is ambiguous: both %s and %s provide a default (override it on %s)",
+						typeName, method, from, trName, typeName)})
+				}
+				found, from = fn, trName
+			}
+		}
+	}
+	return found
 }
 
 // Statements
@@ -1593,9 +1636,10 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 			}
 			return in.callFuncNamed(m, nil, args, ex.Names, ex.Line), nil
 		}
-		// User-defined methods on structs and variants.
+		// User-defined methods on structs and variants; a trait
+		// default fills in when the type doesn't override.
 		if tn := userTypeName(recv); tn != "" {
-			m := in.methods[tn][f.Name]
+			m := in.findMethod(tn, f.Name, ex.Line)
 			if m == nil {
 				panic(rtErr{ex.Line, fmt.Sprintf("%s has no method %q", tn, f.Name)})
 			}

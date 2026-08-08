@@ -516,7 +516,7 @@ func (in *Interp) iterate(v Value, line int) func() (Value, bool) {
 		return it.Next
 	case *StructV:
 		// Anything with an iter() method is iterable.
-		if m := in.methods[it.Type]["iter"]; m != nil {
+		if m := in.findMethod(it.Type, "iter", line); m != nil {
 			res := in.callFuncSelf(m, it, nil)
 			iv, ok := res.(*IterV)
 			if !ok {

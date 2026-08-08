@@ -9,6 +9,7 @@ type File struct {
 	Funcs   []*FuncDecl
 	Types   []*TypeDecl
 	Impls   []*ImplBlock
+	Traits  []*TraitDecl
 	Tests   []*TestDecl
 	Benches []*BenchDecl
 }
@@ -48,6 +49,15 @@ type TypeDecl struct {
 	Fields   []FieldDecl
 	Variants []VariantDecl
 	Line     int
+}
+
+// TraitDecl: methods with a Body are defaults, inherited by any type
+// that declares `impl Trait for Type` and doesn't override; a nil
+// Body is a required signature (unverified until the checker).
+type TraitDecl struct {
+	Name string
+	Fns  []*FuncDecl
+	Line int
 }
 
 type ImplBlock struct {
