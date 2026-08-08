@@ -1,6 +1,9 @@
 package lexer
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func kinds(t *testing.T, src string) []Kind {
 	t.Helper()
@@ -103,6 +106,33 @@ func TestNestedStringInInterpolation(t *testing.T) {
 	}
 	if _, err := Lex(`"{"unclosed}"`); err == nil {
 		t.Fatal("unterminated nested string not rejected")
+	}
+}
+
+func TestStringErrorDiagnostics(t *testing.T) {
+	// A missing '}' before more interpolations must be caught at the
+	// stray '{' inside the spec, not misreported as an unterminated
+	// string when the closing quote is later mistaken for an opener.
+	_, err := Lex(`println("{"total":10{qty:4}{price:7}")`)
+	if err == nil || !strings.Contains(err.Error(), "format spec") {
+		t.Fatalf("missing '}' in spec: got %v", err)
+	}
+	if !strings.Contains(err.Error(), "1:21") {
+		t.Fatalf("wrong position for stray '{': got %v", err)
+	}
+
+	// A genuinely missing closing quote reports the string's opening
+	// column so it can't be confused with an interpolation error.
+	_, err = Lex(`println("{"total":10}{qty:4}")` + "\n" + `println("oops)`)
+	if err == nil || !strings.Contains(err.Error(), "2:15: unterminated string (opened at column 9)") {
+		t.Fatalf("missing closing quote: got %v", err)
+	}
+
+	// A quote inside an interpolation running to end-of-line hints at
+	// the likely dropped '}'.
+	_, err = Lex(`"{f("oops)`)
+	if err == nil || !strings.Contains(err.Error(), "missing '}'") {
+		t.Fatalf("unterminated nested string: got %v", err)
 	}
 }
 

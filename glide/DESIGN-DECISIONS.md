@@ -88,7 +88,17 @@ deliberately cut because the real compiler makes them obsolete.
   stays legal. Benches parse and are skipped (`glide bench` later).
 - **Known lexer limitation**: nested tuple access `x.0.1` lexes
   `0.1` as a float. Rust special-cases this; we will when it matters.
-  Same bucket: string literals inside interpolation are unsupported.
+- **Lexer diagnostics err at the first impossible character, never
+  guess-and-recover**: after a format spec's `:`, `{` and `"` can
+  never be legal (a spec is just a width), so the lexer errors right
+  there with the column and a "missing '}'?" hint. Without this, a
+  dropped `}` swallowed the following interpolations as spec text and
+  the intended closing quote opened a phantom nested string — the
+  reported error ("unterminated string") pointed at the wrong
+  construct entirely. Lexer errors carry line:column, and the
+  unterminated-string/interpolation errors name the column where the
+  construct opened; strings are single-line, so a bare line number
+  cannot distinguish which of several quotes on the line is at fault.
 
 ## Deliberately absent (after M2)
 

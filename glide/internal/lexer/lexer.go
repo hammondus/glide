@@ -147,7 +147,12 @@ func Lex(src string) ([]Token, error) {
 }
 
 func (lx *lexer) errf(format string, args ...any) error {
-	return fmt.Errorf("line %d: %s", lx.line, fmt.Sprintf(format, args...))
+	return fmt.Errorf("line %d:%d: %s", lx.line, lx.col(lx.i), fmt.Sprintf(format, args...))
+}
+
+// col reports the 1-based column of byte offset pos on its line.
+func (lx *lexer) col(pos int) int {
+	return pos - strings.LastIndexByte(lx.src[:pos], '\n')
 }
 
 func (lx *lexer) emit(k Kind, text string) {
@@ -273,6 +278,7 @@ func (lx *lexer) lexOp() error {
 
 func (lx *lexer) lexString() error {
 	startLine := lx.line
+	openCol := lx.col(lx.i)
 	lx.i++ // opening quote
 	var parts []StrPart
 	var lit strings.Builder
@@ -284,7 +290,7 @@ func (lx *lexer) lexString() error {
 	}
 	for {
 		if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
-			return lx.errf("unterminated string")
+			return lx.errf("unterminated string (opened at column %d)", openCol)
 		}
 		c := lx.src[lx.i]
 		switch c {
@@ -313,15 +319,23 @@ func (lx *lexer) lexString() error {
 			lx.i += 2
 		case '{':
 			flush()
+			braceCol := lx.col(lx.i)
 			lx.i++
 			depth := 0
 			exprStart := lx.i
 			specAt := -1
 			for {
 				if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
-					return lx.errf("unterminated interpolation")
+					return lx.errf("unterminated interpolation (opened at column %d)", braceCol)
 				}
 				ch := lx.src[lx.i]
+				// Nothing after a spec's ':' may open a brace or string: a
+				// spec is just a width (e.g. {x:6}). Erroring here pins the
+				// mistake — a missing '}' — to its column, instead of the
+				// stray char derailing the rest of the scan.
+				if specAt >= 0 && (ch == '{' || ch == '"') {
+					return lx.errf("unexpected %q in format spec (a spec is a width, e.g. {x:6}) — missing '}' before it?", string(ch))
+				}
 				if ch == '"' {
 					if err := lx.skipNestedString(); err != nil {
 						return err
@@ -370,10 +384,14 @@ func (lx *lexer) lexString() error {
 // tracked here: escapes, and nested interpolations, whose braces may in
 // turn hide further strings.
 func (lx *lexer) skipNestedString() error {
+	// A quote inside an interpolation that runs to end-of-line is more
+	// often the outer string's closing quote arriving early (a '}' was
+	// dropped) than a genuine nested literal — hence the hint.
+	openCol := lx.col(lx.i)
 	lx.i++ // opening quote
 	for {
 		if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
-			return lx.errf("unterminated string")
+			return lx.errf("unterminated string inside interpolation (opened at column %d) — missing '}' before it?", openCol)
 		}
 		switch lx.src[lx.i] {
 		case '"':
@@ -385,11 +403,12 @@ func (lx *lexer) skipNestedString() error {
 			}
 			lx.i += 2
 		case '{':
+			braceCol := lx.col(lx.i)
 			lx.i++
 			depth := 0
 			for {
 				if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
-					return lx.errf("unterminated interpolation")
+					return lx.errf("unterminated interpolation (opened at column %d)", braceCol)
 				}
 				ch := lx.src[lx.i]
 				if ch == '"' {
