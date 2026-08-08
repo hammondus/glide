@@ -83,7 +83,7 @@ etc.)
 | `len()` | `-> Int` | |
 | `push(v)` | `(T) -> ()` | append; requires a `mut` path |
 | `sorted()` | `-> List<T>` | copy, natural ascending order (Int/Float/String) |
-| `sort_by(cmp)` | `(fn(T, T) -> Int) -> ()` | in place, **stable**; comparator is three-way (`\|a, b\| a.1.cmp(b.1)`) |
+| `sort_by(cmp)` | `(fn(T, T) -> Int) -> ()` | in place, **stable**; requires a `mut` path; comparator is three-way (`\|a, b\| a.1.cmp(b.1)`) |
 | `iter()` | `-> Iterator<T>` | |
 
 Indexing: `xs[i]` ✓ (panics out of bounds — bug territory).

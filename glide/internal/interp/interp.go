@@ -391,7 +391,9 @@ func (in *Interp) requireMutRoot(target ast.Expr, env *Env, line int) {
 		case *ast.TupleIndex:
 			e = t.X
 		default:
-			panic(rtErr{line, "cannot assign through a temporary value"})
+			// Covers assignment targets and mut-method receivers alike:
+			// a temporary is not a path, so it has no mut path.
+			panic(rtErr{line, "cannot mutate a temporary value (bind it with `let mut` first)"})
 		}
 	}
 }
@@ -1117,6 +1119,9 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 				in.requireMutRoot(f.X, env, ex.Line)
 			}
 			return in.callFuncSelf(m, recv, args), nil
+		}
+		if builtinMutMethods[typeName(recv)+"."+f.Name] {
+			in.requireMutRoot(f.X, env, ex.Line)
 		}
 		return in.methodCall(recv, f.Name, args, ex.Line), nil
 	}

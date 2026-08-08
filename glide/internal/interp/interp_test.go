@@ -202,6 +202,36 @@ func TestMutEnforced(t *testing.T) {
 	}
 }
 
+func TestBuiltinMutMethodsEnforced(t *testing.T) {
+	_, err := runProg(t, "fn main() {\n let xs = [1]\n xs.push(2)\n}")
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("push through immutable binding should fail, got %v", err)
+	}
+	_, err = runProg(t, "fn main() {\n let xs = [2, 1]\n xs.sort_by(|a, b| a.cmp(b))\n}")
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("sort_by through immutable binding should fail, got %v", err)
+	}
+	// Transitive: the path's root binding is what must be mut.
+	_, err = runProg(t, "fn main() {\n let xs = [[1]]\n xs[0].push(2)\n}")
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("push through immutable root should fail, got %v", err)
+	}
+	// A temporary is not a path — no mut path exists.
+	_, err = runProg(t, "fn main() {\n [1, 2].push(3)\n}")
+	if err == nil || !strings.Contains(err.Error(), "temporary") {
+		t.Fatalf("push on temporary should fail, got %v", err)
+	}
+	out, err := runProg(t, "fn main() {\n let mut xs = [1]\n xs.push(2)\n println(xs.len())\n}")
+	if err != nil || out != "2\n" {
+		t.Fatalf("push through mut binding: out %q, err %v", out, err)
+	}
+	// Read-only methods stay callable through immutable bindings.
+	out, err = runProg(t, "fn main() {\n let xs = [3, 1]\n println(xs.sorted()[0])\n println(xs.len())\n}")
+	if err != nil || out != "1\n2\n" {
+		t.Fatalf("read-only methods on let binding: out %q, err %v", out, err)
+	}
+}
+
 func TestSequentialRedeclareOK(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {

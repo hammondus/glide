@@ -83,6 +83,15 @@ func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
 	panic(rtErr{line, fmt.Sprintf("module %s has no function %q", mod, name)})
 }
 
+// Builtin methods that mutate their receiver, keyed "Type.method".
+// These obey the same rule as user `mut self` methods: callable only
+// through a mut path (checked in evalCall, where the receiver
+// expression is still available).
+var builtinMutMethods = map[string]bool{
+	"List.push":    true,
+	"List.sort_by": true,
+}
+
 // Methods, dispatched on receiver type.
 func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Value {
 	switch r := recv.(type) {
