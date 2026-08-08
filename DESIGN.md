@@ -939,6 +939,43 @@ Go's model, with its defects designed out:
   every serious function — the same disease, manual and unchecked.
   Cancellation belongs to the scope: `scope(timeout: 5.s) { … }`;
   blocking operations are cancellation points; no parameter threading.
+- **Cancellation is a third unwind, and only scopes wield it**
+  (ratified 2026-08-09):
+  1. *Mechanically*: neither error nor panic. A cancelled task unwinds
+     at its next cancellation point; `defer`s run (a cancelled task
+     must release its locks), `errdefer`s also fire (the operation
+     didn't complete; compensations apply — skipping them would make
+     timeouts corrupt state that errors don't), and no user code can
+     catch it. Trio and Kotlin model cancellation as an exception that
+     convention forbids swallowing; uncatchable turns the convention
+     into a guarantee.
+  2. *Only scopes cancel.* No `t.cancel()`. Cancellation comes from
+     the enclosing scope on exactly: early body exit, sibling panic,
+     timeout/deadline. Kotlin's `job.cancel()` is a structured-
+     concurrency escape hatch — arbitrary code killing a task it
+     doesn't own. "Cancel the losers when one wins" is a race
+     construct; it'll be scope-shaped when `select` is designed.
+  3. *Closure property*: user code never observes a cancelled task.
+     Cancellation implies the scope is going down, so no live code
+     remains to `join()` a cancelled child. No `Cancelled` error type
+     leaks into any signature (Kotlin leaks `CancellationException`
+     into every `catch` block in its ecosystem).
+  4. *Cancellation points are blocking operations*: channel ops,
+     `join`, `sleep`, IO. Pure compute loops are uncancellable —
+     recorded cost, uniform with Trio/Kotlin/Swift. Loop back-edge
+     checks in the interpreter were considered and rejected: dev-tier
+     programs would be more cancellable than release-tier; semantics
+     that differ by tier are poison.
+  5. *`scope(timeout: 5.s)` is clock-driven cancellation* and
+     evaluates to `Result<T, Timeout>`. Body `?` propagates *through*
+     the scope (scopes are control-flow transparent), so body errors
+     never nest inside the timeout's Result; `Timeout` converts at the
+     outer `?` via `E.from(Timeout)` — the `?`-conversion machinery is
+     what makes timeouts non-viral. `s.deadline()` reads the effective
+     (nearest, inherited) deadline.
+  Deferred sub-question: blocking ops inside `defer` during
+  cancellation — leaning Trio's answer (cleanup gets a brief grace,
+  then blocking ops fail loudly), undecided.
 - **Channels: keep them, keep `select` (Go's crown jewel), fix the
   sharp edges.** Send-on-closed, double-close, nil-channel-blocks — all
   symptoms of "anyone can close anything." Sender half and receiver

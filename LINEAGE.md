@@ -712,6 +712,19 @@ workload is conceded.
 - **2015** — Rust's `Mutex<T>` (wrapping the *data*, not sitting
   beside it) proves the best non-borrow-checker race mitigation:
   unguarded access doesn't compile.
+- **What cancellation *is*** — nobody made it a first-class thing.
+  Trio (2018) delivers it as a `Cancelled` exception raised at
+  checkpoints, with documentation begging users to always re-raise
+  it; Kotlin ships `CancellationException`, which every `catch
+  (e: Exception)` block in the ecosystem accidentally swallows —
+  the standard library's own docs carry the "always rethrow" warning.
+  Both prove the same lesson: cancellation-as-catchable-exception is
+  a convention, and conventions get violated at scale. Java Loom uses
+  `Thread.interrupt` (a 1990s mechanism famous for being ignored);
+  Go has no task cancellation at all — `ctx.Done()` is manual polling
+  that every function must opt into, forever. Swift's cooperative
+  `Task.checkCancellation()` throws a `CancellationError` — catchable,
+  same weakness as Trio/Kotlin.
 - **How values leave a nursery** — every adopter answered differently,
   and the differences are the evidence. Trio (2018): no values from
   spawn at all; results travel via captured mutables or a channel —
@@ -743,7 +756,16 @@ errors can't vanish; a panic cancels siblings immediately ("values
 wait, bugs don't"). Swift's group-exit surfacing is the near
 precedent; Kotlin's immediate-cancel gotcha is the evidence for
 errors-as-values; Trio and errgroup are the evidence that values-out
-must be first-class.
+must be first-class. For cancellation (ratified 2026-08-09): a third
+unwind — neither error nor panic, uncatchable by user code (defers
+and errdefers run), delivered only at blocking operations, and only
+*scopes* cancel (no `t.cancel()`); since cancellation implies the
+whole scope is going down, user code never observes a cancelled
+task, so no `Cancelled` type leaks into signatures — designing out
+the leak that Trio and Kotlin both paper over with "always rethrow"
+conventions. `scope(timeout:)` is clock-driven cancellation
+evaluating to `Result<T, Timeout>`, composing with `?`-conversion so
+timeouts stay non-viral where Go needed `ctx` in every signature.
 
 ## Comptime, not macros
 

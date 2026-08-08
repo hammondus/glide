@@ -296,5 +296,12 @@ patterns in function signatures, ref/binding modes.
   child that finished with `Err` fails the scope at normal exit (first
   failure wins; discard explicitly with `let _ = t.join()`); a child
   panic cancels siblings immediately and re-panics at exit. No spawn
-  outside a scope handle.
+  outside a scope handle. Cancellation: a third unwind, neither error
+  nor panic — uncatchable, runs `defer`s and `errdefer`s, delivered
+  only at blocking operations (channel ops, `join`, `sleep`, IO);
+  only scopes cancel (no `t.cancel()`), so user code never observes
+  a cancelled task. `scope(timeout: 5.s) { … }` evaluates to
+  `Result<T, Timeout>`; body `?` propagates through the scope, so
+  body errors never nest inside it. `s.deadline()` reads the
+  effective deadline.
 - Comptime (const eval, derive, reflection): ○.
