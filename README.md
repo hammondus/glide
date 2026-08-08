@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo/glide-wordmark.svg" alt="Glide" width="360">
+  <img src="assets/logo/glide-glider.svg" alt="Glide" width="140">
 </p>
 
 # The Glide Programming Language
@@ -10,12 +10,12 @@ the type system of the ML family: sum types, pattern matching, no null.
 Effortless motion, no visible struggle, real speed. Files end in `.gld`.
 
 ```glide
+fn greet(name: String) {
+    println("Hello, {name}!")
+}
+
 fn main() {
-    let mut primes = [2, 3, 5]
-    primes.push(7)
-    for p in primes {
-        println("{p} is prime")
-    }
+    greet("world")
 }
 ```
 
