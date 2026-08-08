@@ -136,3 +136,207 @@ fn main() {
 // 42
 // 7
 ```
+
+## If
+
+`if` is an expression — it produces a value, so there is no ternary
+operator: `if` *is* the ternary, and it reads the same at two lines or
+ten. Conditions take no parentheses; braces are always required.
+```rust
+fn main() {
+    let n = 7
+    let sign = if n > 0 { "positive" } else if n < 0 { "negative" } else { "zero" }
+    println(sign)
+}
+// positive
+```
+
+The condition must be a Bool. There is no truthiness — `if 1 { }` is
+an error, so the classic `if x = 1` / `if 0` bug families don't exist.
+```rust
+fn main() {
+    if 1 { println("never") }
+}
+// error: line 2: if condition must be Bool, got Int
+```
+
+## Loops
+
+One loop keyword: `for`. Three forms — forever, while-style, and
+over the elements of anything iterable. `break` and `continue` do
+what Go's do, and using them outside a loop is caught before the
+program runs.
+```rust
+fn main() {
+    // Forever, until break.
+    let mut n = 1
+    for {
+        n *= 2
+        if n > 100 { break }
+    }
+    println(n)
+
+    // While-style: loop while the condition holds.
+    let mut k = 0
+    for k < 3 {
+        k += 1
+    }
+    println(k)
+
+    // Over a range (half-open: 0, 1, 2) — with continue to skip.
+    for i in 0..3 {
+        if i == 1 { continue }
+        println(i)
+    }
+}
+// 128
+// 3
+// 0
+// 2
+```
+
+## Lists
+
+Lists grow with `push`, which — like all mutation — needs a `mut`
+binding. Indexing panics out of bounds: an invalid index is a bug in
+the program, not a condition to handle.
+```rust
+fn main() {
+    let mut primes = [2, 3, 5]
+    primes.push(7)
+    println(primes.len())
+    println(primes[3])
+
+    primes[0] = 11
+    primes[0] += 2
+    println(primes[0])
+}
+// 4
+// 7
+// 13
+```
+
+`repeat` is the fill constructor: n slots, value named explicitly —
+Glide has no zero values, so there is no `make([]int, n)` filling
+things in behind your back.
+```rust
+fn main() {
+    let board = ["."].repeat(3)
+    println(board.len())
+    println(board[2])
+}
+// 3
+// .
+```
+
+`sorted` returns a new list and works on any immutable binding;
+`sort_by` sorts in place, so it needs `mut`.
+```rust
+fn main() {
+    let xs = [3, 1, 2]
+    println(xs.sorted()[0])
+    println(xs[0])
+}
+// 1
+// 3
+```
+
+## Maps
+
+Map literals use square brackets. Reading a missing key isn't an
+error and isn't a zero value — you get an Option back, and `??`
+supplies the default. Iteration order is insertion order, always.
+```rust
+fn main() {
+    let mut stock = ["apples": 4, "pears": 2]
+    stock["plums"] = 10
+
+    println(stock["apples"] ?? 0)
+    println(stock["mangoes"] ?? 0)
+
+    for (name, count) in stock {
+        println("{name}: {count}")
+    }
+}
+// 4
+// 0
+// apples: 4
+// pears: 2
+// plums: 10
+```
+
+`if let` unwraps the Option when you want to *do* something rather
+than default: the binding exists only inside the braces.
+```rust
+fn main() {
+    let menu = ["tea": 3]
+    if let price = menu["tea"] {
+        println("tea costs {price}")
+    }
+    if let price = menu["coffee"] {
+        println("coffee costs {price}")
+    } else {
+        println("no coffee here")
+    }
+}
+// tea costs 3
+// no coffee here
+```
+
+## Match
+
+`match` is the only multi-way branch, and it unifies Go's switch with
+pattern matching. Arms take multiple values, ranges (half-open, like
+`..` everywhere), and guards. No fallthrough exists, so no `break`
+noise either. It's an expression, like `if`.
+```rust
+fn describe(code: Int) -> String {
+    match code {
+        200        => "ok"
+        301, 302   => "redirect"
+        400..500   => "client error"
+        n if n < 0 => "not a status code"
+        _          => "something else"
+    }
+}
+fn main() {
+    println(describe(200))
+    println(describe(302))
+    println(describe(418))
+    println(describe(0 - 1))
+}
+// ok
+// redirect
+// client error
+// not a status code
+```
+
+Strings match by equality — no regex smuggled into patterns.
+```rust
+fn main() {
+    let verb = "POST"
+    println(match verb {
+        "GET"         => "read"
+        "PUT", "POST" => "write"
+        _             => "unknown"
+    })
+}
+// write
+```
+
+Drop the subject and `match` becomes Go's expressionless switch: each
+arm is a condition, the first true one wins. This replaces long
+`else if` chains.
+```rust
+fn main() {
+    let score = 87
+    let grade = match {
+        score >= 90 => "A"
+        score >= 80 => "B"
+        score >= 70 => "C"
+        _           => "F"
+    }
+    println(grade)
+}
+// B
+```
