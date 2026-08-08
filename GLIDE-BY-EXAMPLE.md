@@ -98,3 +98,41 @@ fn greet(name: String) {
 	println("{name}!")
 }
 ```
+
+## Closures
+
+`fn` declarations are top level only. But a closure is an *expression* —
+a function you can create anywhere, bind to a variable, and pass around.
+Written with pipes around the parameters: `|x|`, or `||` for none.
+
+A closure can see the variables of the scope it was created in.
+```rust
+fn main() {
+	let greeting = "Hello"
+	let greet = |name| {
+		println("{greeting} {name}!")
+	}
+	greet("Glide")
+	greet("closures")
+}
+// Hello Glide!
+// Hello closures!
+```
+
+A one-expression body needs no braces, and its result is returned.
+Captured variables are shared, not copied: mutating a captured
+`let mut` is visible outside the closure.
+```rust
+fn main() {
+	let double = |n| n * 2
+	println(double(21))
+
+	let mut total = 0
+	let add = |n| { total += n }
+	add(3)
+	add(4)
+	println(total)
+}
+// 42
+// 7
+```

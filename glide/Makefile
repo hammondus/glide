@@ -7,8 +7,11 @@ DIST := dist
 build:
 	go build -o $(BIN) ./cmd/glide
 
+# -count=1 defeats the test cache: doc_examples_test.go reads
+# ../GLIDE-BY-EXAMPLE.md, which lives outside the module, and Go's
+# cache doesn't track it — a cached run would pass on a stale doc.
 test:
-	go vet ./... && go test ./...
+	go vet ./... && go test -count=1 ./...
 
 run: build
 	./$(BIN) run examples/wordfreq.gld testdata/sample.txt
