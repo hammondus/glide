@@ -1154,6 +1154,14 @@ func (p *parser) parseListOrMap() (ast.Expr, error) {
 	if p.accept(lexer.RBrack) {
 		return &ast.ListLit{}, nil
 	}
+	if p.cur().Kind == lexer.DotDot {
+		// Leading spread: this is a list, no map ambiguity.
+		el, err := p.listElem()
+		if err != nil {
+			return nil, err
+		}
+		return p.finishListLit(el)
+	}
 	first, err := p.parseExpr()
 	if err != nil {
 		return nil, err
@@ -1189,12 +1197,16 @@ func (p *parser) parseListOrMap() (ast.Expr, error) {
 		}
 		return m, nil
 	}
+	return p.finishListLit(first)
+}
+
+func (p *parser) finishListLit(first ast.Expr) (ast.Expr, error) {
 	l := &ast.ListLit{Elems: []ast.Expr{first}}
 	for p.accept(lexer.Comma) {
 		if p.cur().Kind == lexer.RBrack {
 			break
 		}
-		e, err := p.parseExpr()
+		e, err := p.listElem()
 		if err != nil {
 			return nil, err
 		}
@@ -1204,6 +1216,20 @@ func (p *parser) parseListOrMap() (ast.Expr, error) {
 		return nil, err
 	}
 	return l, nil
+}
+
+// listElem parses one list-literal element: an expression, or a
+// `..xs` spread of any iterable.
+func (p *parser) listElem() (ast.Expr, error) {
+	if p.cur().Kind == lexer.DotDot {
+		line := p.next().Line
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Spread{E: e, Line: line}, nil
+	}
+	return p.parseExpr()
 }
 
 func (p *parser) parseClosure() (ast.Expr, error) {

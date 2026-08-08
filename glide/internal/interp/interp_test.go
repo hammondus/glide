@@ -1162,3 +1162,31 @@ func TestStructPatternRules(t *testing.T) {
 		t.Fatal("duplicate field should not parse")
 	}
 }
+
+func TestListSpreadAndStructUpdate(t *testing.T) {
+	out, err := runProg(t, `
+type Config = struct {
+    host: String
+    timeout: Int
+}
+fn main() {
+    let mid = [2, 3]
+    let xs = [1, ..mid, 4, ..0..2]
+    println("{xs:?}")
+    // spread of an iterator; source list untouched
+    let ys = [..mid.iter().map(|n| n * 10)]
+    println("{ys:?}")
+    println("{mid:?}")
+
+    let base = Config{ host: "x.io", timeout: 30 }
+    let fast = Config{ timeout: 5, ..base }
+    println("{fast.host} {fast.timeout} {base.timeout}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[1, 2, 3, 4, 0, 1]\n[20, 30]\n[2, 3]\nx.io 5 30\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}

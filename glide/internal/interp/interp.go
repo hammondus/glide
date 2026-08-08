@@ -727,6 +727,21 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 	case *ast.ListLit:
 		lv := &ListV{}
 		for _, el := range ex.Elems {
+			if sp, isSpread := el.(*ast.Spread); isSpread {
+				v, sg := in.eval(sp.E, env)
+				if sg != nil {
+					return UnitV{}, sg
+				}
+				next := in.iterate(v, sp.Line)
+				for {
+					e, ok := next()
+					if !ok {
+						break
+					}
+					lv.Elems = append(lv.Elems, e)
+				}
+				continue
+			}
 			v, sg := in.eval(el, env)
 			if sg != nil {
 				return UnitV{}, sg

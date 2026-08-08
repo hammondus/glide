@@ -95,8 +95,8 @@ declaring them is an error ✓ — and `None` is a literal.
 | Unit | `()` | ✓ |
 | Range | `lo..hi` (half-open, Int only) | ✓ |
 | Struct | `User{ name: "x", id: 7 }` | ✓ |
-| Struct update | `Config{ timeout: 5, ..base }` | ○ |
-| List spread | `[a, ..xs, b]` | ○ |
+| Struct update | `Config{ timeout: 5, ..base }` — copy-with-changes; base untouched; `..base` last | ✓ |
+| List spread | `[a, ..xs, b]` — splices any iterable (list, range, iterator) | ✓ |
 
 Format specs inside interpolation, all ✓ — the complete set,
 deliberately closed: `{n:6}` width (right-align) · `{s:-6}`

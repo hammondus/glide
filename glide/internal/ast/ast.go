@@ -243,6 +243,13 @@ type TupleLit struct{ Elems []Expr }
 type ListLit struct{ Elems []Expr }
 type MapLit struct{ Keys, Vals []Expr }
 
+// Spread is `..xs` inside a list literal — the only place the parser
+// creates one. The spread value may be any iterable.
+type Spread struct {
+	E    Expr
+	Line int
+}
+
 type Binary struct {
 	Op   string
 	L, R Expr
@@ -353,6 +360,7 @@ func (*BlockExpr) expr()  {}
 func (*IdentExpr) expr()  {}
 func (*TupleLit) expr()   {}
 func (*ListLit) expr()    {}
+func (*Spread) expr()     {}
 func (*MapLit) expr()     {}
 func (*Binary) expr()     {}
 func (*Unary) expr()      {}
