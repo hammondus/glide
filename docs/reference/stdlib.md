@@ -86,7 +86,9 @@ etc.)
 | `sort_by(cmp)` | `(fn(T, T) -> Int) -> ()` | in place, **stable**; requires a `mut` path; comparator is three-way (`\|a, b\| a.1.cmp(b.1)`) |
 | `iter()` | `-> Iterator<T>` | |
 
-Indexing: `xs[i]` ✓ (panics out of bounds — bug territory).
+Indexing: `xs[i]` reads ✓; `xs[i] = v` and `xs[i] += v` / `-=` assign
+in place (requires a `mut` path) ✓. Out of bounds panics — bug
+territory.
 
 ### Map
 
