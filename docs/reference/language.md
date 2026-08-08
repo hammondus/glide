@@ -184,7 +184,10 @@ path). Discard is explicit: `_ = expr` ✓.
 - `if cond { } else if { } else { }` ✓; value-position `if` requires
   `else`.
 - `if let PATTERN = expr { … } else { … }` — binding exists in the
-  then-arm only ✓ (`else if let` ○).
+  `else if let` chains, in both directions (`if … else if let …`,
+  `if let … else if …`) ✓. Only a None scrutinee routes to else — a
+  non-None value that fails the pattern is still a panic (unwrapping,
+  not variant dispatch; that's `match`'s job).
 - `for { }` / `for cond { }` / `for pat in iterable { }` ✓.
   Iterables: List, Map (yields `(k, v)`), Range, any Iterator, any
   value with an `iter()` method ✓. Fresh binding per iteration ✓.

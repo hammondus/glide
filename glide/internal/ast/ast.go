@@ -260,7 +260,7 @@ type Closure struct {
 type If struct {
 	Cond      Expr
 	Then      *Block
-	ElseIf    *If
+	ElseIf    Expr // *If or *IfLet — either form may chain
 	ElseBlock *Block
 	Line      int
 }
@@ -271,6 +271,7 @@ type IfLet struct {
 	Pat       Pattern
 	X         Expr
 	Then      *Block
+	ElseIf    Expr // *If or *IfLet — either form may chain
 	ElseBlock *Block
 	Line      int
 }

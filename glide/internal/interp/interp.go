@@ -919,6 +919,9 @@ func (in *Interp) evalIfLet(ex *ast.IfLet, env *Env) (Value, *sig) {
 		return UnitV{}, sg
 	}
 	if _, isNone := x.(NoneV); isNone {
+		if ex.ElseIf != nil {
+			return in.eval(ex.ElseIf, env)
+		}
 		if ex.ElseBlock != nil {
 			return in.evalBlock(ex.ElseBlock, newEnv(env, false))
 		}
@@ -1112,7 +1115,7 @@ func (in *Interp) evalIf(ex *ast.If, env *Env) (Value, *sig) {
 		return in.evalBlock(ex.Then, newEnv(env, false))
 	}
 	if ex.ElseIf != nil {
-		return in.evalIf(ex.ElseIf, env)
+		return in.eval(ex.ElseIf, env)
 	}
 	if ex.ElseBlock != nil {
 		return in.evalBlock(ex.ElseBlock, newEnv(env, false))

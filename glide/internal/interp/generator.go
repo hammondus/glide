@@ -78,6 +78,9 @@ func exprYields(e ast.Expr) bool {
 		if blockYields(ex.Then) {
 			return true
 		}
+		if ex.ElseIf != nil && exprYields(ex.ElseIf) {
+			return true
+		}
 		return ex.ElseBlock != nil && blockYields(ex.ElseBlock)
 	case *ast.BlockExpr:
 		return blockYields(ex.Body)

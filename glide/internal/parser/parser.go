@@ -1187,26 +1187,25 @@ func (p *parser) parseIf() (ast.Expr, error) {
 		return nil, err
 	}
 	node := &ast.If{Cond: cond, Then: then, Line: line}
-	if p.accept(lexer.KwElse) {
-		if p.cur().Kind == lexer.KwIf {
-			ei, err := p.parseIf()
-			if err != nil {
-				return nil, err
-			}
-			chained, ok := ei.(*ast.If)
-			if !ok {
-				return nil, p.errf("`else if let` is not supported yet; nest the if-let in an else block")
-			}
-			node.ElseIf = chained
-		} else {
-			eb, err := p.parseBlock()
-			if err != nil {
-				return nil, err
-			}
-			node.ElseBlock = eb
-		}
+	node.ElseIf, node.ElseBlock, err = p.parseElse()
+	if err != nil {
+		return nil, err
 	}
 	return node, nil
+}
+
+// parseElse handles the tail of any if-form: nothing, `else if …`
+// (plain or `if let`, chained), or a final `else { }`.
+func (p *parser) parseElse() (ast.Expr, *ast.Block, error) {
+	if !p.accept(lexer.KwElse) {
+		return nil, nil, nil
+	}
+	if p.cur().Kind == lexer.KwIf {
+		ei, err := p.parseIf()
+		return ei, nil, err
+	}
+	eb, err := p.parseBlock()
+	return nil, eb, err
 }
 
 // parseIfLet: `if let <pattern> = <expr> { … } [else { … }]` —
@@ -1228,12 +1227,9 @@ func (p *parser) parseIfLet(line int) (ast.Expr, error) {
 		return nil, err
 	}
 	node := &ast.IfLet{Pat: pat, X: x, Then: then, Line: line}
-	if p.accept(lexer.KwElse) {
-		eb, err := p.parseBlock()
-		if err != nil {
-			return nil, err
-		}
-		node.ElseBlock = eb
+	node.ElseIf, node.ElseBlock, err = p.parseElse()
+	if err != nil {
+		return nil, err
 	}
 	return node, nil
 }

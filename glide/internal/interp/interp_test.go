@@ -885,3 +885,31 @@ func TestFilterPredicateMustBeBool(t *testing.T) {
 		t.Fatalf("want Bool-predicate error, got %v", err)
 	}
 }
+
+func TestElseIfLet(t *testing.T) {
+	out, err := runProg(t, `
+fn pick(m: Map<String, Int>) -> String {
+    if let a = m["a"] {
+        "a={a}"
+    } else if let b = m["b"] {
+        "b={b}"
+    } else if m.len() == 0 {
+        "empty"
+    } else {
+        "no a or b"
+    }
+}
+fn main() {
+    println(pick(["a": 1]))
+    println(pick(["b": 2]))
+    println(pick(["c": 3]))
+    let empty: Map<String, Int> = [:]
+    println(pick(empty))
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "a=1\nb=2\nno a or b\nempty\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
