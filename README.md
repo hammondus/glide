@@ -4,18 +4,43 @@
 
 # The Glide Programming Language
 
+Do we need ANOTHER programming language? I would definitely say NO.
+This started as an experiment. I asked the question: what would you get if you
+looked back at programming language history, took the time-tested features that
+have proven themselves, and put them together in one language?
+
+Nothing here is really new — and that's deliberate. The aim is the best
+features from a whole range of languages, minus their worst ones. Glide is a
+clean slate, so no baggage has to be kept. [`LINEAGE.md`](LINEAGE.md) traces
+every borrowed idea back to its source. Inspiration has come from:
+- Go
+- Rust
+- Zig
+- Swift
+- Haskell
+- JavaScript (only joking)
+
+The result:
+
 Glide is a compiled, statically typed language in the Go tradition —
 garbage collected, green-threaded, one binary, boring on purpose — with
 the type system of the ML family: sum types, pattern matching, no null.
 Effortless motion, no visible struggle, real speed. Files end in `.gld`.
 
-```glide
-fn greet(name: String) {
-    println("Hello, {name}!")
-}
+Today it is a tree-walking interpreter written in Go, but the goal is
+self-hosting: the compiler will be written in Glide, with a Glide→Go
+transpiler as the first native backend. Until then the interpreter is the
+dev tier — and it makes type-checked scripting nearly free:
+`glide run tool.gld`, or a `#!/usr/bin/env glide run` shebang.
 
+**The ubiquitous hello world**
+```glide
 fn main() {
     greet("world")
+}
+
+fn greet(name: String) {
+    println("Hello, {name}!")
 }
 ```
 
@@ -35,7 +60,7 @@ further notice, deliberately.
 Requires a Go toolchain to build the interpreter:
 
 ```bash
-cd glide
+cd glide          # the interpreter lives in the glide/ subdirectory
 make build                                      # → bin/glide
 bin/glide run examples/wordfreq.gld testdata/sample.txt
 bin/glide run yourfile.gld                      # any .gld file
@@ -55,3 +80,9 @@ bin/glide test yourfile.gld                     # runs its test blocks
 - [`docs/book/`](docs/book/) — the book: teaches the language from
   hello-world up, assuming Go instincts and nothing else.
 - [`GRAMMAR.md`](GRAMMAR.md) — the grammar, including the open fights.
+- [`STDLIB-GOALS.md`](STDLIB-GOALS.md) — what the standard library will
+  and won't contain, and why.
+
+## License
+
+[MIT](LICENSE)
