@@ -1301,10 +1301,23 @@ Python's naive/aware mess is one type pretending to be two.
   Go's mocked reference date, not strftime's `%`-cryptics.
   Compile-checked for literal patterns; constants for RFC 3339;
   **Display = RFC 3339** — the debugging string is the wire string.
-- **IANA tzdata embedded by default** (updatable; opt-out). Static
-  binaries in scratch containers must not discover zoneinfo is missing
-  at runtime — Go's opt-in embedding is the wrong default for the
+- **IANA tzdata embedded by default** (opt-out). Static binaries in
+  scratch containers must not discover zoneinfo is missing at
+  runtime — Go's opt-in embedding is the wrong default for the
   static-binary century.
+- **Tzdata updates without recompiling: one explicit env var**
+  (`GLIDE_TZDATA=<dir or archive>`), and that is the *only* external
+  source. Go's chain (ZONEINFO → system `/usr/share/zoneinfo` →
+  embedded fallback) silently prefers whatever the host has — deploy
+  a fresh binary onto a stale base image and the *older* data wins,
+  invisibly; a file lying around changes zone math with no opt-in.
+  Embedded is the default; the override is deliberate, visible in
+  the Dockerfile, auditable in `docker inspect`. The ops pattern
+  (rebuild the container with fresh tzdata, no app rebuild) costs
+  one ENV line. Squared with the ambient-state razor: tzdata is data
+  correctness, not behaviour configuration — no program's *intended*
+  behaviour is "use stale DST rules" — which is why this override
+  exists while ambient config stays banned.
 - **The clock is injectable**: stdlib time flows through an ambient
   `Clock`; `glide test` can freeze or step it. Go's untestable global
   `time.Now` is why serious codebases wrap time and time-tests flake.

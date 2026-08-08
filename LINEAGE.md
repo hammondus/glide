@@ -506,8 +506,7 @@ prints, `expect`) are reserved names outright — a tiny fixed set
 nobody wants as locals. Imports stay shadowable — `sql` is a prime
 variable name in a file importing `sql` — but using the module
 *through* a live shadow is a checker-era compile error naming both
-parties. (Motivating bite: Craig's Go query string named `sql`
-shadowing `database/sql`, and the diagnosis fog that followed.)
+parties.
 
 ## Defer & `errdefer`
 
@@ -768,9 +767,7 @@ conventional `&&`/`||`/`!` with no truthiness and no overloading
 **Glide declines** the operator: Go's version is only a synonym, the
 C version is the cleverness family (assignment-as-expression) killed
 at the root, and the habitat — C-style `for` loops — doesn't exist
-here (`for x in` owns iteration). `i += 1` is the way. (Sole standing
-challenge: Craig, pending real-world Glide mileage — the test is
-counting would-be `++` sites in real code.)
+here (`for x in` owns iteration). `i += 1` is the way.
 
 ## Comments: `//` only
 
@@ -991,7 +988,14 @@ Java/Moment format tokens (`"YYYY-MM-DD"`, compile-checked) over
 Go's mocked reference date, tzdata embedded by default (static
 binaries in scratch containers must not discover zoneinfo missing at
 runtime), and — stdlib duty, not user cleverness — an injectable
-Clock that `glide test` can freeze.
+Clock that `glide test` can freeze. Tzdata *updates* diverge from
+Go deliberately: Go's lookup chain silently prefers the host's
+`/usr/share/zoneinfo` over the embedded copy — so a fresh binary on
+a stale base image quietly computes with older DST rules. Glide's
+only external source is one explicit env var: the
+rebuild-the-container-not-the-app ops pattern still works, but the
+override is visible in the Dockerfile instead of ambient in the
+filesystem.
 
 ## Logging
 
