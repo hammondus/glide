@@ -1375,3 +1375,53 @@ fn main() {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 }
+
+func TestInclusiveRanges(t *testing.T) {
+	out, err := runProg(t, `
+fn grade(score: Int) -> String {
+    match score {
+        90..=100 => "A"
+        0..=89   => "rest"
+        _        => "invalid"
+    }
+}
+fn classify(c: Rune) -> String {
+    match c {
+        'a'..='z' => "lower"
+        'A'..='Z' => "upper"
+        '0'..='9' => "digit"
+        _         => "other"
+    }
+}
+fn main() {
+    // expression form: 1..=3 iterates 1, 2, 3
+    println((1..=3).iter().sum())
+    for i in 1..=3 {
+        print(i)
+    }
+    println("")
+
+    println("{grade(100)} {grade(90)} {grade(89)} {grade(101)}")
+    println("{classify('z')} {classify('Z')} {classify('9')} {classify('!')}")
+
+    // half-open and inclusive coexist; one glyph each
+    println(match 5 {
+        0..5  => "below"
+        5..=5 => "exactly"
+        _     => "?"
+    })
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "6\n123\nA A rest invalid\nlower upper digit other\nexactly\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+
+	// ..= at the top of Int cannot desugar; loud error, not a wrap.
+	_, err = runProg(t, "fn main() {\n _ = (0..=9223372036854775807).iter()\n}")
+	if err == nil || !strings.Contains(err.Error(), "maximum Int") {
+		t.Fatalf("want max-int error, got %v", err)
+	}
+}

@@ -567,6 +567,33 @@ reason Go kept it is a hole already filled here (`defer`/`errdefer`
 + `?` for cleanup-on-error, labels for nested loops, `loop { match }`
 for state machines).
 
+## Ranges: half-open `..`, inclusive `..=`
+
+- **1958+** — the off-by-one wars: inclusive ranges (Pascal's
+  `1..10`, Ruby's `..`) read naturally but make empty ranges and
+  length arithmetic awkward; half-open (Dijkstra's argument, C's
+  idiom, Python's `range`) composes (`[a,b) + [b,c) = [a,c)`) and
+  makes `len = hi - lo`, but excludes the endpoint people name.
+- **Ruby (1995)** — ships both with the confusing allocation: `..`
+  inclusive, `...` exclusive — one dot of visual difference flipping
+  the endpoint, a documented source of bugs.
+- **Rust (2015→2018)** — ships `..` half-open only; real code keeps
+  needing the closed end (matching `1..=9` digits, `u8::MIN..=MAX` —
+  inexpressible half-open at the type's top). Adds `..=` in 1.26
+  (2018) after deprecating a `...` experiment *because* of the Ruby
+  confusion. Swift made the same split (`..<` / `...`) in 2014.
+- The half-open-only diet fails on two recurring cases: ranges of
+  the type's maximum value, and rune/letter ranges — `'a'..'z'`
+  excluding `'z'` turns the flagship example into the puzzle
+  `'a'..'{'`.
+
+**Glide takes** Rust's exact pair: `..` half-open (the default that
+composes), `..=` inclusive (visually unmistakable, unlike Ruby's
+third dot), in expressions and patterns alike, for Int and Rune.
+`..=` desugars to `hi + 1`; at the maximum Int that is a loud error,
+not a wrap. Adopted the day rune range patterns landed — the
+`'a'..='z'` case is exactly what forced Rust's hand.
+
 ## Patterns everywhere: destructuring, `let…else`, tuples
 
 - **1973** — ML: patterns aren't just for `match` — every binding

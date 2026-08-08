@@ -772,8 +772,17 @@ is manual field-picking.)
   return Err(.NotFound) }` — body must diverge (enforced; what makes
   flat happy-path *safe*). `if let` scopes inward, `let else` onward;
   Option ergonomics complete without ever writing `Some`.
-- **Ranges and literals**: `1..10 =>`, `'a'..'z' =>`, `"GET" =>`
-  (equality only — no regex-in-match). **List patterns, basic set**:
+- **Ranges and literals**: `1..10 =>`, `'a'..='z' =>`, `"GET" =>`
+  (equality only — no regex-in-match). **Two range forms, everywhere
+  ranges appear** (expressions and patterns, Int and Rune): `..`
+  half-open, `..=` inclusive — Rust's pair. Half-open alone was the
+  plan until rune ranges arrived: the letters-a-to-z pattern under
+  half-open is `'a'..'{'`, a puzzle in the flagship use case, and
+  Rust's own history (shipping `..`-only, then adding `..=` because
+  real code kept needing the closed end) says the diet fails
+  eventually. One glyph per meaning; `..=` desugars to `hi + 1`
+  (including the maximum Int is a loud error, not a wrap).
+  **List patterns, basic set**:
   `[]`, `[x]`, `[first, ..rest]` — argv/path territory; no nested rest
   gymnastics.
 - **Declined**: nested or-patterns (arm-level comma alternatives stay;

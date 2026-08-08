@@ -9,6 +9,7 @@ package interp
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -579,13 +580,17 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 		return nil, ok && bool(bv) == pt.V
 	case *ast.RangePat:
 		iv, ok := v.(IntV)
-		return nil, ok && pt.Lo <= int64(iv) && int64(iv) < pt.Hi
+		in := ok && pt.Lo <= int64(iv) &&
+			(int64(iv) < pt.Hi || (pt.Incl && int64(iv) == pt.Hi))
+		return nil, in
 	case *ast.RunePat:
 		rv, ok := v.(RuneV)
 		return nil, ok && rune(rv) == pt.V
 	case *ast.RuneRangePat:
 		rv, ok := v.(RuneV)
-		return nil, ok && pt.Lo <= rune(rv) && rune(rv) < pt.Hi
+		in := ok && pt.Lo <= rune(rv) &&
+			(rune(rv) < pt.Hi || (pt.Incl && rune(rv) == pt.Hi))
+		return nil, in
 	case *ast.TuplePat:
 		tv, ok := v.(TupleV)
 		if !ok || len(tv) != len(pt.Elems) {
@@ -820,7 +825,15 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		if !ok1 || !ok2 {
 			panic(rtErr{ex.Line, "range bounds must be Int"})
 		}
-		return RangeV{Lo: int64(l), Hi: int64(h)}, nil
+		end := int64(h)
+		if ex.Incl {
+			// ..= desugars to the half-open range one past hi.
+			if end == math.MaxInt64 {
+				panic(rtErr{ex.Line, "..= cannot include the maximum Int"})
+			}
+			end++
+		}
+		return RangeV{Lo: int64(l), Hi: end}, nil
 	case *ast.Unary:
 		v, sg := in.eval(ex.X, env)
 		if sg != nil {

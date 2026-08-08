@@ -818,22 +818,24 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 		if err != nil {
 			return nil, err
 		}
-		if p.accept(lexer.DotDot) {
+		if p.cur().Kind == lexer.DotDot || p.cur().Kind == lexer.DotDotEq {
+			incl := p.next().Kind == lexer.DotDotEq
 			hi, err := p.patInt()
 			if err != nil {
 				return nil, err
 			}
-			return &ast.RangePat{Lo: lo, Hi: hi}, nil
+			return &ast.RangePat{Lo: lo, Hi: hi, Incl: incl}, nil
 		}
 		return &ast.IntPat{V: lo}, nil
 	case lexer.Rune:
 		t := p.next()
-		if p.accept(lexer.DotDot) {
+		if p.cur().Kind == lexer.DotDot || p.cur().Kind == lexer.DotDotEq {
+			incl := p.next().Kind == lexer.DotDotEq
 			hi, err := p.expect(lexer.Rune, "rune range pattern")
 			if err != nil {
 				return nil, err
 			}
-			return &ast.RuneRangePat{Lo: rune(t.Int), Hi: rune(hi.Int)}, nil
+			return &ast.RuneRangePat{Lo: rune(t.Int), Hi: rune(hi.Int), Incl: incl}, nil
 		}
 		return &ast.RunePat{V: rune(t.Int)}, nil
 	case lexer.String:
@@ -986,7 +988,7 @@ func prec(k lexer.Kind) int {
 	switch k {
 	case lexer.QQ:
 		return 1
-	case lexer.DotDot:
+	case lexer.DotDot, lexer.DotDotEq:
 		return 2
 	case lexer.OrOr:
 		return 3
@@ -1024,8 +1026,8 @@ func (p *parser) parseBinary(min int) (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		if k == lexer.DotDot {
-			left = &ast.RangeExpr{Lo: left, Hi: right, Line: opTok.Line}
+		if k == lexer.DotDot || k == lexer.DotDotEq {
+			left = &ast.RangeExpr{Lo: left, Hi: right, Incl: k == lexer.DotDotEq, Line: opTok.Line}
 		} else {
 			left = &ast.Binary{Op: opTok.Text, L: left, R: right, Line: opTok.Line}
 		}

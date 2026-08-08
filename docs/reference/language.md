@@ -97,7 +97,7 @@ declaring them is an error ✓ — and `None` is a literal.
 | Map | `[:]` (empty; annotation required), inserts via `m[k] = v` | ✓ |
 | Tuple | `(a, b)` — parens + comma; `(x)` is grouping | ✓ |
 | Unit | `()` | ✓ |
-| Range | `lo..hi` (half-open, Int only) | ✓ |
+| Range | `lo..hi` half-open, `lo..=hi` inclusive (Int only; `..=` desugars to `hi + 1`, so it cannot include the maximum Int — loud error) | ✓ |
 | Struct | `User{ name: "x", id: 7 }` | ✓ |
 | Struct update | `Config{ timeout: 5, ..base }` — copy-with-changes; base untouched; `..base` last | ✓ |
 | List spread | `[a, ..xs, b]` — splices any iterable (list, range, iterator) | ✓ |
@@ -140,7 +140,7 @@ Binary, loosest to tightest (levels from the parser):
 | Prec | Operators | Notes |
 |---|---|---|
 | 1 | `??` | option-coalescing; right side lazy |
-| 2 | `..` | range construction |
+| 2 | `..` `..=` | range construction: half-open / inclusive |
 | 3 | `\|\|` | short-circuit or |
 | 4 | `&&` | short-circuit and |
 | 5 | `==` `!=` | byte equality on strings |
@@ -243,7 +243,7 @@ arms, closure params (plain names only).
 | List | `[]`, `[x]`, `[first, ..rest]`, `[.._]` — exact unless `..` | ✓ |
 | Guard | `n if n < 0 =>` (match arms; opaque to exhaustiveness) | ✓ |
 | Struct | `User{ name, .. }` — shorthand binds; `field: pat` nests (`role: "admin"`, `age: 0..18`); `mut name` shorthand. Without `..` every field must be mentioned — partial-without-`..` is an error, not a no-match | ✓ |
-| Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` / `-5..-1` (half-open, like `..` everywhere) | ✓ (incl. rune literals and ranges — half-open like every `..`, so `'a'..'{'` covers the lowercase letters) |
+| Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` half-open / `90..=100` inclusive — Int and Rune (`'a'..='z'`) | ✓ |
 
 Not adopted (permanent): or-patterns inside patterns, `x @ pattern`,
 patterns in function signatures, ref/binding modes.

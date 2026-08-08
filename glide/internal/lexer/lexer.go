@@ -56,6 +56,7 @@ const (
 	Colon
 	Dot
 	DotDot
+	DotDotEq
 	Arrow
 	Assign
 	PlusEq
@@ -91,7 +92,7 @@ var kindNames = map[Kind]string{
 	KwReturn: "'return'", KwTrue: "'true'", KwFalse: "'false'",
 	LParen: "'('", RParen: "')'", LBrack: "'['", RBrack: "']'",
 	LBrace: "'{'", RBrace: "'}'", Comma: "','", Colon: "':'",
-	Dot: "'.'", DotDot: "'..'", Arrow: "'->'", Assign: "'='",
+	Dot: "'.'", DotDot: "'..'", DotDotEq: "'..='", Arrow: "'->'", Assign: "'='",
 	PlusEq: "'+='", MinusEq: "'-='", StarEq: "'*='", SlashEq: "'/='",
 	PercentEq: "'%='", Plus: "'+'", Minus: "'-'",
 	Star: "'*'", Slash: "'/'", Percent: "'%'", Eq: "'=='", Ne: "'!='",
@@ -380,6 +381,11 @@ func (lx *lexer) lexOp() error {
 		"=>": FatArrow,
 	}
 	if k, ok := twoKinds[two]; ok {
+		if k == DotDot && lx.i+2 < len(lx.src) && lx.src[lx.i+2] == '=' {
+			lx.emit(DotDotEq, "..=")
+			lx.i += 3
+			return nil
+		}
 		lx.emit(k, two)
 		lx.i += 2
 		return nil

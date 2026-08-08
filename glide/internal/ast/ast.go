@@ -195,9 +195,15 @@ type StructPat struct {
 type IntPat struct{ V int64 }
 type StrPat struct{ V string }
 type BoolPat struct{ V bool }
-type RangePat struct{ Lo, Hi int64 }
+type RangePat struct {
+	Lo, Hi int64
+	Incl   bool // `..=`
+}
 type RunePat struct{ V rune }
-type RuneRangePat struct{ Lo, Hi rune }
+type RuneRangePat struct {
+	Lo, Hi rune
+	Incl   bool // `..=`
+}
 
 func (*IdentPat) pat() {}
 func (*WildPat) pat()  {}
@@ -276,6 +282,7 @@ type Unary struct {
 }
 type RangeExpr struct {
 	Lo, Hi Expr
+	Incl   bool // `..=` — hi included
 	Line   int
 }
 
