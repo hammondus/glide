@@ -84,6 +84,7 @@ etc.)
 | `push(v)` | `(T) -> ()` | append; requires a `mut` path |
 | `sorted()` | `-> List<T>` | copy, natural ascending order (Int/Float/String) |
 | `sort_by(cmp)` | `(fn(T, T) -> Int) -> ()` | in place, **stable**; requires a `mut` path; comparator is three-way (`\|a, b\| a.1.cmp(b.1)`) |
+| `repeat(k)` | `(Int) -> List<T>` | new list, elements repeated k times (`[0].repeat(n)` is the fill constructor; Go 1.23's `slices.Repeat`). **Shallow**: repeats the value, so `[[]].repeat(2)` is two slots sharing one inner list — build fresh inner values with the adapter form (○) instead. k < 0 panics |
 | `iter()` | `-> Iterator<T>` | |
 
 Indexing: `xs[i]` reads ✓; `xs[i] = v` and the compound forms (`+=`

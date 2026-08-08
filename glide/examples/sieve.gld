@@ -2,14 +2,8 @@
 fn main() {
     let n = 1_000_000
 
-    // No fill-constructor in the M2 stdlib yet, so build the flag list
-    // one push at a time. Int 1/0 rather than Bool so counting is a sum.
-    let mut is_prime = []
-    let mut k = 0
-    for k <= n {
-        is_prime.push(1)
-        k += 1
-    }
+    // Int 1/0 rather than Bool so counting is a sum.
+    let mut is_prime = [1].repeat(n + 1)
     is_prime[0] = 0
     is_prime[1] = 0
 

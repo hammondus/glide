@@ -2,6 +2,7 @@ package interp
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -155,6 +156,26 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 		case "push":
 			r.Elems = append(r.Elems, one("push", args, line))
 			return UnitV{}
+		case "repeat":
+			arg := one("repeat", args, line)
+			k, ok := arg.(IntV)
+			if !ok {
+				panic(rtErr{line, fmt.Sprintf("repeat takes an Int count, got %s", typeName(arg))})
+			}
+			if k < 0 {
+				panic(rtErr{line, fmt.Sprintf("repeat count must be >= 0, got %d", k)})
+			}
+			// Shallow: the same element values appear k times. With a
+			// reference element ([[]].repeat(2)) that is two slots
+			// sharing one list — documented in stdlib.md.
+			if len(r.Elems) > 0 && int(k) > math.MaxInt/len(r.Elems) {
+				panic(rtErr{line, fmt.Sprintf("repeat(%d) of a %d-element list is too large", k, len(r.Elems))})
+			}
+			out := &ListV{Elems: make([]Value, 0, len(r.Elems)*int(k))}
+			for range int(k) {
+				out.Elems = append(out.Elems, r.Elems...)
+			}
+			return out
 		case "iter":
 			if len(args) != 0 {
 				panic(rtErr{line, "iter takes no arguments"})

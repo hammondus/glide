@@ -653,3 +653,42 @@ func TestCompoundDivideByZero(t *testing.T) {
 		t.Fatalf("want division by zero, got: %v", err)
 	}
 }
+
+func TestListRepeat(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let xs = [1, 2].repeat(3)
+    println("{xs.len()} {xs[0]} {xs[5]}")
+    println([9].repeat(0).len())
+    // Read-only: callable through an immutable binding.
+    let ys = [7]
+    println(ys.repeat(2).len())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "6 1 2\n0\n2\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+
+	// Shallow by design: repeating a reference value shares it, the
+	// same trade every dynamic-era fill makes (Python's [[0]]*3).
+	// The aliasing-safe spelling is the adapter form (0..n).map(...).
+	out, err = runProg(t, `
+fn main() {
+    let mut grid = [[0]].repeat(2)
+    grid[0].push(1)
+    println("{grid[0].len()} {grid[1].len()}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "2 2\n" {
+		t.Fatalf("shallow sharing: output %q", out)
+	}
+
+	_, err = runProg(t, "fn main() {\n _ = [1].repeat(0 - 1)\n}")
+	if err == nil || !strings.Contains(err.Error(), ">= 0") {
+		t.Fatalf("negative count should fail, got %v", err)
+	}
+}
