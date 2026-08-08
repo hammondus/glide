@@ -825,7 +825,10 @@ func TestIteratorAdapters(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
     // map/filter/collect chain
-    let doubled_evens = [1, 2, 3, 4, 5].iter().filter(|n| n % 2 == 0).map(|n| n * 10).collect()
+    let doubled_evens = [1, 2, 3, 4, 5].iter()
+        .filter(|n| n % 2 == 0)
+        .map(|n| n * 10)
+        .collect()
     println("{doubled_evens[0]} {doubled_evens[1]} {doubled_evens.len()}")
 
     // enumerate yields (index, value)

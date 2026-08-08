@@ -279,6 +279,17 @@ func (lx *lexer) lexOp() error {
 	}
 	c := lx.src[lx.i]
 	if k, ok := oneKinds[c]; ok {
+		// A line beginning with `.` continues the previous statement,
+		// so a multi-line adapter chain can put each `.filter(…)` on
+		// its own line. Every Semi is newline-synthesized (there is
+		// no `;`), so retracting it here cannot eat explicit
+		// punctuation. `..` at line start is DotDot and stays a
+		// statement break.
+		if k == Dot {
+			if p := lx.prev(); p != nil && p.Kind == Semi {
+				lx.toks = lx.toks[:len(lx.toks)-1]
+			}
+		}
 		lx.emit(k, string(c))
 		lx.i++
 		return nil

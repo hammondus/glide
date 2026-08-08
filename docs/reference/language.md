@@ -21,8 +21,10 @@ dynamically (mut, shadowing, let-else divergence, tail values).
   is no `/* */`. ✓
 - No semicolons. A newline ends a statement when the previous token
   can end an expression (identifier, literal, `)`, `]`, `}`, `?`);
-  a trailing operator or `.` continues the line. `else` sits on the
-  same line as its `}`. ✓
+  a trailing operator or `.` continues the line, and so does a line
+  *beginning* with `.` — multi-line adapter chains put each
+  `.filter(…)` on its own line (`..` at line start does not
+  continue). `else` sits on the same line as its `}`. ✓
 - Braces are mandatory on every block, even one-line bodies. ✓
 - Case is meaningful: Capitalised = type / variant / constructor;
   lowercase = binding / function / field. In patterns, `Circle(r)`

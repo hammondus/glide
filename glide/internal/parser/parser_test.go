@@ -117,3 +117,17 @@ func TestStringPatternNoInterpolation(t *testing.T) {
 		t.Fatal("interpolated string pattern should not parse")
 	}
 }
+
+func TestLeadingDotContinuesLine(t *testing.T) {
+	f, err := ParseFile("fn main() {\n let x = [1, 2].iter()\n  .map(|n| n)\n  .collect()\n _ = x\n}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Funcs[0].Body.Stmts) != 2 {
+		t.Fatalf("chain must parse as one statement; got %d", len(f.Funcs[0].Body.Stmts))
+	}
+	// `..` at line start is a range token, not a continuation.
+	if _, err := ParseFile("fn main() {\n let x = 1\n ..3\n}"); err == nil {
+		t.Fatal("leading .. must not continue the line")
+	}
+}
