@@ -217,8 +217,11 @@ path). Discard is explicit: `_ = expr` ✓.
   Iterables: List, Map (yields `(k, v)`), Range, any Iterator, any
   value with an `iter()` method ✓. Fresh binding per iteration ✓.
   `break` / `continue` ✓ (parse error outside a loop; a closure body
-  is its own function, so an enclosing loop is out of reach); labeled
-  forms ○.
+  is its own function, so an enclosing loop is out of reach). Labeled
+  forms ✓: `search: for … { break search }` — labels name loops only,
+  must name an enclosing loop (parse error otherwise, including
+  through closure/defer boundaries), no duplicate active labels;
+  unlabeled break/continue still target the nearest loop.
 - `match subject { pattern [if guard] => expr … }` ✓ — arms are
   single expressions (use a block expression for multi-statement
   arms); exhaustiveness checked dynamically on sum types ✓.

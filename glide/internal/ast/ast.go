@@ -114,11 +114,12 @@ type ReturnStmt struct {
 }
 
 type ForStmt struct {
-	Pat  Pattern // for-in only
-	Iter Expr    // for-in only
-	Cond Expr    // conditional loop only; all nil = loop forever
-	Body *Block
-	Line int
+	Pat   Pattern // for-in only
+	Iter  Expr    // for-in only
+	Cond  Expr    // conditional loop only; all nil = loop forever
+	Body  *Block
+	Label string // `search: for … { break search }`; "" = unlabeled
+	Line  int
 }
 
 // YieldStmt makes the enclosing function a generator. From delegates
@@ -129,9 +130,15 @@ type YieldStmt struct {
 	Line int
 }
 
-type BreakStmt struct{ Line int }
+type BreakStmt struct {
+	Label string // "" = nearest loop
+	Line  int
+}
 
-type ContinueStmt struct{ Line int }
+type ContinueStmt struct {
+	Label string // "" = nearest loop
+	Line  int
+}
 
 // DeferStmt: Err marks `errdefer` — runs only when the enclosing
 // block exits on the error path.

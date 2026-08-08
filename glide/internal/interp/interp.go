@@ -51,8 +51,9 @@ type testFail struct {
 // parser guarantees break/continue signals never escape a function:
 // they only arise inside a loop body, and evalFor consumes them.
 type sig struct {
-	kind sigKind
-	val  Value
+	kind  sigKind
+	val   Value
+	label string // break/continue target; "" = nearest loop
 }
 
 type sigKind int
@@ -339,6 +340,22 @@ func (in *Interp) evalBlockDeferred(b *ast.Block, env *Env) (val Value, sg *sig)
 	return last, nil
 }
 
+// loopSig decides what a loop does with a signal from its body.
+// done=true means the loop acts: out=nil consumes a break aimed here
+// (or unlabeled); out=sg propagates a return or an outer loop's
+// label. done=false means continue this loop's next iteration.
+func loopSig(sg *sig, label string) (done bool, out *sig) {
+	mine := sg.label == "" || sg.label == label
+	switch {
+	case sg.kind == sigBreak && mine:
+		return true, nil
+	case sg.kind == sigContinue && mine:
+		return false, nil
+	default:
+		return true, sg
+	}
+}
+
 // isErrSig reports an error-path exit: a return signal carrying an
 // Err Result — what `?` propagates and `return Err(…)` produces.
 func isErrSig(sg *sig) bool {
@@ -409,10 +426,10 @@ func (in *Interp) evalStmt(s ast.Stmt, env *Env) (Value, *sig) {
 		return UnitV{}, in.evalYield(st, env)
 
 	case *ast.BreakStmt:
-		return UnitV{}, &sig{kind: sigBreak, val: UnitV{}}
+		return UnitV{}, &sig{kind: sigBreak, val: UnitV{}, label: st.Label}
 
 	case *ast.ContinueStmt:
-		return UnitV{}, &sig{kind: sigContinue, val: UnitV{}}
+		return UnitV{}, &sig{kind: sigContinue, val: UnitV{}, label: st.Label}
 	}
 	panic(rtErr{0, fmt.Sprintf("unhandled statement %T", s)})
 }
@@ -552,11 +569,8 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 				iterEnv.declare(b.name, b.val, b.mut, st.Line)
 			}
 			if _, sg := in.evalBlock(st.Body, iterEnv); sg != nil {
-				if sg.kind == sigBreak {
-					return nil
-				}
-				if sg.kind != sigContinue {
-					return sg
+				if done, out := loopSig(sg, st.Label); done {
+					return out
 				}
 			}
 		}
@@ -574,22 +588,16 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 				return nil
 			}
 			if _, sg := in.evalBlock(st.Body, newEnv(env, false)); sg != nil {
-				if sg.kind == sigBreak {
-					return nil
-				}
-				if sg.kind != sigContinue {
-					return sg
+				if done, out := loopSig(sg, st.Label); done {
+					return out
 				}
 			}
 		}
 	default:
 		for {
 			if _, sg := in.evalBlock(st.Body, newEnv(env, false)); sg != nil {
-				if sg.kind == sigBreak {
-					return nil
-				}
-				if sg.kind != sigContinue {
-					return sg
+				if done, out := loopSig(sg, st.Label); done {
+					return out
 				}
 			}
 		}

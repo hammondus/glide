@@ -1486,3 +1486,65 @@ func TestNamedArgErrors(t *testing.T) {
 		t.Error("same name twice should not parse")
 	}
 }
+
+func TestLabeledBreakContinue(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    // labeled break exits both loops
+    let mut found = 0
+    search: for i in 1..=3 {
+        for j in 1..=3 {
+            if i * j == 6 {
+                found = i * 10 + j
+                break search
+            }
+        }
+    }
+    println(found)
+
+    // labeled continue skips to the outer loop's next iteration
+    let mut count = 0
+    outer: for _ in 0..3 {
+        for j in 0..3 {
+            if j == 1 { continue outer }
+            count += 1
+        }
+    }
+    println(count)
+
+    // unlabeled still targets the nearest loop under a label
+    let mut n = 0
+    lap: for _ in 0..2 {
+        for k in 0..5 {
+            if k == 2 { break }
+            n += 1
+        }
+    }
+    println(n)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "23\n3\n4\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestLabelRules(t *testing.T) {
+	// Unknown label.
+	if _, err := parser.ParseFile("fn main() {\n x: for {\n  break y\n }\n}"); err == nil || !strings.Contains(err.Error(), `labeled "y"`) {
+		t.Fatalf("unknown label should not parse, got %v", err)
+	}
+	// A label from outside a closure is out of reach.
+	if _, err := parser.ParseFile("fn main() {\n x: for {\n  spawn(|| { for { break x } })\n }\n}"); err == nil {
+		t.Fatal("label through closure boundary should not parse")
+	}
+	// Duplicate active label.
+	if _, err := parser.ParseFile("fn main() {\n x: for {\n  x: for {\n   break\n  }\n }\n}"); err == nil || !strings.Contains(err.Error(), "already names") {
+		t.Fatalf("duplicate label should not parse, got %v", err)
+	}
+	// Labels attach to loops only.
+	if _, err := parser.ParseFile("fn main() {\n x: println(1)\n}"); err == nil {
+		t.Fatal("label on a non-loop should not parse")
+	}
+}

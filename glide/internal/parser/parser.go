@@ -23,6 +23,9 @@ type parser struct {
 	// closure is its own function, and a break inside one cannot
 	// target the loop it happens to be written in.
 	loopDepth int
+	// loopLabels stacks the labels of enclosing loops ("" for
+	// unlabeled), validated by `break label`. Reset with loopDepth.
+	loopLabels []string
 }
 
 func ParseFile(src string) (*ast.File, error) {
@@ -575,7 +578,21 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 	case lexer.KwLet:
 		return p.parseLet()
 	case lexer.KwFor:
-		return p.parseFor()
+		return p.parseFor("")
+	case lexer.Ident:
+		// `search: for … { … }` — a label names the loop it prefixes;
+		// labels attach to loops only, nothing else.
+		if p.peek().Kind == lexer.Colon && p.pos+2 < len(p.toks) &&
+			p.toks[p.pos+2].Kind == lexer.KwFor && !isCapitalized(p.cur().Text) {
+			label := p.next().Text
+			p.next() // :
+			for _, l := range p.loopLabels {
+				if l == label {
+					return nil, p.errf("label %q already names an enclosing loop", label)
+				}
+			}
+			return p.parseFor(label)
+		}
 	case lexer.KwReturn:
 		line := p.next().Line
 		if p.cur().Kind == lexer.Semi || p.cur().Kind == lexer.RBrace {
@@ -592,10 +609,10 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		t := p.next()
 		// The body runs at scope exit, outside loop flow — an
 		// enclosing loop is out of reach, like a closure body.
-		outer := p.loopDepth
-		p.loopDepth = 0
+		outer, outerLabels := p.loopDepth, p.loopLabels
+		p.loopDepth, p.loopLabels = 0, nil
 		body, err := p.parseBlock()
-		p.loopDepth = outer
+		p.loopDepth, p.loopLabels = outer, outerLabels
 		if err != nil {
 			return nil, err
 		}
@@ -604,12 +621,22 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		if p.loopDepth == 0 {
 			return nil, p.errf("break outside a loop")
 		}
-		return &ast.BreakStmt{Line: p.next().Line}, nil
+		line := p.next().Line
+		label, err := p.loopLabel()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.BreakStmt{Label: label, Line: line}, nil
 	case lexer.KwContinue:
 		if p.loopDepth == 0 {
 			return nil, p.errf("continue outside a loop")
 		}
-		return &ast.ContinueStmt{Line: p.next().Line}, nil
+		line := p.next().Line
+		label, err := p.loopLabel()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ContinueStmt{Label: label, Line: line}, nil
 	case lexer.KwYield:
 		line := p.next().Line
 		from := false
@@ -691,14 +718,14 @@ func (p *parser) parseLet() (ast.Stmt, error) {
 	return &ast.LetStmt{Pat: pat, Type: typ, Init: init, Else: elseB, Line: line}, nil
 }
 
-func (p *parser) parseFor() (ast.Stmt, error) {
+func (p *parser) parseFor(label string) (ast.Stmt, error) {
 	line := p.next().Line // for
 	if p.cur().Kind == lexer.LBrace {
-		body, err := p.parseLoopBody()
+		body, err := p.parseLoopBody(label)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ForStmt{Body: body, Line: line}, nil
+		return &ast.ForStmt{Body: body, Label: label, Line: line}, nil
 	}
 	// Try `for <pattern> in`; backtrack to a conditional loop otherwise.
 	save := p.pos
@@ -708,29 +735,46 @@ func (p *parser) parseFor() (ast.Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		body, err := p.parseLoopBody()
+		body, err := p.parseLoopBody(label)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ForStmt{Pat: pat, Iter: iter, Body: body, Line: line}, nil
+		return &ast.ForStmt{Pat: pat, Iter: iter, Body: body, Label: label, Line: line}, nil
 	}
 	p.pos = save
 	cond, err := p.headerExpr()
 	if err != nil {
 		return nil, err
 	}
-	body, err := p.parseLoopBody()
+	body, err := p.parseLoopBody(label)
 	if err != nil {
 		return nil, err
 	}
-	return &ast.ForStmt{Cond: cond, Body: body, Line: line}, nil
+	return &ast.ForStmt{Cond: cond, Body: body, Label: label, Line: line}, nil
 }
 
-func (p *parser) parseLoopBody() (*ast.Block, error) {
+func (p *parser) parseLoopBody(label string) (*ast.Block, error) {
 	p.loopDepth++
+	p.loopLabels = append(p.loopLabels, label)
 	b, err := p.parseBlock()
+	p.loopLabels = p.loopLabels[:len(p.loopLabels)-1]
 	p.loopDepth--
 	return b, err
+}
+
+// loopLabel parses the optional label after break/continue and
+// checks it names an enclosing loop.
+func (p *parser) loopLabel() (string, error) {
+	if p.cur().Kind != lexer.Ident || isCapitalized(p.cur().Text) {
+		return "", nil
+	}
+	label := p.next().Text
+	for _, l := range p.loopLabels {
+		if l == label {
+			return label, nil
+		}
+	}
+	return "", p.errf("no enclosing loop is labeled %q", label)
 }
 
 // Patterns
@@ -1355,9 +1399,9 @@ func (p *parser) parseClosure() (ast.Expr, error) {
 		}
 	}
 	// The body is a new function: an enclosing loop is out of reach.
-	outer := p.loopDepth
-	p.loopDepth = 0
-	defer func() { p.loopDepth = outer }()
+	outer, outerLabels := p.loopDepth, p.loopLabels
+	p.loopDepth, p.loopLabels = 0, nil
+	defer func() { p.loopDepth, p.loopLabels = outer, outerLabels }()
 	if p.cur().Kind == lexer.LBrace {
 		b, err := p.parseBlock()
 		if err != nil {
