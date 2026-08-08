@@ -1649,3 +1649,31 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+func TestIntOverflowTraps(t *testing.T) {
+	for _, tc := range []struct{ expr, wantErr string }{
+		{"9223372036854775807 + 1", "overflow"},
+		{"0 - 9223372036854775807 - 2", "overflow"},
+		{"4611686018427387904 * 2", "overflow"},
+		{"(0 - 9223372036854775807 - 1) / (0 - 1)", "overflow"},
+		{"(0 - 9223372036854775807 - 1) * (0 - 1)", "overflow"},
+	} {
+		_, err := runProg(t, "fn main() {\n _ = "+tc.expr+"\n}")
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: want %q, got %v", tc.expr, tc.wantErr, err)
+		}
+	}
+	// Boundary cases that must NOT trap.
+	out, err := runProg(t, `
+fn main() {
+    println(9223372036854775806 + 1)
+    println(0 - 9223372036854775807 - 1)
+    println((0 - 9223372036854775807 - 1) % (0 - 1))
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "9223372036854775807\n-9223372036854775808\n0\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}

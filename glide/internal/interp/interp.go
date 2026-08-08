@@ -935,6 +935,9 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		case "-":
 			switch n := v.(type) {
 			case IntV:
+				if n == math.MinInt64 {
+					panic(rtErr{ex.Line, "Int overflow: negating the minimum Int (dev builds trap; release wraps)"})
+				}
 				return -n, nil
 			case FloatV:
 				return -n, nil
@@ -1443,21 +1446,41 @@ func binop(op string, l, r Value, line int) Value {
 	}
 	if li, ok := l.(IntV); ok {
 		if ri, ok := r.(IntV); ok {
+			// The interpreter is the dev tier: overflow traps here,
+			// wraps in release builds (recorded trade, Zig's).
 			switch op {
 			case "+":
-				return li + ri
+				c := li + ri
+				if (c > li) != (ri > 0) {
+					panic(rtErr{line, fmt.Sprintf("Int overflow: %d + %d (dev builds trap; release wraps)", li, ri)})
+				}
+				return c
 			case "-":
-				return li - ri
+				c := li - ri
+				if (c < li) != (ri > 0) {
+					panic(rtErr{line, fmt.Sprintf("Int overflow: %d - %d (dev builds trap; release wraps)", li, ri)})
+				}
+				return c
 			case "*":
-				return li * ri
+				c := li * ri
+				if li != 0 && (c/li != ri || (li == -1 && ri == math.MinInt64)) {
+					panic(rtErr{line, fmt.Sprintf("Int overflow: %d * %d (dev builds trap; release wraps)", li, ri)})
+				}
+				return c
 			case "/":
 				if ri == 0 {
 					panic(rtErr{line, "division by zero"})
+				}
+				if li == math.MinInt64 && ri == -1 {
+					panic(rtErr{line, fmt.Sprintf("Int overflow: %d / -1 (dev builds trap; release wraps)", li)})
 				}
 				return li / ri
 			case "%":
 				if ri == 0 {
 					panic(rtErr{line, "division by zero"})
+				}
+				if li == math.MinInt64 && ri == -1 {
+					return IntV(0)
 				}
 				return li % ri
 			case "==":

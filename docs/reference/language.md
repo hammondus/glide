@@ -277,7 +277,9 @@ patterns in function signatures, ref/binding modes.
   permanent.
 - Immutable by default; `mut` is a path property, not an object
   guarantee (aliasing is possible — no borrow checker, recorded).
-- Integer overflow: trap in dev, wrap in release ○ (M2 shims on Go
-  int64 semantics).
+- Integer overflow: trap in dev, wrap in release. The interpreter is
+  the dev tier, so `+` `-` `*` `/` (MinInt/-1) and unary `-` on
+  MinInt trap with a line-numbered error ✓; release-tier wrapping
+  and the explicit `wrapping_*` ops arrive with the compiler ○.
 - Green threads, channels, structured concurrency scopes: ○ (M3).
 - Comptime (const eval, derive, reflection): ○.
