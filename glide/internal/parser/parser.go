@@ -148,6 +148,23 @@ func (p *parser) parseFile() (*ast.File, error) {
 				return nil, err
 			}
 			f.Traits = append(f.Traits, tr)
+		case lexer.KwConst:
+			line := p.next().Line
+			name, err := p.expect(lexer.Ident, "const declaration")
+			if err != nil {
+				return nil, err
+			}
+			if isCapitalized(name.Text) {
+				return nil, p.errf("const names are lowercase bindings: %q (capitalised names are types/variants)", name.Text)
+			}
+			if _, err := p.expect(lexer.Assign, "const declaration"); err != nil {
+				return nil, err
+			}
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			f.Consts = append(f.Consts, &ast.ConstDecl{Name: name.Text, E: e, Line: line})
 		case lexer.KwType:
 			td, err := p.parseTypeDecl()
 			if err != nil {
@@ -614,8 +631,11 @@ func (p *parser) parseBlock() (*ast.Block, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, isDefer := s.(*ast.DeferStmt); isDefer {
+		switch s.(type) {
+		case *ast.DeferStmt:
 			b.HasDefer = true
+		case *ast.FnStmt:
+			b.HasFns = true
 		}
 		b.Stmts = append(b.Stmts, s)
 	}
@@ -653,6 +673,16 @@ func (p *parser) parseStmt() (ast.Stmt, error) {
 		return &ast.ReturnStmt{E: e, Line: line}, nil
 	case lexer.KwImport:
 		return nil, p.errf("imports are only allowed at the top of the file")
+	case lexer.KwFn:
+		// Nested fn: its own function — reset loop context.
+		outer, outerLabels := p.loopDepth, p.loopLabels
+		p.loopDepth, p.loopLabels = 0, nil
+		fn, err := p.parseFn(false)
+		p.loopDepth, p.loopLabels = outer, outerLabels
+		if err != nil {
+			return nil, err
+		}
+		return &ast.FnStmt{Decl: fn}, nil
 	case lexer.KwDefer, lexer.KwErrdefer:
 		t := p.next()
 		// The body runs at scope exit, outside loop flow — an

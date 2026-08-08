@@ -63,6 +63,9 @@ func displayArg(name string, args []Value, line int) string {
 // Module shims: Go code behind Glide interfaces (the recorded stdlib
 // strategy for the interpreter tier).
 func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
+	if in.constEval {
+		panic(rtErr{line, fmt.Sprintf("a const initializer cannot call %s.%s (pure expressions only)", mod, name)})
+	}
 	switch mod + "." + name {
 	case "os.args":
 		if len(args) != 0 {

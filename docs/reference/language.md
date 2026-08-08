@@ -57,6 +57,7 @@ Reserved words; none can be used as an identifier.
 | `defer` | block-scoped cleanup: `defer { … }` — runs LIFO at exit of the *enclosing block* (per-iteration in a loop body), on normal exit, `return`/`break`/`continue`, and panic unwind; skipped by `os.exit`. Body may not `return` (runtime error) or `break`/`continue` an enclosing loop (parse error) | ✓ |
 | `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
 | `trait` | trait declaration: bodied methods are defaults, inherited by any type declaring `impl Trait for Type` unless overridden; body-less methods are required signatures (unverified until the checker); all trait methods take `self`. Two traits supplying the same unoverridden default is an error at the call, naming both | ✓ |
+| `const` | module-level `const name = expr` (lowercase — it's a binding): evaluated once at load, declaration order, immutable | ✓ (M2 shim: initializers are restricted to pure expressions — no fn/module calls; full comptime evaluation arrives with the compiler ○) |
 
 Contextual keywords — only special at top level, followed by a string
 literal; otherwise ordinary identifiers (`let test = …` is legal):
@@ -66,11 +67,10 @@ literal; otherwise ordinary identifiers (`let test = …` is legal):
 | `test` | test block: `test "name" { … }`, property form `test "n" (xs: List<Int>) { … }` | ✓ |
 | `bench` | benchmark block (parses; runner skips it) | ✓ |
 
-Designed, not yet in the lexer:
+Reserved for later eras (using one today is a parse error):
 
 | Keyword | Meaning | Status |
 |---|---|---|
-| `const` | comptime-evaluated binding; the only module-level state | ○ |
 | `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |
 | `unsafe` | `unsafe fn` / `unsafe { }` | ○ |
 | `scope` | structured-concurrency scope | ○ |
@@ -176,7 +176,7 @@ path). Discard is explicit: `_ = expr` ✓.
   imports: legal until used through the shadow (checker-era error) ○.
 - `fn name(param: Type, …) -> Ret { … }` — signatures written in
   full; no arrow = returns nothing; tail expression is the value ✓.
-  `mut self` receivers require a `mut` call path ✓. Nested `fn` ○.
+  `mut self` receivers require a `mut` call path ✓. Nested `fn` ✓ — Rust's rule: a plain function, private to its enclosing block, that does NOT capture enclosing locals (capture is what closures are for); hoisted to block entry, so helpers read fine below their callers and siblings can be mutually recursive.
   Parameter defaults + named arguments ✓ — Kotlin model:
   `connect("db", tls: false)`; any param nameable; positionals
   before named; defaults re-evaluate per call, left to right, and
@@ -201,7 +201,7 @@ path). Discard is explicit: `_ = expr` ✓.
   declaring it inherits the trait's default methods; a trait default
   `iter()` makes implementors `for`-able).
 - Module-level: functions and types only, order-independent ✓;
-  `const` ○; no `init()`, no life before `main` — permanent.
+  `const` ✓ (pure initializers, load-time); no `init()`, no life before `main` — permanent.
 
 ## Statements & expressions
 

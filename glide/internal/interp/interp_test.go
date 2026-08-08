@@ -1677,3 +1677,102 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+func TestNestedFn(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    // Hoisted: callable before its declaration line.
+    println(triple(5))
+
+    fn triple(n: Int) -> Int { n * 3 }
+
+    // Recursion and mutual recursion between siblings.
+    fn even(n: Int) -> Bool {
+        if n == 0 { true } else { odd(n - 1) }
+    }
+    fn odd(n: Int) -> Bool {
+        if n == 0 { false } else { even(n - 1) }
+    }
+    println(even(10))
+
+    // Defaults work on nested fns too.
+    fn scale(n: Int, by: Int = 10) -> Int { n * by }
+    println(scale(4))
+    println(scale(4, by: 2))
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "15\ntrue\n40\n8\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestNestedFnDoesNotCapture(t *testing.T) {
+	// Rust's rule: a nested fn sees no enclosing locals — capture is
+	// what closures are for.
+	_, err := runProg(t, `
+fn main() {
+    let secret = 42
+    fn peek() -> Int { secret }
+    _ = peek()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "undefined") {
+		t.Fatalf("nested fn must not capture, got %v", err)
+	}
+	// But top-level functions remain visible.
+	out, err := runProg(t, `
+fn shout() -> String { "HI" }
+fn main() {
+    fn twice() -> String { "{shout()}{shout()}" }
+    println(twice())
+}`)
+	if err != nil || out != "HIHI\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+func TestConst(t *testing.T) {
+	out, err := runProg(t, `
+const version = "1.4"
+const max_retries = 3
+const greeting = "glide v{version}"
+const limits = [10, 100, 1000]
+fn main() {
+    println(greeting)
+    println(max_retries * 2)
+    println(limits[2])
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "glide v1.4\n6\n1000\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestConstRules(t *testing.T) {
+	// Immutable, like any let binding.
+	_, err := runProg(t, "const x = 1\nfn main() {\n x = 2\n}")
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("const must be immutable, got %v", err)
+	}
+	// Pure expressions only: no user fn calls, no module calls.
+	_, err = runProg(t, "fn f() -> Int { 1 }\nconst x = f()\nfn main() {}")
+	if err == nil || !strings.Contains(err.Error(), "pure expressions only") {
+		t.Fatalf("const calling a fn should fail, got %v", err)
+	}
+	_, err = runProg(t, "import fs\nconst x = fs.read_string(\"a\")\nfn main() {}")
+	if err == nil || !strings.Contains(err.Error(), "pure expressions only") {
+		t.Fatalf("const calling a module fn should fail, got %v", err)
+	}
+	// Value methods on literals are fine.
+	out, err := runProg(t, "const n = \"abc\".len()\nfn main() {\n println(n)\n}")
+	if err != nil || out != "3\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	// Capitalised const names are a parse error.
+	if _, perr := parser.ParseFile("const Pi = 3.14\nfn main() {}"); perr == nil {
+		t.Fatal("capitalised const should not parse")
+	}
+}

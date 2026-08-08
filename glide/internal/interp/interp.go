@@ -33,6 +33,7 @@ type Interp struct {
 
 	traits     map[string]*ast.TraitDecl
 	typeTraits map[string][]string // type -> traits it declares impls for
+	constEval  bool                // inside a const initializer: pure exprs only
 }
 
 type variantInfo struct {
@@ -157,6 +158,21 @@ func (in *Interp) load(f *ast.File) error {
 		}
 	}
 	in.global = newEnv(nil, true)
+	// Consts: the only module-level state — evaluated once, in
+	// declaration order, restricted to pure expressions (M2's
+	// conservative comptime shim: it can loosen later, not tighten).
+	for _, c := range f.Consts {
+		if _, dup := in.global.vars[c.Name]; dup {
+			return fmt.Errorf("line %d: const %q declared twice", c.Line, c.Name)
+		}
+		in.constEval = true
+		v, sg := in.eval(c.E, in.global)
+		in.constEval = false
+		if sg != nil {
+			return fmt.Errorf("line %d: a const initializer cannot return or propagate", c.Line)
+		}
+		in.global.declare(c.Name, v, false, c.Line)
+	}
 	return nil
 }
 
@@ -207,6 +223,16 @@ func (in *Interp) callFuncSelf(decl *ast.FuncDecl, self Value, args []Value) Val
 // named arguments, then defaults for whatever is unfilled. Defaults
 // evaluate per call, left to right, with earlier params in scope.
 func (in *Interp) callFuncNamed(decl *ast.FuncDecl, self Value, args []Value, names []string, line int) Value {
+	return in.callFuncNamedIn(in.global, decl, self, args, names, line)
+}
+
+// callFuncNamedIn: base is the env the body resolves against — the
+// global env, or a nested fn's private items env (never enclosing
+// locals: nested fns do not capture).
+func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, args []Value, names []string, line int) Value {
+	if in.constEval {
+		panic(rtErr{line, fmt.Sprintf("a const initializer cannot call %s — pure expressions only (comptime fn evaluation arrives later)", decl.Name)})
+	}
 	n := len(decl.Params)
 	if len(args) > n {
 		panic(rtErr{line, fmt.Sprintf("%s takes %d argument(s), got %d",
@@ -234,7 +260,7 @@ func (in *Interp) callFuncNamed(decl *ast.FuncDecl, self Value, args []Value, na
 		}
 		slots[idx], filled[idx] = a, true
 	}
-	env := newEnv(in.global, true)
+	env := newEnv(base, true)
 	if self != nil {
 		env.declare("self", self, decl.Self == ast.MutSelf, decl.Line)
 	}
@@ -273,9 +299,18 @@ func (in *Interp) callFuncNamed(decl *ast.FuncDecl, self Value, args []Value, na
 }
 
 func (in *Interp) callValue(fnv Value, args []Value, line int) Value {
+	if in.constEval {
+		if b, isB := fnv.(*BuiltinV); !isB || (b.Name != "Ok" && b.Name != "Err" && b.Name != "Some") {
+			panic(rtErr{line, "a const initializer may only call pure constructors (Ok/Err/Some) and value methods — comptime fn evaluation arrives later"})
+		}
+	}
 	switch f := fnv.(type) {
 	case *FuncV:
-		return in.callFunc(f.Decl, args)
+		base := in.global
+		if f.Items != nil {
+			base = f.Items
+		}
+		return in.callFuncNamedIn(base, f.Decl, nil, args, nil, f.Decl.Line)
 	case *BuiltinV:
 		return f.Fn(in, args, line)
 	case *ClosureV:
@@ -333,6 +368,9 @@ func (in *Interp) findMethod(typeName, method string, line int) *ast.FuncDecl {
 // Statements
 
 func (in *Interp) evalBlock(b *ast.Block, env *Env) (Value, *sig) {
+	if b.HasFns {
+		in.hoistFns(b, env)
+	}
 	if b.HasDefer {
 		return in.evalBlockDeferred(b, env)
 	}
@@ -421,6 +459,21 @@ func (in *Interp) runDefers(defers []*ast.DeferStmt, env *Env, errPath bool) {
 	}
 }
 
+// hoistFns declares a block's nested fns at block entry (Rust's
+// item hoisting: helpers read fine below their callers). They share
+// one private items env rooted at global, so siblings are mutually
+// recursive while enclosing locals stay out of reach.
+func (in *Interp) hoistFns(b *ast.Block, env *Env) {
+	items := newEnv(in.global, true)
+	for _, s := range b.Stmts {
+		if fs, ok := s.(*ast.FnStmt); ok {
+			fv := &FuncV{Decl: fs.Decl, Items: items}
+			items.declare(fs.Decl.Name, fv, false, fs.Decl.Line)
+			env.declare(fs.Decl.Name, fv, false, fs.Decl.Line)
+		}
+	}
+}
+
 // evalStmt returns the statement's value (unit for everything except
 // expression statements — the tail-expression rule lives on this).
 func (in *Interp) evalStmt(s ast.Stmt, env *Env) (Value, *sig) {
@@ -467,6 +520,9 @@ func (in *Interp) evalStmt(s ast.Stmt, env *Env) (Value, *sig) {
 
 	case *ast.YieldStmt:
 		return UnitV{}, in.evalYield(st, env)
+
+	case *ast.FnStmt:
+		return UnitV{}, nil // hoisted at block entry
 
 	case *ast.BreakStmt:
 		return UnitV{}, &sig{kind: sigBreak, val: UnitV{}, label: st.Label}
@@ -1687,8 +1743,20 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 	// defaults and named arguments apply (function *values* keep
 	// full positional arity — DESIGN.md: defaults are declaration
 	// sugar, not type).
-	if id, ok := ex.Fn.(*ast.IdentExpr); ok && env.lookup(id.Name) == nil {
-		if fn, isFn := in.fns[id.Name]; isFn {
+	if id, ok := ex.Fn.(*ast.IdentExpr); ok {
+		if b := env.lookup(id.Name); b != nil {
+			if fv, isFn := b.v.(*FuncV); isFn {
+				args, sg := in.evalArgs(ex.Args, env)
+				if sg != nil {
+					return UnitV{}, sg
+				}
+				base := in.global
+				if fv.Items != nil {
+					base = fv.Items
+				}
+				return in.callFuncNamedIn(base, fv.Decl, nil, args, ex.Names, ex.Line), nil
+			}
+		} else if fn, isFn := in.fns[id.Name]; isFn {
 			args, sg := in.evalArgs(ex.Args, env)
 			if sg != nil {
 				return UnitV{}, sg

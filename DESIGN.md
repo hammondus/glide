@@ -157,6 +157,13 @@ map/filter culture. Decisions:
 - **Capture by reference**, mut rules doing the local work (mutating a
   capture requires the binding be `mut`). Loop variables fresh per
   iteration (recorded) — Go's capture bug already dead.
+- **Nested `fn` does not capture** (Rust's rule). A `fn` inside a
+  function is a plain private helper — hoisted to block entry,
+  recursion and sibling mutual recursion fine — but enclosing locals
+  are invisible to it. Capture is what closures are for; a capturing
+  nested fn would be closure sugar with a second syntax. The
+  fn/closure split stays meaningful: `fn` = named, item-like,
+  capture-free; `|x| …` = value, capturing.
 - **Closures capture bindings, not names.** Sequential redeclaration
   (`let x = …; let x = …`) creates a *new* binding; a closure created
   before the redeclare keeps the binding it captured. Follows from

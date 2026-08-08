@@ -65,7 +65,13 @@ type (
 		BodyBlock *ast.Block
 		Env       *Env
 	}
-	FuncV struct{ Decl *ast.FuncDecl }
+	// FuncV: Items is non-nil for nested fns — a private env of the
+	// sibling nested fns (rooted at global), so recursion and mutual
+	// recursion work while enclosing locals stay invisible.
+	FuncV struct {
+		Decl  *ast.FuncDecl
+		Items *Env
+	}
 	BuiltinV struct {
 		Name string
 		Fn   func(in *Interp, args []Value, line int) Value

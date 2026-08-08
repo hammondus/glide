@@ -10,6 +10,7 @@ type File struct {
 	Types   []*TypeDecl
 	Impls   []*ImplBlock
 	Traits  []*TraitDecl
+	Consts  []*ConstDecl
 	Tests   []*TestDecl
 	Benches []*BenchDecl
 }
@@ -51,6 +52,15 @@ type TypeDecl struct {
 	Line     int
 }
 
+// ConstDecl is module-level `const name = expr`: evaluated once at
+// load, in declaration order, restricted to pure expressions (M2
+// shim for comptime — conservative so comptime can only loosen it).
+type ConstDecl struct {
+	Name string
+	E    Expr
+	Line int
+}
+
 // TraitDecl: methods with a Body are defaults, inherited by any type
 // that declares `impl Trait for Type` and doesn't override; a nil
 // Body is a required signature (unverified until the checker).
@@ -87,11 +97,13 @@ type Param struct {
 	Default    Expr
 }
 
-// Block: HasDefer is set at parse when a DeferStmt sits directly in
-// Stmts, so evalBlock's hot path skips defer bookkeeping entirely.
+// Block: HasDefer/HasFns are set at parse when a DeferStmt/FnStmt
+// sits directly in Stmts, so evalBlock's hot path skips the
+// bookkeeping entirely.
 type Block struct {
 	Stmts    []Stmt
 	HasDefer bool
+	HasFns   bool
 }
 
 // Statements
@@ -150,6 +162,12 @@ type ContinueStmt struct {
 	Line  int
 }
 
+// FnStmt is a nested fn: Rust's rule — a plain function that does
+// NOT capture enclosing locals (capture is what closures are for).
+// Hoisted to block entry, so helpers read fine below their callers
+// and siblings can be mutually recursive.
+type FnStmt struct{ Decl *FuncDecl }
+
 // DeferStmt: Err marks `errdefer` — runs only when the enclosing
 // block exits on the error path.
 type DeferStmt struct {
@@ -167,6 +185,7 @@ func (*YieldStmt) stmt()    {}
 func (*BreakStmt) stmt()    {}
 func (*ContinueStmt) stmt() {}
 func (*DeferStmt) stmt()    {}
+func (*FnStmt) stmt()       {}
 
 // Patterns
 
