@@ -305,6 +305,18 @@ type Env struct {
 	vars       map[string]*binding
 	parent     *Env
 	fnBoundary bool
+	retErr     string // enclosing fn's Result error type; ? converts to it
+}
+
+// fnRetErr walks to the nearest function boundary and reports its
+// declared Result error type ("" = none; closures never convert).
+func (e *Env) fnRetErr() string {
+	for env := e; env != nil; env = env.parent {
+		if env.fnBoundary {
+			return env.retErr
+		}
+	}
+	return ""
 }
 
 func newEnv(parent *Env, fnBoundary bool) *Env {

@@ -194,9 +194,13 @@ struct costume.
 sum-type errors for libraries (failure modes enumerable, `match`
 exhaustive), dynamic `Error` with a `.context()` chain for
 applications (anyhow's lesson, made official), `?` with conversion
-firing only at the propagation point, and `or |e|` for handle-in-place
-(the one construct with no direct precedent — flagged unratified in
-GRAMMAR.md accordingly). Panics kill the task, not the process, and
+firing only at the propagation point, and — after the fight GRAMMAR.md
+asked for — no dedicated handle-in-place construct: the sketched
+`or |e|` (Zig's `catch |err|`, the near-precedent) was declined
+because `?`-conversion covers its flagship wrap-and-propagate use,
+`??` on Result covers fallback, and `match` carries the rare inline
+inspection. Deferred with a count-the-residue test, the `++`
+methodology. Panics kill the task, not the process, and
 there is no `recover` — structured concurrency gives failures a
 principled boundary, so the escape hatch Go's unstructured goroutines
 made necessary is deleted rather than inherited.

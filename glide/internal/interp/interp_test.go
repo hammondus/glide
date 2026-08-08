@@ -1776,3 +1776,86 @@ func TestConstRules(t *testing.T) {
 		t.Fatal("capitalised const should not parse")
 	}
 }
+
+func TestNullishOnResult(t *testing.T) {
+	out, err := runProg(t, `
+fn half(n: Int) -> Result<Int, Error> {
+    if n % 2 == 0 { Ok(n / 2) } else { Err("odd") }
+}
+fn main() {
+    println(half(10) ?? 0)
+    println(half(3) ?? 0)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "5\n0\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestTryConversion(t *testing.T) {
+	out, err := runProg(t, `
+type ApiError = Db(String) | BadInput(String)
+impl ApiError {
+    fn from(e: String) -> ApiError { .Db(e) }
+}
+fn might_fail(fail: Bool) -> Result<Int, String> {
+    if fail { Err("boom") } else { Ok(7) }
+}
+fn load(fail: Bool) -> Result<Int, ApiError> {
+    let n = might_fail(fail)?
+    Ok(n * 10)
+}
+fn main() {
+    println(match load(false) {
+        Ok(n)  => "ok {n}"
+        Err(e) => "err {e:?}"
+    })
+    println(match load(true) {
+        Ok(n)  => "ok {n}"
+        Err(e) => "err {e:?}"
+    })
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "ok 70\nerr Db(\"boom\")\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}
+
+func TestTryConversionOnlyWhenApplicable(t *testing.T) {
+	// Same declared error type: no conversion, error untouched.
+	out, err := runProg(t, `
+fn inner() -> Result<Int, String> { Err("raw") }
+fn outer() -> Result<Int, String> {
+    Ok(inner()?)
+}
+fn main() {
+    println(match outer() {
+        Err(e) => "got {e:?}"
+        _      => "?"
+    })
+}`)
+	if err != nil || out != "got \"raw\"\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+
+	// Target type without a `from`: raw propagation, no error.
+	out, err = runProg(t, `
+type ApiError = Db(String) | Nope
+fn inner() -> Result<Int, String> { Err("raw") }
+fn outer() -> Result<Int, ApiError> {
+    Ok(inner()?)
+}
+fn main() {
+    println(match outer() {
+        Err(e) => "got {e:?}"
+        _      => "?"
+    })
+}`)
+	if err != nil || out != "got \"raw\"\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}

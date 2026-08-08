@@ -604,6 +604,19 @@ pointer comparisons. Ship both halves in the stdlib, day one:
   chain for a typed error. Needing it deep in application code is a smell
   that a boundary should have been typed — but the escape hatch is cheap
   and Go's `Is` proves it gets used.
+- **Handle-in-place: no dedicated construct.** GRAMMAR.md's sketch
+  proposed `or |e| { … }` (Zig's `catch` in closure pipes); declined
+  in favour of its parts. Wrap-and-propagate is `?`-conversion (the
+  bullet above — the or-block's flagship use, hand-written). Fallback
+  is `??`, which on a Result unwraps Ok and takes the default on Err
+  — the error is discarded *deliberately* (Zig separates `orelse`
+  from `catch`; we accept the conflation because `??`'s meaning is
+  "value or this", whatever the wrapper). Inline error inspection —
+  the residue — is `match`. Also: the pipes lied — `return` inside
+  the proposed block returns from the enclosing function, which a
+  closure's return cannot; a construct that impersonates a closure
+  but isn't one starts life owing an explanation. Deferred with a
+  test, not killed — see Open questions.
 - **Backtraces: captured in dev builds, skipped in release.** The
   "errors-as-values lose the stack trace" complaint, solved where it
   matters, free with the tiered backends.
@@ -1802,6 +1815,14 @@ scripting tail wagging the compiled dog. Decided:
 
 ## Open questions (decide before/while building)
 
+- **The or-block residue test** (`or |e| { … }` deferred): the
+  construct was declined in favour of its parts — `?`-conversion
+  covers wrap-and-propagate, `??` on Result covers fallback, `match`
+  carries inline error inspection. The test: writing real Glide,
+  count the sites where none of the three reads well and an or-block
+  would have. Frequent and ugly → ratify (probably as Zig's `catch`
+  spelling, not pipes that impersonate a closure); rare → the
+  deferral becomes permanent.
 - **Embedding API shape** — Glide↔Go value-marshaling rules (sum
   types/`Result`/`Option` as Go values), interrupt and resource-limit
   surface. Decide while wrapping the interpreter, not before.

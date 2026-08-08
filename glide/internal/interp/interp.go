@@ -261,6 +261,7 @@ func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, arg
 		slots[idx], filled[idx] = a, true
 	}
 	env := newEnv(base, true)
+	env.retErr = resultErrType(decl.RetType)
 	if self != nil {
 		env.declare("self", self, decl.Self == ast.MutSelf, decl.Line)
 	}
@@ -419,6 +420,29 @@ func (in *Interp) evalBlockDeferred(b *ast.Block, env *Env) (val Value, sg *sig)
 	unwound = true
 	in.runDefers(defers, env, false)
 	return last, nil
+}
+
+// resultErrType extracts E from a declared "Result<T, E>" return
+// type; "" for any other shape (no conversion target).
+func resultErrType(ret string) string {
+	if !strings.HasPrefix(ret, "Result<") || !strings.HasSuffix(ret, ">") {
+		return ""
+	}
+	inner := ret[len("Result<") : len(ret)-1]
+	depth := 0
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				return strings.TrimSpace(inner[i+1:])
+			}
+		}
+	}
+	return ""
 }
 
 // loopSig decides what a loop does with a signal from its body.
@@ -1031,6 +1055,16 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		if r.Ok {
 			return r.V, nil
 		}
+		// Conversion fires at the propagation point (recorded): when
+		// the enclosing fn declares Result<_, E> and the error isn't
+		// already an E, E.from converts it — Rust's From, in the
+		// trait-less associated-fn form until the checker era.
+		if target := env.fnRetErr(); target != "" && typeName(r.V) != target {
+			if m := in.methods[target]["from"]; m != nil && m.Self == ast.NoSelf {
+				conv := in.callFuncNamed(m, nil, []Value{r.V}, nil, ex.Line)
+				return UnitV{}, &sig{val: &ResultV{Ok: false, V: conv}}
+			}
+		}
 		return UnitV{}, &sig{val: r} // propagate the Err to the caller
 	case *ast.TupleIndex:
 		v, sg := in.eval(ex.X, env)
@@ -1461,8 +1495,17 @@ func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {
 	switch ex.Op {
 	case "??":
 		// Unboxed Option: None takes the default, anything else is
-		// already the value.
+		// already the value. On a Result, ?? unwraps Ok and takes
+		// the default on Err — the error is discarded deliberately
+		// (the sketch's `db.exec(…) ?? 0`; ratified with the or-block
+		// decision).
 		if _, isNone := l.(NoneV); isNone {
+			return in.eval(ex.R, env)
+		}
+		if r, isRes := l.(*ResultV); isRes {
+			if r.Ok {
+				return r.V, nil
+			}
 			return in.eval(ex.R, env)
 		}
 		return l, nil

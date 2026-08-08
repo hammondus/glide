@@ -214,10 +214,10 @@ generator body reads like the traversal it is.
 7. **Patterns in `for` headers** (irrefutable only): `for (k, v) in m`.
    (Params stay flat — recorded; `for` headers are `let`-like, not
    signatures.)
-8. **`or |e| { … }` error-handling form**: `?`'s sibling for "handle
-   instead of propagate" — the block must diverge or produce a
-   fallback value. (`expr or |e| return Err(.Db(e))`.) This is new —
-   the biggest thing to fight about in this sketch.
+8. **`or |e| { … }` error-handling form** — fought and declined
+   (DESIGN.md, Errors): `?`-conversion covers wrap-and-propagate,
+   `??` on Result covers fallback, `match` the residue. Deferred
+   with a count-the-residue test in DESIGN.md's open questions.
 9. **`yield from`** delegates to a sub-generator.
 10. **`main` may return `Result<(), Error>`** (error prints + exit 1)
     or `()`.

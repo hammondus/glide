@@ -139,7 +139,7 @@ Binary, loosest to tightest (levels from the parser):
 
 | Prec | Operators | Notes |
 |---|---|---|
-| 1 | `??` | option-coalescing; right side lazy |
+| 1 | `??` | coalescing, lazily: `None ?? d` and `Err(_) ?? d` take the default; `Ok(v) ?? d` unwraps to `v`. On a Result the error is discarded deliberately |
 | 2 | `..` `..=` | range construction: half-open / inclusive |
 | 3 | `\|\|` | short-circuit or |
 | 4 | `&&` | short-circuit and |
@@ -152,12 +152,18 @@ All ✓. Unary: `!` (Bool), `-` (numeric) ✓. Postfix: call `f(x)`,
 index `xs[i]` / `m[k]`, field `.name`, tuple field `.0`, try `?` ✓.
 
 - `?` unwraps a `Result` or returns the `Err` to the caller ✓
-  (on `Option` — not adopted; use `??` / `if let`).
+  (on `Option` — not adopted; use `??` / `if let`). Conversion fires
+  at the propagation point ✓ (M2 shim): when the enclosing fn
+  declares `Result<_, E>` and the error isn't already an `E`,
+  `E.from(err)` converts it — declare `fn from(e: …) -> E` in
+  `impl E`. No `from` → the error propagates untouched. Closures
+  never convert (no declared return type).
 - No `++`/`--` (use `+= 1`), no ternary (use expression-`if`), no
   assignment-as-expression, no user-defined operators.
 - String indexing `s[i]` does not exist, by design.
-- `or |e| { … }` — handle-in-place error block — ○ **and unratified**
-  (GRAMMAR.md flags it as the biggest open fight).
+- `or |e| { … }` — fought and declined (DESIGN.md, Errors): use
+  `?`-conversion, `??`, or `match`. A residue test in DESIGN.md's
+  open questions can revive it.
 
 Assignment (statements, not expressions): `=` ✓, `+=` `-=` `*=`
 `/=` `%=` ✓ (on names, fields, and index targets; requires a `mut`
