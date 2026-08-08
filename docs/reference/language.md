@@ -98,8 +98,16 @@ declaring them is an error ✓ — and `None` is a literal.
 | Struct update | `Config{ timeout: 5, ..base }` | ○ |
 | List spread | `[a, ..xs, b]` | ○ |
 
-Format specs inside interpolation: `{n:6}` width (right-align) ✓;
-`{x:.2}`, `{id:04}`, `{n:hex}`, `{x:?}` (Debug) ○.
+Format specs inside interpolation, all ✓ — the complete set,
+deliberately closed: `{n:6}` width (right-align) · `{s:-6}`
+left-align · `{id:04}` zero-pad (numbers) · `{x:.2}` decimal places
+(Float) · `{x:8.2}` width+precision · `{n:,}` thousands grouping
+(Int, or Float with precision: `{x:,.2}`; comma literally — no
+locale) · `{n:hex}` (Int, lowercase, no prefix) · `{v:?}` Debug
+(structural render; strings quoted/escaped, structs/variants named).
+A spec that doesn't fit the value's type is an error, never noise.
+Declined: fill characters, centering, sign control, bin/oct,
+scientific, `_`-grouping.
 
 ## Types
 

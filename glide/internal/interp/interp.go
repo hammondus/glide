@@ -951,15 +951,133 @@ func (in *Interp) evalStr(ex *ast.StrLit, env *Env) (Value, *sig) {
 		}
 		s := display(v)
 		if part.Spec != "" {
-			w, err := strconv.Atoi(part.Spec)
-			if err != nil {
-				panic(rtErr{ex.Line, fmt.Sprintf("unsupported format spec %q (only a width, e.g. {x:6})", part.Spec)})
-			}
-			s = fmt.Sprintf("%*s", w, s)
+			s = formatSpec(v, part.Spec, ex.Line)
 		}
 		sb.WriteString(s)
 	}
 	return StrV(sb.String()), nil
+}
+
+// formatSpec applies the format-spec set (DESIGN.md: deliberately
+// small — printf must not grow back). Standalone: `?` (Debug render)
+// and `hex` (Int, lowercase). Numeric: [`-`|`0`] [width] [`,`]
+// [`.`prec] — right-aligned width, `-` left-aligns, leading `0`
+// zero-pads, `,` groups thousands, `.prec` fixes decimal places.
+// A spec that doesn't fit the value's type is an error, never noise.
+func formatSpec(v Value, spec string, line int) string {
+	bad := func(msg string) string {
+		panic(rtErr{line, fmt.Sprintf("format spec %q: %s", spec, msg)})
+	}
+	switch spec {
+	case "?":
+		return render(v, true)
+	case "hex":
+		iv, ok := v.(IntV)
+		if !ok {
+			return bad(fmt.Sprintf("hex needs an Int, got %s", typeName(v)))
+		}
+		return strconv.FormatInt(int64(iv), 16)
+	}
+
+	// Parse [`-`|`0`] [width] [`,`] [`.`prec]; anything left over is
+	// an unsupported spec.
+	rest := spec
+	left, zero := false, false
+	if strings.HasPrefix(rest, "-") {
+		left, rest = true, rest[1:]
+	} else if len(rest) > 1 && rest[0] == '0' && rest[1] >= '0' && rest[1] <= '9' {
+		zero, rest = true, rest[1:]
+	}
+	width := 0
+	for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+		width = width*10 + int(rest[0]-'0')
+		rest = rest[1:]
+	}
+	group := false
+	if strings.HasPrefix(rest, ",") {
+		group, rest = true, rest[1:]
+	}
+	prec := -1
+	if strings.HasPrefix(rest, ".") {
+		rest = rest[1:]
+		prec = 0
+		n := 0
+		for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+			prec = prec*10 + int(rest[0]-'0')
+			rest = rest[1:]
+			n++
+		}
+		if n == 0 {
+			return bad("`.` needs digits, e.g. {x:.2}")
+		}
+	}
+	if rest != "" || spec == "" || (left && width == 0) {
+		return bad("unsupported (the set: {x:6}, {x:-6}, {x:04}, {x:.2}, {x:8.2}, {n:,}, {n:hex}, {v:?})")
+	}
+
+	_, isInt := v.(IntV)
+	fv, isFloat := v.(FloatV)
+
+	var s string
+	switch {
+	case prec >= 0:
+		if !isFloat {
+			return bad(fmt.Sprintf(".%d needs a Float, got %s", prec, typeName(v)))
+		}
+		s = strconv.FormatFloat(float64(fv), 'f', prec, 64)
+	default:
+		s = display(v)
+	}
+	if group {
+		if !isInt && !(isFloat && prec >= 0) {
+			return bad(fmt.Sprintf("`,` groups Int, or Float with a precision (e.g. {x:,.2}); got %s", typeName(v)))
+		}
+		s = groupThousands(s)
+	}
+	if zero {
+		if !isInt && !isFloat {
+			return bad(fmt.Sprintf("zero-padding needs a number, got %s", typeName(v)))
+		}
+		if len(s) < width {
+			pad := strings.Repeat("0", width-len(s))
+			if strings.HasPrefix(s, "-") {
+				return "-" + pad + s[1:]
+			}
+			return pad + s
+		}
+		return s
+	}
+	if left {
+		return fmt.Sprintf("%-*s", width, s)
+	}
+	return fmt.Sprintf("%*s", width, s)
+}
+
+// groupThousands inserts commas into the integer digits of a plain
+// decimal rendering ("-1234567.89" -> "-1,234,567.89").
+func groupThousands(s string) string {
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	intPart, tail := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		intPart, tail = s[:i], s[i:]
+	}
+	if len(intPart) <= 3 {
+		return sign + intPart + tail
+	}
+	var b strings.Builder
+	lead := len(intPart) % 3
+	if lead == 0 {
+		lead = 3
+	}
+	b.WriteString(intPart[:lead])
+	for i := lead; i < len(intPart); i += 3 {
+		b.WriteByte(',')
+		b.WriteString(intPart[i : i+3])
+	}
+	return sign + b.String() + tail
 }
 
 func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {

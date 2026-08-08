@@ -366,9 +366,15 @@ formatting:
   `{x}` = Display, `{x:?}` = Debug. Go's `%v` conflation is why Go
   programs print struct guts at users. No Display → no interpolation:
   compile error, not `%!v`.
-- **Format specs: small readable set** — `{price:.2}`, `{id:04}`,
-  `{n:hex}`. Deliberately small; a mini-language growing inside braces
-  is printf reborn.
+- **Format specs: small readable set** — `{n:6}` / `{s:-6}` width
+  (right/left — text columns are as real as numeric ones, but a
+  single `-` flag, not Python's fill-and-align mini-language),
+  `{price:.2}`, `{id:04}`, `{n:hex}`, `{n:,}` thousands grouping
+  (PEP 378's cut of the locale knot: comma means a comma, literally —
+  Go punted on grouping over locale anxiety and left users hand-
+  rolling it), `{v:?}` Debug. Deliberately closed; a mini-language
+  growing inside braces is printf reborn. Declined: fill characters,
+  centering, sign control, bin/oct, scientific, `_`-grouping.
 - **No integer indexing: `s[i]` does not exist.** Go's byte-indexing
   surprises; Python's char-indexing costs representation tricks; Rust's
   refusal is right. "What's at position i" is underspecified (byte?

@@ -958,3 +958,47 @@ func TestStringMethodErrors(t *testing.T) {
 		t.Fatalf("join on non-strings should fail, got %v", err)
 	}
 }
+
+func TestFormatSpecs(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let n = 42
+    let big = 1234567
+    let price = 1234567.891
+    let name = "amy"
+
+    println("[{n:6}]")
+    println("[{name:-6}]")
+    println("[{n:04}]")
+    println("[{price:.2}]")
+    println("[{price:12.2}]")
+    println("[{big:,}]")
+    println("[{big:12,}]")
+    println("[{price:,.2}]")
+    println("[{n:hex}]")
+    println("[{name:?}]")
+    println("[{0 - big:,}]")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[    42]\n[amy   ]\n[0042]\n[1234567.89]\n[  1234567.89]\n[1,234,567]\n[   1,234,567]\n[1,234,567.89]\n[2a]\n[\"amy\"]\n[-1,234,567]\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestFormatSpecTypeErrors(t *testing.T) {
+	for _, tc := range []struct{ src, wantErr string }{
+		{"fn main() {\n let s = \"hi\"\n println(\"{s:.2}\")\n}", "needs a Float"},
+		{"fn main() {\n let s = \"hi\"\n println(\"{s:hex}\")\n}", "needs an Int"},
+		{"fn main() {\n let s = \"hi\"\n println(\"{s:04}\")\n}", "needs a number"},
+		{"fn main() {\n let f = 1.5\n println(\"{f:,}\")\n}", "with a precision"},
+		{"fn main() {\n let n = 1\n println(\"{n:^6}\")\n}", "unsupported"},
+	} {
+		_, err := runProg(t, tc.src)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s\nwant error containing %q, got %v", tc.src, tc.wantErr, err)
+		}
+	}
+}
