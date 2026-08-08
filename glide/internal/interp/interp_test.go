@@ -913,3 +913,48 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+func TestStringMethods(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let s = "Hello, Glide"
+    println(s.contains("Gli"))
+    println(s.starts_with("Hello"))
+    println(s.ends_with("!"))
+    println(s.to_upper())
+    println("MiXeD".to_lower())
+    println(s.replace("l", "L"))
+    println("na".repeat(3))
+    println("v1.2.3".trim_prefix("v"))
+    println("file.gld".trim_suffix(".gld"))
+
+    let parts = "a,b,,c".split(",")
+    println(parts.len())
+    println(parts[2].len())
+    println(parts.join("-"))
+
+    // lines: trailing newline yields no phantom empty line; \r\n handled
+    let text = "one\r\ntwo\nthree\n"
+    for l in text.lines() {
+        println("[{l}]")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "true\ntrue\nfalse\nHELLO, GLIDE\nmixed\nHeLLo, GLide\nnanana\n1.2.3\nfile\n4\n0\na-b--c\n[one]\n[two]\n[three]\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestStringMethodErrors(t *testing.T) {
+	_, err := runProg(t, "fn main() {\n _ = \"ab\".split(\"\")\n}")
+	if err == nil || !strings.Contains(err.Error(), "non-empty") {
+		t.Fatalf("empty split separator should fail, got %v", err)
+	}
+	_, err = runProg(t, "fn main() {\n _ = [1, 2].join(\",\")\n}")
+	if err == nil || !strings.Contains(err.Error(), "List<String>") {
+		t.Fatalf("join on non-strings should fail, got %v", err)
+	}
+}

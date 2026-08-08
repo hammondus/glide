@@ -63,12 +63,23 @@ runtime error ("X has no method …").
 |---|---|---|
 | `len()` | `-> Int` | bytes |
 | `trim()` | `-> String` | strip leading/trailing whitespace |
+| `trim_prefix(p)` | `(String) -> String` | unchanged if absent (Go semantics) |
+| `trim_suffix(s)` | `(String) -> String` | unchanged if absent |
+| `contains(sub)` | `(String) -> Bool` | |
+| `starts_with(p)` | `(String) -> Bool` | |
+| `ends_with(s)` | `(String) -> Bool` | |
+| `split(sep)` | `(String) -> List<String>` | empty separator panics (per-character iteration arrives with `runes()`) |
 | `split_whitespace()` | `-> List<String>` | splits on any whitespace run |
+| `lines()` | `-> List<String>` | Rust semantics: split on `\n`, trailing `\r` stripped, no phantom empty last line |
+| `replace(old, new)` | `(String, String) -> String` | all occurrences |
+| `to_upper()` / `to_lower()` | `-> String` | Unicode simple case mapping, no locale (locale is a library — Turkish-i) |
+| `repeat(k)` | `(Int) -> String` | like `List.repeat`; k < 0 panics |
 | `cmp(other)` | `(String) -> Int` | three-way: negative / 0 / positive |
 
-There is no `s[i]` — by design, permanently. (○: the designed
-surface — `bytes()`, `runes()`, `contains`, `split`, `StringBuilder`,
-etc.)
+There is no `s[i]` — by design, permanently. No `find`/`index_of`
+yet either — a byte offset is useless until byte-offset slicing
+exists; `contains`/`starts_with`/`ends_with` cover the real uses.
+(○: `bytes()`, `runes()`, `StringBuilder`.)
 
 ### Int
 
@@ -85,6 +96,7 @@ etc.)
 | `sorted()` | `-> List<T>` | copy, natural ascending order (Int/Float/String) |
 | `sort_by(cmp)` | `(fn(T, T) -> Int) -> ()` | in place, **stable**; requires a `mut` path; comparator is three-way (`\|a, b\| a.1.cmp(b.1)`) |
 | `repeat(k)` | `(Int) -> List<T>` | new list, elements repeated k times (`[0].repeat(n)` is the fill constructor; Go 1.23's `slices.Repeat`). **Shallow**: repeats the value, so `[[]].repeat(2)` is two slots sharing one inner list — build fresh inner values with `(0..n).iter().map(\|_\| []).collect()` instead. k < 0 panics |
+| `join(sep)` | `(String) -> String` | elements must all be Strings (runtime error otherwise) |
 | `iter()` | `-> Iterator<T>` | |
 
 Indexing: `xs[i]` reads ✓; `xs[i] = v` and the compound forms (`+=`

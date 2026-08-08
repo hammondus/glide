@@ -47,6 +47,14 @@ func one(name string, args []Value, line int) Value {
 	return args[0]
 }
 
+func strArg(name string, args []Value, line int) StrV {
+	s, ok := one(name, args, line).(StrV)
+	if !ok {
+		panic(rtErr{line, fmt.Sprintf("%s takes a String, got %s", name, typeName(args[0]))})
+	}
+	return s
+}
+
 func displayArg(name string, args []Value, line int) string {
 	return display(one(name, args, line))
 }
@@ -117,6 +125,76 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 				panic(rtErr{line, "String.cmp compares against another String"})
 			}
 			return IntV(strings.Compare(string(r), string(s)))
+		case "contains":
+			return BoolV(strings.Contains(string(r), string(strArg(name, args, line))))
+		case "starts_with":
+			return BoolV(strings.HasPrefix(string(r), string(strArg(name, args, line))))
+		case "ends_with":
+			return BoolV(strings.HasSuffix(string(r), string(strArg(name, args, line))))
+		case "split":
+			sep := strArg(name, args, line)
+			if sep == "" {
+				panic(rtErr{line, "split separator must be non-empty (per-character iteration arrives with runes())"})
+			}
+			l := &ListV{}
+			for _, part := range strings.Split(string(r), string(sep)) {
+				l.Elems = append(l.Elems, StrV(part))
+			}
+			return l
+		case "lines":
+			if len(args) != 0 {
+				panic(rtErr{line, "lines takes no arguments"})
+			}
+			// Rust's semantics: split on \n, strip a trailing \r from
+			// each line, and a final newline yields no empty last line.
+			l := &ListV{}
+			s := string(r)
+			for len(s) > 0 {
+				ln := s
+				if i := strings.IndexByte(s, '\n'); i >= 0 {
+					ln, s = s[:i], s[i+1:]
+				} else {
+					s = ""
+				}
+				l.Elems = append(l.Elems, StrV(strings.TrimSuffix(ln, "\r")))
+			}
+			return l
+		case "replace":
+			if len(args) != 2 {
+				panic(rtErr{line, "replace takes (old, new)"})
+			}
+			old, ok1 := args[0].(StrV)
+			new_, ok2 := args[1].(StrV)
+			if !ok1 || !ok2 {
+				panic(rtErr{line, "replace takes two Strings"})
+			}
+			return StrV(strings.ReplaceAll(string(r), string(old), string(new_)))
+		case "to_upper":
+			if len(args) != 0 {
+				panic(rtErr{line, "to_upper takes no arguments"})
+			}
+			return StrV(strings.ToUpper(string(r)))
+		case "to_lower":
+			if len(args) != 0 {
+				panic(rtErr{line, "to_lower takes no arguments"})
+			}
+			return StrV(strings.ToLower(string(r)))
+		case "trim_prefix":
+			return StrV(strings.TrimPrefix(string(r), string(strArg(name, args, line))))
+		case "trim_suffix":
+			return StrV(strings.TrimSuffix(string(r), string(strArg(name, args, line))))
+		case "repeat":
+			k, ok := one("repeat", args, line).(IntV)
+			if !ok {
+				panic(rtErr{line, "repeat takes an Int count"})
+			}
+			if k < 0 {
+				panic(rtErr{line, fmt.Sprintf("repeat count must be >= 0, got %d", k)})
+			}
+			if len(r) > 0 && int(k) > math.MaxInt/len(r) {
+				panic(rtErr{line, fmt.Sprintf("repeat(%d) of a %d-byte string is too large", k, len(r))})
+			}
+			return StrV(strings.Repeat(string(r), int(k)))
 		}
 	case IntV:
 		switch name {
@@ -156,6 +234,20 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 		case "push":
 			r.Elems = append(r.Elems, one("push", args, line))
 			return UnitV{}
+		case "join":
+			sep := strArg(name, args, line)
+			var b strings.Builder
+			for i, e := range r.Elems {
+				s, ok := e.(StrV)
+				if !ok {
+					panic(rtErr{line, fmt.Sprintf("join needs a List<String>; element %d is %s", i, typeName(e))})
+				}
+				if i > 0 {
+					b.WriteString(string(sep))
+				}
+				b.WriteString(string(s))
+			}
+			return StrV(b.String())
 		case "repeat":
 			arg := one("repeat", args, line)
 			k, ok := arg.(IntV)
