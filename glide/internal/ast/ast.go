@@ -70,7 +70,12 @@ type BenchDecl struct {
 	Line int
 }
 
-type Param struct{ Name, Type string }
+// Param: Default (nil = required) is re-evaluated per call, in scope
+// of the params to its left — never Python's shared-once value.
+type Param struct {
+	Name, Type string
+	Default    Expr
+}
 
 // Block: HasDefer is set at parse when a DeferStmt sits directly in
 // Stmts, so evalBlock's hot path skips defer bookkeeping entirely.
@@ -286,10 +291,13 @@ type RangeExpr struct {
 	Line   int
 }
 
+// Call: Names parallels Args ("" = positional; nil = all positional).
+// The parser guarantees positionals precede named arguments.
 type Call struct {
-	Fn   Expr
-	Args []Expr
-	Line int
+	Fn    Expr
+	Args  []Expr
+	Names []string
+	Line  int
 }
 type Index struct {
 	X, I Expr

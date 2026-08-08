@@ -1425,3 +1425,64 @@ fn main() {
 		t.Fatalf("want max-int error, got %v", err)
 	}
 }
+
+func TestDefaultsAndNamedArgs(t *testing.T) {
+	out, err := runProg(t, `
+fn connect(host: String, port: Int = 5432, tls: Bool = true) -> String {
+    "{host}:{port} tls={tls}"
+}
+// A default may reference the params to its left (evaluated per call).
+fn pad(s: String, width: Int = s.len() + 2) -> Int {
+    width
+}
+type Point = struct { x: Int, y: Int }
+impl Point {
+    fn shifted(self, dx: Int = 0, dy: Int = 0) -> Point {
+        Point{ x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() {
+    println(connect("db"))
+    println(connect("db", 5433))
+    println(connect("db", tls: false))
+    println(connect(port: 1, tls: false, host: "x"))
+
+    println(pad("abc"))
+    println(pad("abcdef"))
+    println(pad("abc", width: 99))
+
+    let p = Point{ x: 1, y: 2 }
+    println("{p.shifted(dy: 10).y} {p.shifted().x}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "db:5432 tls=true\ndb:5433 tls=true\ndb:5432 tls=false\nx:1 tls=false\n5\n8\n99\n12 1\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestNamedArgErrors(t *testing.T) {
+	decl := "fn f(a: Int, b: Int = 2) -> Int {\n a + b\n}\n"
+	for _, tc := range []struct{ src, wantErr string }{
+		{decl + "fn main() {\n _ = f(b: 9)\n}", `missing its "a"`},
+		{decl + "fn main() {\n _ = f(1, c: 2)\n}", `no parameter "c"`},
+		{decl + "fn main() {\n _ = f(1, a: 2)\n}", "given twice"},
+		{decl + "fn main() {\n _ = f(1, 2, 3)\n}", "takes 2 argument(s), got 3"},
+		{"fn main() {\n let g = |x| x\n _ = g(x: 1)\n}", "not closures"},
+		{"fn main() {\n println(s: 1)\n}", "not closures"},
+	} {
+		_, err := runProg(t, tc.src)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s\nwant error containing %q, got %v", tc.src, tc.wantErr, err)
+		}
+	}
+	// Parse-time rules.
+	if _, perr := parser.ParseFile("fn main() {\n _ = f(a: 1, 2)\n}"); perr == nil {
+		t.Error("positional after named should not parse")
+	}
+	if _, perr := parser.ParseFile("fn main() {\n _ = f(a: 1, a: 2)\n}"); perr == nil {
+		t.Error("same name twice should not parse")
+	}
+}

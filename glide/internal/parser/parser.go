@@ -455,7 +455,14 @@ func (p *parser) parseFn() (*ast.FuncDecl, error) {
 		if err != nil {
 			return nil, err
 		}
-		params = append(params, ast.Param{Name: pn.Text, Type: pt})
+		prm := ast.Param{Name: pn.Text, Type: pt}
+		if p.accept(lexer.Assign) {
+			prm.Default, err = p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+		}
+		params = append(params, prm)
 		if !p.accept(lexer.Comma) {
 			break
 		}
@@ -1056,19 +1063,40 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 		switch p.cur().Kind {
 		case lexer.LParen:
 			line := p.next().Line
-			args, err := structsOK(p, func() ([]ast.Expr, error) {
-				var args []ast.Expr
+			call := &ast.Call{Fn: e, Line: line}
+			_, err := structsOK(p, func() (ast.Expr, error) {
+				seenNamed := false
+				used := map[string]bool{}
 				for p.cur().Kind != lexer.RParen {
+					nm := ""
+					// `ident:` is a named argument (params are
+					// lowercase; a capitalised ident:… would be a
+					// variant, which cannot be a name here).
+					if p.cur().Kind == lexer.Ident && p.peek().Kind == lexer.Colon && !isCapitalized(p.cur().Text) {
+						nm = p.next().Text
+						p.next() // :
+						if used[nm] {
+							return nil, p.errf("argument %q named twice", nm)
+						}
+						used[nm] = true
+						seenNamed = true
+					} else if seenNamed {
+						return nil, p.errf("positional arguments go before named ones")
+					}
 					a, err := p.parseExpr()
 					if err != nil {
 						return nil, err
 					}
-					args = append(args, a)
+					call.Args = append(call.Args, a)
+					call.Names = append(call.Names, nm)
 					if !p.accept(lexer.Comma) {
 						break
 					}
 				}
-				return args, nil
+				if !seenNamed {
+					call.Names = nil
+				}
+				return nil, nil
 			})
 			if err != nil {
 				return nil, err
@@ -1076,7 +1104,7 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 			if _, err := p.expect(lexer.RParen, "call"); err != nil {
 				return nil, err
 			}
-			e = &ast.Call{Fn: e, Args: args, Line: line}
+			e = call
 		case lexer.LBrack:
 			line := p.next().Line
 			idx, err := structsOK(p, p.parseExpr)

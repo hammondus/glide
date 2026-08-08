@@ -184,16 +184,57 @@ func (in *Interp) callFunc(decl *ast.FuncDecl, args []Value) Value {
 // callFuncSelf runs a function or method; self is non-nil for
 // methods (already declared mut/immutable by the caller's check).
 func (in *Interp) callFuncSelf(decl *ast.FuncDecl, self Value, args []Value) Value {
-	if len(args) != len(decl.Params) {
-		panic(rtErr{decl.Line, fmt.Sprintf("%s takes %d argument(s), got %d",
-			decl.Name, len(decl.Params), len(args))})
+	return in.callFuncNamed(decl, self, args, nil, decl.Line)
+}
+
+// callFuncNamed binds a direct call site: positional prefix, then
+// named arguments, then defaults for whatever is unfilled. Defaults
+// evaluate per call, left to right, with earlier params in scope.
+func (in *Interp) callFuncNamed(decl *ast.FuncDecl, self Value, args []Value, names []string, line int) Value {
+	n := len(decl.Params)
+	if len(args) > n {
+		panic(rtErr{line, fmt.Sprintf("%s takes %d argument(s), got %d",
+			decl.Name, n, len(args))})
+	}
+	slots := make([]Value, n)
+	filled := make([]bool, n)
+	for i, a := range args {
+		if names == nil || names[i] == "" {
+			slots[i], filled[i] = a, true
+			continue
+		}
+		idx := -1
+		for j, prm := range decl.Params {
+			if prm.Name == names[i] {
+				idx = j
+				break
+			}
+		}
+		if idx < 0 {
+			panic(rtErr{line, fmt.Sprintf("%s has no parameter %q", decl.Name, names[i])})
+		}
+		if filled[idx] {
+			panic(rtErr{line, fmt.Sprintf("%s: parameter %q given twice (positionally and by name)", decl.Name, names[i])})
+		}
+		slots[idx], filled[idx] = a, true
 	}
 	env := newEnv(in.global, true)
 	if self != nil {
 		env.declare("self", self, decl.Self == ast.MutSelf, decl.Line)
 	}
-	for i, p := range decl.Params {
-		env.declare(p.Name, args[i], false, decl.Line)
+	for i, prm := range decl.Params {
+		v := slots[i]
+		if !filled[i] {
+			if prm.Default == nil {
+				panic(rtErr{line, fmt.Sprintf("%s is missing its %q argument", decl.Name, prm.Name)})
+			}
+			dv, sg := in.eval(prm.Default, env)
+			if sg != nil {
+				panic(rtErr{line, fmt.Sprintf("the default for %q cannot return or propagate an error", prm.Name)})
+			}
+			v = dv
+		}
+		env.declare(prm.Name, v, false, decl.Line)
 	}
 	if in.isGenerator(decl) {
 		return in.runGenerator(decl.Body, env, decl.Line)
@@ -1525,12 +1566,14 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 			return UnitV{}, sg
 		}
 		if mod, isMod := recv.(ModuleV); isMod {
+			rejectNamed(ex, "module functions")
 			return in.moduleCall(string(mod), f.Name, args, ex.Line), nil
 		}
 		// Associated functions: Tree.new()
 		if tv, isType := recv.(TypeV); isType {
 			// Namespaced variant constructor: Shape.Circle(2).
 			if vi, ok := in.variants[f.Name]; ok && vi.typeName == string(tv) {
+				rejectNamed(ex, "variant constructors")
 				return in.callValue(in.variantValue(f.Name, vi, ex.Line), args, ex.Line), nil
 			}
 			m := in.methods[string(tv)][f.Name]
@@ -1540,7 +1583,7 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 			if m.Self != ast.NoSelf {
 				panic(rtErr{ex.Line, fmt.Sprintf("%s.%s is a method; call it on a value", tv, f.Name)})
 			}
-			return in.callFunc(m, args), nil
+			return in.callFuncNamed(m, nil, args, ex.Names, ex.Line), nil
 		}
 		// User-defined methods on structs and variants.
 		if tn := userTypeName(recv); tn != "" {
@@ -1557,12 +1600,26 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 			if m.Self == ast.MutSelf {
 				in.requireMutRoot(f.X, env, ex.Line)
 			}
-			return in.callFuncSelf(m, recv, args), nil
+			return in.callFuncNamed(m, recv, args, ex.Names, ex.Line), nil
 		}
 		if builtinMutMethods[typeName(recv)+"."+f.Name] {
 			in.requireMutRoot(f.X, env, ex.Line)
 		}
+		rejectNamed(ex, "builtin methods")
 		return in.methodCall(recv, f.Name, args, ex.Line), nil
+	}
+	// Direct call of a declared function by name: the one place
+	// defaults and named arguments apply (function *values* keep
+	// full positional arity — DESIGN.md: defaults are declaration
+	// sugar, not type).
+	if id, ok := ex.Fn.(*ast.IdentExpr); ok && env.lookup(id.Name) == nil {
+		if fn, isFn := in.fns[id.Name]; isFn {
+			args, sg := in.evalArgs(ex.Args, env)
+			if sg != nil {
+				return UnitV{}, sg
+			}
+			return in.callFuncNamed(fn, nil, args, ex.Names, ex.Line), nil
+		}
 	}
 	fnv, sg := in.eval(ex.Fn, env)
 	if sg != nil {
@@ -1572,7 +1629,16 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 	if sg != nil {
 		return UnitV{}, sg
 	}
+	rejectNamed(ex, "closures, builtins, and function values")
 	return in.callValue(fnv, args, ex.Line), nil
+}
+
+// rejectNamed guards call paths where named arguments cannot bind:
+// only a declared function's signature carries parameter names.
+func rejectNamed(ex *ast.Call, what string) {
+	if ex.Names != nil {
+		panic(rtErr{ex.Line, fmt.Sprintf("named arguments work on declared functions and methods, not %s", what)})
+	}
 }
 
 func userTypeName(v Value) string {

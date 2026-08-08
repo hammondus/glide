@@ -177,8 +177,14 @@ path). Discard is explicit: `_ = expr` ✓.
 - `fn name(param: Type, …) -> Ret { … }` — signatures written in
   full; no arrow = returns nothing; tail expression is the value ✓.
   `mut self` receivers require a `mut` call path ✓. Nested `fn` ○.
-  Parameter defaults + named arguments (`connect("db", timeout: 5.s)`)
-  ○. No overloading, no variadics — permanent.
+  Parameter defaults + named arguments ✓ — Kotlin model:
+  `connect("db", tls: false)`; any param nameable; positionals
+  before named; defaults re-evaluate per call, left to right, and
+  may reference earlier params (`width: Int = s.len()`). Direct call
+  sites of declared functions/methods only — function values,
+  closures, and builtins stay full-arity positional (defaults are
+  declaration sugar, not type). Parameter names are API. No
+  overloading, no variadics — permanent.
 - `type Name = struct { field: Type, … }` ✓ — mandatory init: every
   field, no zero values ✓.
 - `type Name = VariantA | VariantB(T) | NotFound{ id: Int } | …` —
