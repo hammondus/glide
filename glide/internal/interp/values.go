@@ -17,6 +17,7 @@ type (
 	FloatV float64
 	StrV   string
 	BoolV  bool
+	RuneV  rune
 	UnitV  struct{}
 	TupleV []Value
 
@@ -79,7 +80,7 @@ func newMap() *MapV { return &MapV{m: map[Value]Value{}} }
 
 func hashable(k Value, line int) Value {
 	switch k.(type) {
-	case IntV, StrV, BoolV:
+	case IntV, StrV, BoolV, RuneV:
 		return k
 	}
 	panic(rtErr{line, fmt.Sprintf("%s cannot be a map key", typeName(k))})
@@ -107,6 +108,8 @@ func typeName(v Value) string {
 		return "String"
 	case BoolV:
 		return "Bool"
+	case RuneV:
+		return "Rune"
 	case UnitV:
 		return "()"
 	case TupleV:
@@ -156,6 +159,11 @@ func render(v Value, quoted bool) string {
 		return string(x)
 	case BoolV:
 		return fmt.Sprintf("%t", bool(x))
+	case RuneV:
+		if quoted {
+			return fmt.Sprintf("%q", rune(x))
+		}
+		return string(rune(x))
 	case UnitV:
 		return "()"
 	case TupleV:
@@ -230,7 +238,7 @@ func render(v Value, quoted bool) string {
 // comparable (runtime error at the call site's line).
 func eq(a, b Value, line int) bool {
 	switch x := a.(type) {
-	case IntV, FloatV, StrV, BoolV, UnitV, NoneV:
+	case IntV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV:
 		return a == b
 	case TupleV:
 		y, ok := b.(TupleV)

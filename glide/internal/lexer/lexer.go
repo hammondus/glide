@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Kind int
@@ -21,6 +22,7 @@ const (
 	Int
 	Float
 	String
+	Rune // 'a' — code point in Token.Int
 
 	KwFn
 	KwLet
@@ -83,7 +85,7 @@ const (
 
 var kindNames = map[Kind]string{
 	EOF: "end of file", Semi: "end of line", Ident: "identifier",
-	Int: "integer", Float: "float", String: "string",
+	Int: "integer", Float: "float", String: "string", Rune: "rune",
 	KwFn: "'fn'", KwLet: "'let'", KwMut: "'mut'", KwIf: "'if'",
 	KwElse: "'else'", KwFor: "'for'", KwIn: "'in'", KwImport: "'import'",
 	KwReturn: "'return'", KwTrue: "'true'", KwFalse: "'false'",
@@ -138,7 +140,7 @@ type Token struct {
 
 // Tokens whose presence at end-of-line means the statement is complete.
 var endsExpr = map[Kind]bool{
-	Ident: true, Int: true, Float: true, String: true,
+	Ident: true, Int: true, Float: true, String: true, Rune: true,
 	KwTrue: true, KwFalse: true, KwReturn: true,
 	KwBreak: true, KwContinue: true,
 	RParen: true, RBrack: true, RBrace: true, Question: true,
@@ -205,6 +207,14 @@ func (lx *lexer) run() error {
 			if err := lx.lexString(); err != nil {
 				return err
 			}
+		case c == '\'':
+			if err := lx.lexRune(); err != nil {
+				return err
+			}
+		case c == '`':
+			if err := lx.lexRaw(); err != nil {
+				return err
+			}
 		case isDigit(c):
 			lx.lexNumber()
 		case isIdentStart(c):
@@ -257,6 +267,105 @@ func (lx *lexer) lexNumber() {
 		n, _ := strconv.ParseInt(text, 10, 64)
 		lx.toks = append(lx.toks, Token{Kind: Int, Text: text, Int: n, Line: lx.line})
 	}
+}
+
+// unicodeEscape decodes `\u{HEX}` starting at src[at] (the
+// backslash). Returns the rune and the total byte length consumed.
+func (lx *lexer) unicodeEscape(at int) (rune, int, error) {
+	j := at + 2 // past \u
+	if j >= len(lx.src) || lx.src[j] != '{' {
+		return 0, 0, lx.errf(`unicode escape is \u{HEX}, e.g. \u{1F600}`)
+	}
+	j++
+	start := j
+	for j < len(lx.src) && lx.src[j] != '}' && lx.src[j] != '\n' {
+		j++
+	}
+	if j >= len(lx.src) || lx.src[j] != '}' {
+		return 0, 0, lx.errf(`unterminated \u{…} escape`)
+	}
+	n, err := strconv.ParseUint(lx.src[start:j], 16, 32)
+	if err != nil || start == j {
+		return 0, 0, lx.errf(`bad unicode escape \u{%s}`, lx.src[start:j])
+	}
+	r := rune(n)
+	if r > utf8.MaxRune || (r >= 0xD800 && r <= 0xDFFF) {
+		return 0, 0, lx.errf(`\u{%s} is not a valid code point`, lx.src[start:j])
+	}
+	return r, j + 1 - at, nil
+}
+
+// lexRune scans 'a' — exactly one rune, its own type. The escape
+// family matches strings, plus \' for the delimiter.
+func (lx *lexer) lexRune() error {
+	lx.i++ // opening '
+	if lx.i >= len(lx.src) || lx.src[lx.i] == '\n' {
+		return lx.errf("unterminated rune literal")
+	}
+	var r rune
+	if lx.src[lx.i] == '\\' {
+		if lx.i+1 >= len(lx.src) {
+			return lx.errf("unterminated escape")
+		}
+		e := lx.src[lx.i+1]
+		if e == 'u' {
+			ru, n, err := lx.unicodeEscape(lx.i)
+			if err != nil {
+				return err
+			}
+			r = ru
+			lx.i += n
+		} else {
+			switch e {
+			case 'n':
+				r = '\n'
+			case 't':
+				r = '\t'
+			case 'r':
+				r = '\r'
+			case '\\', '\'', '"':
+				r = rune(e)
+			default:
+				return lx.errf(`unknown escape \%c`, e)
+			}
+			lx.i += 2
+		}
+	} else {
+		ru, size := utf8.DecodeRuneInString(lx.src[lx.i:])
+		r = ru
+		lx.i += size
+	}
+	if lx.i >= len(lx.src) || lx.src[lx.i] != '\'' {
+		return lx.errf("a rune literal holds exactly one rune ('a'); for text use a string")
+	}
+	lx.i++
+	lx.toks = append(lx.toks, Token{Kind: Rune, Int: int64(r), Text: string(r), Line: lx.line})
+	return nil
+}
+
+// lexRaw scans `…` — no escapes, no interpolation, multiline. It
+// cannot contain a backtick: accepted, by definition of raw.
+func (lx *lexer) lexRaw() error {
+	startLine := lx.line
+	lx.i++ // opening backtick
+	start := lx.i
+	for lx.i < len(lx.src) && lx.src[lx.i] != '`' {
+		if lx.src[lx.i] == '\n' {
+			lx.line++
+		}
+		lx.i++
+	}
+	if lx.i >= len(lx.src) {
+		return fmt.Errorf("line %d: unclosed raw string (opened with `)", startLine)
+	}
+	content := lx.src[start:lx.i]
+	lx.i++
+	lx.toks = append(lx.toks, Token{
+		Kind:  String,
+		Parts: []StrPart{{S: content}},
+		Line:  startLine,
+	})
+	return nil
 }
 
 func (lx *lexer) lexOp() error {
@@ -334,6 +443,15 @@ func (lx *lexer) lexString() error {
 				return lx.errf("unterminated escape")
 			}
 			e := lx.src[lx.i+1]
+			if e == 'u' {
+				r, n, err := lx.unicodeEscape(lx.i)
+				if err != nil {
+					return err
+				}
+				lit.WriteRune(r)
+				lx.i += n
+				continue
+			}
 			switch e {
 			case 'n':
 				lit.WriteByte('\n')

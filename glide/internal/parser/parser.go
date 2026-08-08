@@ -826,6 +826,16 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 			return &ast.RangePat{Lo: lo, Hi: hi}, nil
 		}
 		return &ast.IntPat{V: lo}, nil
+	case lexer.Rune:
+		t := p.next()
+		if p.accept(lexer.DotDot) {
+			hi, err := p.expect(lexer.Rune, "rune range pattern")
+			if err != nil {
+				return nil, err
+			}
+			return &ast.RuneRangePat{Lo: rune(t.Int), Hi: rune(hi.Int)}, nil
+		}
+		return &ast.RunePat{V: rune(t.Int)}, nil
 	case lexer.String:
 		t := p.next()
 		var s strings.Builder
@@ -1103,6 +1113,9 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 	case lexer.Float:
 		p.next()
 		return &ast.FloatLit{V: t.Float}, nil
+	case lexer.Rune:
+		p.next()
+		return &ast.RuneLit{V: rune(t.Int)}, nil
 	case lexer.KwTrue:
 		p.next()
 		return &ast.BoolLit{V: true}, nil

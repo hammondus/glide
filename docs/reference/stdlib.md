@@ -74,12 +74,14 @@ runtime error ("X has no method …").
 | `replace(old, new)` | `(String, String) -> String` | all occurrences |
 | `to_upper()` / `to_lower()` | `-> String` | Unicode simple case mapping, no locale (locale is a library — Turkish-i) |
 | `repeat(k)` | `(Int) -> String` | like `List.repeat`; k < 0 panics |
+| `runes()` | `-> Iterator<Rune>` | lazy; invalid UTF-8 yields U+FFFD per byte (recorded) |
+| `bytes()` | `-> Iterator<Int>` | lazy; raw bytes |
 | `cmp(other)` | `(String) -> Int` | three-way: negative / 0 / positive |
 
 There is no `s[i]` — by design, permanently. No `find`/`index_of`
 yet either — a byte offset is useless until byte-offset slicing
 exists; `contains`/`starts_with`/`ends_with` cover the real uses.
-(○: `bytes()`, `runes()`, `StringBuilder`.)
+(○: `StringBuilder`.)
 
 ### Int
 

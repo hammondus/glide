@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Free builtins: printing and the Result/Option constructors. Ok, Err
@@ -135,7 +136,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 		case "split":
 			sep := strArg(name, args, line)
 			if sep == "" {
-				panic(rtErr{line, "split separator must be non-empty (per-character iteration arrives with runes())"})
+				panic(rtErr{line, "split separator must be non-empty (use runes() for per-character iteration)"})
 			}
 			l := &ListV{}
 			for _, part := range strings.Split(string(r), string(sep)) {
@@ -180,6 +181,35 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 				panic(rtErr{line, "to_lower takes no arguments"})
 			}
 			return StrV(strings.ToLower(string(r)))
+		case "runes":
+			if len(args) != 0 {
+				panic(rtErr{line, "runes takes no arguments"})
+			}
+			// Invalid UTF-8 yields U+FFFD per byte (recorded).
+			s := string(r)
+			i := 0
+			return &IterV{Next: func() (Value, bool) {
+				if i >= len(s) {
+					return nil, false
+				}
+				ru, size := utf8.DecodeRuneInString(s[i:])
+				i += size
+				return RuneV(ru), true
+			}}
+		case "bytes":
+			if len(args) != 0 {
+				panic(rtErr{line, "bytes takes no arguments"})
+			}
+			s := string(r)
+			i := 0
+			return &IterV{Next: func() (Value, bool) {
+				if i >= len(s) {
+					return nil, false
+				}
+				b := s[i]
+				i++
+				return IntV(b), true
+			}}
 		case "trim_prefix":
 			return StrV(strings.TrimPrefix(string(r), string(strArg(name, args, line))))
 		case "trim_suffix":
@@ -468,6 +498,11 @@ func naturalLess(a, b Value, line int) bool {
 	}
 	if x, ok := a.(FloatV); ok {
 		if y, ok := b.(FloatV); ok {
+			return x < y
+		}
+	}
+	if x, ok := a.(RuneV); ok {
+		if y, ok := b.(RuneV); ok {
 			return x < y
 		}
 	}

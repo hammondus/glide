@@ -190,12 +190,14 @@ type StructPat struct {
 	Line   int
 }
 
-// Literal patterns match by equality; RangePat by half-open
+// Literal patterns match by equality; range patterns by half-open
 // containment — the same meaning `..` has everywhere else.
 type IntPat struct{ V int64 }
 type StrPat struct{ V string }
 type BoolPat struct{ V bool }
 type RangePat struct{ Lo, Hi int64 }
+type RunePat struct{ V rune }
+type RuneRangePat struct{ Lo, Hi rune }
 
 func (*IdentPat) pat() {}
 func (*WildPat) pat()  {}
@@ -205,8 +207,10 @@ func (*CtorPat) pat()  {}
 func (*StructPat) pat() {}
 func (*IntPat) pat()    {}
 func (*StrPat) pat()   {}
-func (*BoolPat) pat()  {}
-func (*RangePat) pat() {}
+func (*BoolPat) pat()      {}
+func (*RangePat) pat()     {}
+func (*RunePat) pat()      {}
+func (*RuneRangePat) pat() {}
 
 // Expressions
 
@@ -215,6 +219,7 @@ type Expr interface{ expr() }
 type IntLit struct{ V int64 }
 type FloatLit struct{ V float64 }
 type BoolLit struct{ V bool }
+type RuneLit struct{ V rune }
 type UnitLit struct{}
 
 type StrPart struct {
@@ -361,6 +366,7 @@ type CondMatch struct {
 }
 
 func (*IntLit) expr()     {}
+func (*RuneLit) expr()    {}
 func (*FloatLit) expr()   {}
 func (*BoolLit) expr()    {}
 func (*UnitLit) expr()    {}

@@ -53,6 +53,9 @@ Reserved words; none can be used as an identifier.
 | `yield` | emit from a generator; `yield from iter` delegates | ✓ |
 | `pub` | visibility (not Go's capitalisation trick) | ✓ |
 | `true` / `false` | Bool literals | ✓ |
+| `break` / `continue` | loop control; parse error outside a loop | ✓ |
+| `defer` | block-scoped cleanup: `defer { … }` — runs LIFO at exit of the *enclosing block* (per-iteration in a loop body), on normal exit, `return`/`break`/`continue`, and panic unwind; skipped by `os.exit`. Body may not `return` (runtime error) or `break`/`continue` an enclosing loop (parse error) | ✓ |
+| `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
 
 Contextual keywords — only special at top level, followed by a string
 literal; otherwise ordinary identifiers (`let test = …` is legal):
@@ -66,8 +69,6 @@ Designed, not yet in the lexer:
 
 | Keyword | Meaning | Status |
 |---|---|---|
-| `defer` | block-scoped cleanup: `defer { … }` — runs LIFO at exit of the *enclosing block* (per-iteration in a loop body), on normal exit, `return`/`break`/`continue`, and panic unwind; skipped by `os.exit`. Body may not `return` (runtime error) or `break`/`continue` an enclosing loop (parse error) | ✓ |
-| `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
 | `const` | comptime-evaluated binding; the only module-level state | ○ |
 | `trait` | trait declaration | ○ |
 | `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |
@@ -89,9 +90,9 @@ declaring them is an error ✓ — and `None` is a literal.
 | Bool | `true`, `false` | ✓ |
 | String | `"text {expr} {expr:spec}"` — always-interpolating | ✓ |
 | Escapes | `\n` `\t` `\r` `\\` `\"` `\{` `\}` | ✓ |
-| Unicode escape | `\u{1F600}` | ○ |
-| Raw string | `` `no escapes, no interpolation, multiline` `` | ○ |
-| Rune | `'a'` (its own type, not an int alias) | ○ |
+| Unicode escape | `\u{1F600}` — braced hex, one form; also in rune literals | ✓ |
+| Raw string | `` `no escapes, no interpolation, multiline` `` — cannot contain a backtick (by definition of raw) | ✓ |
+| Rune | `'a'` (its own type, not an int alias; `'ab'` is a lex error; escape family + `\u{…}` work) | ✓ |
 | List | `[1, 2, 3]`, empty `[]` | ✓ |
 | Map | `[:]` (empty; annotation required), inserts via `m[k] = v` | ✓ |
 | Tuple | `(a, b)` — parens + comma; `(x)` is grouping | ✓ |
@@ -128,7 +129,7 @@ Type annotations are written but unchecked in M2.
 | `Range` | value of `lo..hi` | ✓ |
 | `fn(A) -> B` | one function type for named fns, closures, method values | ○ (closures exist ✓; the *type* is unchecked) |
 | `i8…i128`, `u8…u128`, `f32` | sized numerics | ○ |
-| `Rune` | | ○ |
+| `Rune` | own type; `==`/ordering with other Runes only; Display prints the character, Debug quotes it | ✓ |
 | `BigInt`, `Decimal` | stdlib, by name, never silent promotion | ○ |
 | `any Trait` | boxed trait object, visible dispatch | ○ |
 
@@ -242,7 +243,7 @@ arms, closure params (plain names only).
 | List | `[]`, `[x]`, `[first, ..rest]`, `[.._]` — exact unless `..` | ✓ |
 | Guard | `n if n < 0 =>` (match arms; opaque to exhaustiveness) | ✓ |
 | Struct | `User{ name, .. }` — shorthand binds; `field: pat` nests (`role: "admin"`, `age: 0..18`); `mut name` shorthand. Without `..` every field must be mentioned — partial-without-`..` is an error, not a no-match | ✓ |
-| Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` / `-5..-1` (half-open, like `..` everywhere) | ✓ (rune ranges `'a'..'z'` wait on Rune ○) |
+| Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` / `-5..-1` (half-open, like `..` everywhere) | ✓ (incl. rune literals and ranges — half-open like every `..`, so `'a'..'{'` covers the lowercase letters) |
 
 Not adopted (permanent): or-patterns inside patterns, `x @ pattern`,
 patterns in function signatures, ref/binding modes.

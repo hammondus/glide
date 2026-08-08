@@ -1288,3 +1288,90 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+func TestRuneLiterals(t *testing.T) {
+	out, err := runProg(t, `
+fn kind(c: Rune) -> String {
+    match c {
+        'a'..'{' => "lower"
+        'A'..'[' => "upper"
+        '0'..':' => "digit"
+        ' '      => "space"
+        _        => "other"
+    }
+}
+fn main() {
+    let a = 'a'
+    println(a)
+    println("{a:?}")
+    println('\n' == '\u{A}')
+    println('a' < 'b')
+    println("{kind('q')} {kind('Z')} {kind('7')} {kind(' ')} {kind('!')}")
+    println('\u{1F600}')
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "a\n'a'\ntrue\ntrue\nlower upper digit space other\n\U0001F600\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+
+	// 'ab' is a lex error, not a short string.
+	if _, perr := parser.ParseFile("fn main() {\n let x = 'ab'\n}"); perr == nil {
+		t.Fatal("'ab' should not lex")
+	}
+}
+
+func TestRawStrings(t *testing.T) {
+	out, err := runProg(t, "fn main() {\n    let s = `no {escape} \\n here`\n    println(s)\n    println(s.len())\n    let m = `line one\nline two`\n    println(m.lines().len())\n}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "no {escape} \\n here\n19\n2\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+	// Unclosed raw string errors with the opening line.
+	if _, perr := parser.ParseFile("fn main() {\n let s = `never closed\n}\n"); perr == nil {
+		t.Fatal("unclosed raw string should not lex")
+	}
+}
+
+func TestRunesAndBytes(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let word = "héllo"
+    println(word.len())
+    println(word.runes().count())
+    println(word.bytes().count())
+    for c in "ab".runes() {
+        println("{c:?}")
+    }
+    // per-rune Debug of a multibyte char
+    println("{'é':?}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "6\n5\n6\n'a'\n'b'\n'é'\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+
+	// Invalid UTF-8 yields U+FFFD, the recorded behavior. Build a
+	// bad byte via a raw Go-side string is not possible in .gld
+	// source, so check the boundary the other way: every rune of a
+	// valid string round-trips.
+	out, err = runProg(t, `
+fn main() {
+    let mut n = 0
+    for _ in "日本語".runes() {
+        n += 1
+    }
+    println(n)
+}`)
+	if err != nil || out != "3\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}

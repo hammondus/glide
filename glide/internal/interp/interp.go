@@ -580,6 +580,12 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 	case *ast.RangePat:
 		iv, ok := v.(IntV)
 		return nil, ok && pt.Lo <= int64(iv) && int64(iv) < pt.Hi
+	case *ast.RunePat:
+		rv, ok := v.(RuneV)
+		return nil, ok && rune(rv) == pt.V
+	case *ast.RuneRangePat:
+		rv, ok := v.(RuneV)
+		return nil, ok && pt.Lo <= rune(rv) && rune(rv) < pt.Hi
 	case *ast.TuplePat:
 		tv, ok := v.(TupleV)
 		if !ok || len(tv) != len(pt.Elems) {
@@ -743,6 +749,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		return FloatV(ex.V), nil
 	case *ast.BoolLit:
 		return BoolV(ex.V), nil
+	case *ast.RuneLit:
+		return RuneV(ex.V), nil
 	case *ast.UnitLit:
 		return UnitV{}, nil
 	case *ast.StrLit:
@@ -1359,6 +1367,20 @@ func binop(op string, l, r Value, line int) Value {
 				return BoolV(li > ri)
 			case ">=":
 				return BoolV(li >= ri)
+			}
+		}
+	}
+	if lr, ok := l.(RuneV); ok {
+		if rr, ok := r.(RuneV); ok {
+			switch op {
+			case "<":
+				return BoolV(lr < rr)
+			case "<=":
+				return BoolV(lr <= rr)
+			case ">":
+				return BoolV(lr > rr)
+			case ">=":
+				return BoolV(lr >= rr)
 			}
 		}
 	}
