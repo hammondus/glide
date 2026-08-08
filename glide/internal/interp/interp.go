@@ -501,6 +501,18 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 		return nil, true
 	case *ast.IdentPat:
 		return []bound{{name: pt.Name, mut: pt.Mut, val: v}}, true
+	case *ast.IntPat:
+		iv, ok := v.(IntV)
+		return nil, ok && int64(iv) == pt.V
+	case *ast.StrPat:
+		sv, ok := v.(StrV)
+		return nil, ok && string(sv) == pt.V
+	case *ast.BoolPat:
+		bv, ok := v.(BoolV)
+		return nil, ok && bool(bv) == pt.V
+	case *ast.RangePat:
+		iv, ok := v.(IntV)
+		return nil, ok && pt.Lo <= int64(iv) && int64(iv) < pt.Hi
 	case *ast.TuplePat:
 		tv, ok := v.(TupleV)
 		if !ok || len(tv) != len(pt.Elems) {
@@ -845,7 +857,14 @@ func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
 	}
 	for i := range ex.Arms {
 		arm := &ex.Arms[i]
-		binds, ok := match(arm.Pat, x)
+		var binds []bound
+		ok := false
+		for _, q := range arm.Pats {
+			if bs, matched := match(q, x); matched {
+				binds, ok = bs, true
+				break
+			}
+		}
 		if !ok {
 			continue
 		}

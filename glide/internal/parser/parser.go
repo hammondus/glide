@@ -776,8 +776,81 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 			return nil, err
 		}
 		return lp, nil
+	case lexer.Int, lexer.Minus:
+		lo, err := p.patInt()
+		if err != nil {
+			return nil, err
+		}
+		if p.accept(lexer.DotDot) {
+			hi, err := p.patInt()
+			if err != nil {
+				return nil, err
+			}
+			return &ast.RangePat{Lo: lo, Hi: hi}, nil
+		}
+		return &ast.IntPat{V: lo}, nil
+	case lexer.String:
+		t := p.next()
+		var s strings.Builder
+		for _, part := range t.Parts {
+			if part.IsExpr {
+				return nil, p.errf("a string pattern must be a plain literal (no interpolation)")
+			}
+			s.WriteString(part.S)
+		}
+		return &ast.StrPat{V: s.String()}, nil
+	case lexer.KwTrue:
+		p.next()
+		return &ast.BoolPat{V: true}, nil
+	case lexer.KwFalse:
+		p.next()
+		return &ast.BoolPat{V: false}, nil
 	}
 	return nil, p.errf("expected a pattern, found %s", p.cur().Kind)
+}
+
+// patInt parses an optionally negated integer literal in a pattern.
+func (p *parser) patInt() (int64, error) {
+	neg := p.accept(lexer.Minus)
+	t, err := p.expect(lexer.Int, "pattern")
+	if err != nil {
+		return 0, err
+	}
+	if neg {
+		return -t.Int, nil
+	}
+	return t.Int, nil
+}
+
+// patternBinds reports whether a pattern introduces any binding —
+// multi-pattern arms are Go-style value alternatives and must not.
+func patternBinds(pt ast.Pattern) bool {
+	switch q := pt.(type) {
+	case *ast.IdentPat:
+		return true
+	case *ast.TuplePat:
+		for _, el := range q.Elems {
+			if patternBinds(el) {
+				return true
+			}
+		}
+	case *ast.ListPat:
+		if q.Rest >= 0 && q.RestName != "_" {
+			return true
+		}
+		for _, el := range q.Elems {
+			if patternBinds(el) {
+				return true
+			}
+		}
+	case *ast.CtorPat:
+		for _, el := range q.Args {
+			if patternBinds(el) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Expressions — Pratt.
@@ -1231,6 +1304,21 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 			if err != nil {
 				return nil, err
 			}
+			pats := []ast.Pattern{pat}
+			for p.accept(lexer.Comma) {
+				q, err := p.parsePattern()
+				if err != nil {
+					return nil, err
+				}
+				pats = append(pats, q)
+			}
+			if len(pats) > 1 {
+				for _, q := range pats {
+					if patternBinds(q) {
+						return nil, p.errf("alternatives in a multi-pattern arm match values only; they cannot bind names")
+					}
+				}
+			}
 			var guard ast.Expr
 			if p.accept(lexer.KwIf) {
 				guard, err = p.parseExpr()
@@ -1246,7 +1334,7 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			m.Arms = append(m.Arms, ast.MatchArm{Pat: pat, Guard: guard, Body: body, Line: armLine})
+			m.Arms = append(m.Arms, ast.MatchArm{Pats: pats, Guard: guard, Body: body, Line: armLine})
 		}
 	})
 }

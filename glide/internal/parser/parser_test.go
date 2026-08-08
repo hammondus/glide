@@ -95,3 +95,25 @@ func TestBreakContinueOnlyInLoops(t *testing.T) {
 		}
 	}
 }
+
+func TestMultiPatternArmsBindNothing(t *testing.T) {
+	bad := []string{
+		"fn main() {\n _ = match x {\n  1, n => n\n  _ => 0\n }\n}",
+		"fn main() {\n _ = match x {\n  Some(v), None => 1\n  _ => 0\n }\n}",
+	}
+	for _, src := range bad {
+		if _, err := ParseFile(src); err == nil {
+			t.Errorf("should not parse:\n%s", src)
+		}
+	}
+	// Binding-free constructor args are fine.
+	if _, err := ParseFile("fn main() {\n _ = match x {\n  Some(1), None => 1\n  _ => 0\n }\n}"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStringPatternNoInterpolation(t *testing.T) {
+	if _, err := ParseFile("fn main() {\n _ = match s {\n  \"{x}\" => 1\n  _ => 0\n }\n}"); err == nil {
+		t.Fatal("interpolated string pattern should not parse")
+	}
+}

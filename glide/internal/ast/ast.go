@@ -159,11 +159,22 @@ type CtorPat struct {
 	Args []Pattern
 }
 
+// Literal patterns match by equality; RangePat by half-open
+// containment — the same meaning `..` has everywhere else.
+type IntPat struct{ V int64 }
+type StrPat struct{ V string }
+type BoolPat struct{ V bool }
+type RangePat struct{ Lo, Hi int64 }
+
 func (*IdentPat) pat() {}
 func (*WildPat) pat()  {}
 func (*TuplePat) pat() {}
 func (*ListPat) pat()  {}
 func (*CtorPat) pat()  {}
+func (*IntPat) pat()   {}
+func (*StrPat) pat()   {}
+func (*BoolPat) pat()  {}
+func (*RangePat) pat() {}
 
 // Expressions
 
@@ -274,8 +285,10 @@ type StructLit struct {
 	Line  int
 }
 
+// MatchArm: Pats are comma alternatives (`1, 2 =>`, Go-style); with
+// more than one, none may bind a name (enforced at parse).
 type MatchArm struct {
-	Pat   Pattern
+	Pats  []Pattern
 	Guard Expr // nil = unguarded
 	Body  Expr
 	Line  int

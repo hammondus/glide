@@ -192,8 +192,9 @@ path). Discard is explicit: `_ = expr` ✓.
 - `match subject { pattern [if guard] => expr … }` ✓ — arms are
   single expressions (use a block expression for multi-statement
   arms); exhaustiveness checked dynamically on sum types ✓.
-  Subjectless `match { cond => … }` ○; multi-value arms (`1, 2 =>`)
-  ○; literal / range / string patterns ○.
+  Multi-value arms (`1, 2 =>`) ✓ — Go-style value alternatives; none
+  may bind a name (parse error). Literal / range / string patterns ✓
+  (see Patterns). Subjectless `match { cond => … }` ○.
 - Closures: `|x| expr`, `|x| { … }`, `||` for no args ✓. Capture by
   reference, by *binding* (a redeclare doesn't retarget) ✓. Closures
   may reuse outer names (function boundary resets the shadow rule) ✓.
@@ -216,7 +217,7 @@ arms, closure params (plain names only).
 | List | `[]`, `[x]`, `[first, ..rest]`, `[.._]` — exact unless `..` | ✓ |
 | Guard | `n if n < 0 =>` (match arms; opaque to exhaustiveness) | ✓ |
 | Struct | `User{ name, .. }` | ○ |
-| Literal / range | `1 =>`, `'a'..'z' =>`, `"GET" =>` | ○ |
+| Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` / `-5..-1` (half-open, like `..` everywhere) | ✓ (rune ranges `'a'..'z'` wait on Rune ○) |
 
 Not adopted (permanent): or-patterns inside patterns, `x @ pattern`,
 patterns in function signatures, ref/binding modes.

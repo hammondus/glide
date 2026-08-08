@@ -692,3 +692,71 @@ fn main() {
 		t.Fatalf("negative count should fail, got %v", err)
 	}
 }
+
+func TestMatchLiteralRangeString(t *testing.T) {
+	out, err := runProg(t, `
+fn describe(code: Int) -> String {
+    match code {
+        200        => "ok"
+        301, 302   => "redirect"
+        400..500   => "client error"
+        n if n < 0 => "nonsense"
+        _          => "other"
+    }
+}
+fn main() {
+    println(describe(200))
+    println(describe(302))
+    println(describe(404))
+    println(describe(499))
+    println(describe(500))
+    println(describe(0 - 7))
+
+    println(match "PUT" {
+        "GET"          => "read"
+        "PUT", "POST"  => "write"
+        _              => "?"
+    })
+    println(match true {
+        true  => "yes"
+        false => "no"
+    })
+    // negative literals and ranges
+    println(match 0 - 3 {
+        -5..-1 => "small negative"
+        -1     => "minus one"
+        _      => "other"
+    })
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ok\nredirect\nclient error\nclient error\nother\nnonsense\nwrite\nyes\nsmall negative\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestMatchMultiPatternCtors(t *testing.T) {
+	out, err := runProg(t, `
+type Color = Red | Green | Blue
+fn main() {
+    let c = Green
+    println(match c {
+        Red, Green => "warm"
+        Blue       => "cool"
+    })
+}`)
+	if err != nil || out != "warm\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+func TestMatchTypeMismatchFallsThrough(t *testing.T) {
+	// Dynamically typed until the checker era: a literal of the wrong
+	// type simply doesn't match, and the fall-through panic reports it.
+	_, err := runProg(t, "fn main() {\n _ = match \"GET\" {\n  1 => \"?\"\n }\n}")
+	if err == nil || !strings.Contains(err.Error(), "no match arm matched") {
+		t.Fatalf("want fall-through panic, got %v", err)
+	}
+}
