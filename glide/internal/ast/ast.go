@@ -173,6 +173,22 @@ type CtorPat struct {
 	Args []Pattern
 }
 
+// StructPat matches a struct by type and fields. Shorthand `name`
+// binds the field; `field: pat` nests. Rest (`..`) is required for a
+// partial match (Rust's rule: silent omission would mean new fields
+// change nothing at match sites) — without it every field must be
+// mentioned, enforced when the pattern is applied.
+type FieldPat struct {
+	Name string
+	Pat  Pattern
+}
+type StructPat struct {
+	Type   string
+	Fields []FieldPat
+	Rest   bool
+	Line   int
+}
+
 // Literal patterns match by equality; RangePat by half-open
 // containment — the same meaning `..` has everywhere else.
 type IntPat struct{ V int64 }
@@ -185,7 +201,8 @@ func (*WildPat) pat()  {}
 func (*TuplePat) pat() {}
 func (*ListPat) pat()  {}
 func (*CtorPat) pat()  {}
-func (*IntPat) pat()   {}
+func (*StructPat) pat() {}
+func (*IntPat) pat()    {}
 func (*StrPat) pat()   {}
 func (*BoolPat) pat()  {}
 func (*RangePat) pat() {}

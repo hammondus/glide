@@ -1106,3 +1106,59 @@ func TestDeferRestrictions(t *testing.T) {
 		t.Fatalf("defers must not run on os.exit, got %q", out)
 	}
 }
+
+func TestStructPatterns(t *testing.T) {
+	out, err := runProg(t, `
+type User = struct {
+    name: String
+    role: String
+    age: Int
+}
+fn describe(u: User) -> String {
+    match u {
+        User{ role: "admin", name, .. }  => "admin {name}"
+        User{ age: 0..18, .. }           => "minor"
+        User{ name, role, age }          => "{name} is a {role}, {age}"
+    }
+}
+fn main() {
+    println(describe(User{ name: "amy", role: "admin", age: 44 }))
+    println(describe(User{ name: "bo", role: "user", age: 12 }))
+    println(describe(User{ name: "cy", role: "user", age: 30 }))
+
+    // let destructuring, with mut shorthand
+    let User{ name, mut age, .. } = User{ name: "dee", role: "user", age: 9 }
+    age += 1
+    println("{name} {age}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "admin amy\nminor\ncy is a user, 30\ndee 10\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestStructPatternRules(t *testing.T) {
+	decl := "type P = struct {\n x: Int\n y: Int\n}\n"
+	// Partial without .. is a misuse, not a quiet no-match.
+	_, err := runProg(t, decl+"fn main() {\n let P{ x } = P{ x: 1, y: 2 }\n}")
+	if err == nil || !strings.Contains(err.Error(), "deliberate partial") {
+		t.Fatalf("partial without .. should fail, got %v", err)
+	}
+	// Unknown field is a misuse too.
+	_, err = runProg(t, decl+"fn main() {\n let P{ z, .. } = P{ x: 1, y: 2 }\n}")
+	if err == nil || !strings.Contains(err.Error(), "no field") {
+		t.Fatalf("unknown field should fail, got %v", err)
+	}
+	// A different struct type simply doesn't match (refutable in match).
+	out, err := runProg(t, decl+"type Q = struct {\n x: Int\n}\nfn main() {\n let q = Q{ x: 5 }\n println(match q {\n  P{ x, .. } => \"P {x}\"\n  Q{ x } => \"Q {x}\"\n })\n}")
+	if err != nil || out != "Q 5\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	// Duplicate field: parse error.
+	if _, perr := parser.ParseFile("fn main() {\n let P{ x, x } = p\n}"); perr == nil {
+		t.Fatal("duplicate field should not parse")
+	}
+}

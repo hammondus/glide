@@ -723,6 +723,9 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 		}
 		// Case is load-bearing: Circle(r) matches, point binds.
 		if isCapitalized(t.Text) {
+			if p.cur().Kind == lexer.LBrace {
+				return p.parseStructPat(t.Text, t.Line)
+			}
 			cp := &ast.CtorPat{Name: t.Text}
 			if p.accept(lexer.LParen) {
 				for p.cur().Kind != lexer.RParen {
@@ -824,6 +827,55 @@ func (p *parser) parsePattern() (ast.Pattern, error) {
 	return nil, p.errf("expected a pattern, found %s", p.cur().Kind)
 }
 
+// parseStructPat parses `Type{ field, other: pat, .. }` (the `{` is
+// current). `..` must come last; `mut name` is binding shorthand.
+func (p *parser) parseStructPat(typeName string, line int) (ast.Pattern, error) {
+	p.next() // {
+	sp := &ast.StructPat{Type: typeName, Line: line}
+	seen := map[string]bool{}
+	for {
+		p.skipSemis()
+		if p.accept(lexer.RBrace) {
+			return sp, nil
+		}
+		if p.cur().Kind == lexer.DotDot {
+			p.next()
+			sp.Rest = true
+			p.skipSemis()
+			p.accept(lexer.Comma)
+			p.skipSemis()
+			if _, err := p.expect(lexer.RBrace, "struct pattern (`..` must be last)"); err != nil {
+				return nil, err
+			}
+			return sp, nil
+		}
+		mut := p.accept(lexer.KwMut)
+		t, err := p.expect(lexer.Ident, "struct pattern field")
+		if err != nil {
+			return nil, err
+		}
+		if seen[t.Text] {
+			return nil, p.errf("field %q appears twice in struct pattern", t.Text)
+		}
+		seen[t.Text] = true
+		var fp ast.Pattern = &ast.IdentPat{Name: t.Text, Mut: mut}
+		if !mut && p.accept(lexer.Colon) {
+			fp, err = p.parsePattern()
+			if err != nil {
+				return nil, err
+			}
+		}
+		sp.Fields = append(sp.Fields, ast.FieldPat{Name: t.Text, Pat: fp})
+		if !p.accept(lexer.Comma) {
+			p.skipSemis()
+			if _, err := p.expect(lexer.RBrace, "struct pattern"); err != nil {
+				return nil, err
+			}
+			return sp, nil
+		}
+	}
+}
+
 // patInt parses an optionally negated integer literal in a pattern.
 func (p *parser) patInt() (int64, error) {
 	neg := p.accept(lexer.Minus)
@@ -861,6 +913,12 @@ func patternBinds(pt ast.Pattern) bool {
 	case *ast.CtorPat:
 		for _, el := range q.Args {
 			if patternBinds(el) {
+				return true
+			}
+		}
+	case *ast.StructPat:
+		for _, f := range q.Fields {
+			if patternBinds(f.Pat) {
 				return true
 			}
 		}

@@ -231,7 +231,7 @@ arms, closure params (plain names only).
 | Tuple | `(a, b)` (≥2 elements) | ✓ |
 | List | `[]`, `[x]`, `[first, ..rest]`, `[.._]` — exact unless `..` | ✓ |
 | Guard | `n if n < 0 =>` (match arms; opaque to exhaustiveness) | ✓ |
-| Struct | `User{ name, .. }` | ○ |
+| Struct | `User{ name, .. }` — shorthand binds; `field: pat` nests (`role: "admin"`, `age: 0..18`); `mut name` shorthand. Without `..` every field must be mentioned — partial-without-`..` is an error, not a no-match | ✓ |
 | Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` / `-5..-1` (half-open, like `..` everywhere) | ✓ (rune ranges `'a'..'z'` wait on Rune ○) |
 
 Not adopted (permanent): or-patterns inside patterns, `x @ pattern`,

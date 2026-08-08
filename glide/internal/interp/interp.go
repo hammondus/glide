@@ -589,6 +589,31 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 			all = append(all, bs...)
 		}
 		return all, true
+	case *ast.StructPat:
+		sv, ok := v.(*StructV)
+		if !ok || sv.Type != pt.Type {
+			return nil, false
+		}
+		// Partial matches must say so: without `..` every field is
+		// mentioned, so new fields break match sites (the point).
+		if !pt.Rest && len(pt.Fields) != len(sv.Fields) {
+			panic(rtErr{pt.Line, fmt.Sprintf(
+				"struct pattern %s{…} names %d of %d fields; mention them all, or end with `..` for a deliberate partial match",
+				pt.Type, len(pt.Fields), len(sv.Fields))})
+		}
+		var all []bound
+		for _, f := range pt.Fields {
+			fv, ok := sv.Fields[f.Name]
+			if !ok {
+				panic(rtErr{pt.Line, fmt.Sprintf("%s has no field %q", pt.Type, f.Name)})
+			}
+			bs, ok2 := match(f.Pat, fv)
+			if !ok2 {
+				return nil, false
+			}
+			all = append(all, bs...)
+		}
+		return all, true
 	case *ast.CtorPat:
 		switch pt.Name {
 		case "None":
