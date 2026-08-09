@@ -1,0 +1,46 @@
+// Explicit numeric conversion, Go's spelling: the type's own name
+// applied to a value. It is the only way between widths — implicit
+// conversion is forbidden by design, and until M4c there was no
+// explicit form either, so a sized value could only come from a
+// literal and the byte/hash work the type exists for was unwritable.
+fn low_byte(n: Int) -> u8 {
+    n.wrapping_u8()
+}
+
+fn main() {
+    // Widening and narrowing both go through the same spelling.
+    let n = 200
+    let b = u8(n)
+    println(b + u8(50))
+    println(i32(b) * 1000)
+    println(Int(b) + 1000)
+    println(u64(n))
+
+    // Across the integer/float line, in both directions. Float to
+    // integer truncates toward zero, matching `/` on integers —
+    // dropping a fraction is not overflow.
+    println(Float(7) / 2.0)
+    println(f32(1.5))
+    println(Int(3.7))
+    println(Int(-3.7))
+
+    // Rune is in the conversion set even though it is deliberately
+    // not an integer alias: `Int(c)` says what it means, which is the
+    // opposite of the implicit passing Rune exists to prevent.
+    println(Int('a'))
+    println(Rune(97))
+    println(Rune(128512))
+
+    // wrapping_* is the truncating counterpart. `u8(300)` traps;
+    // `300.wrapping_u8()` is 44, and says so.
+    println(low_byte(123456))
+    println(low_byte(255))
+    println(123456.wrapping_i16())
+    println((0 - 1).wrapping_u8())
+
+    // Conversion composes with the width arithmetic: the result of a
+    // conversion is an ordinary value of the target type, so it traps
+    // at that width like any other.
+    let acc: u8 = 0
+    println(acc.wrapping_add(u8(200)).wrapping_add(u8(100)))
+}

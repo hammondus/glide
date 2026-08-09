@@ -103,6 +103,14 @@ func Load(f *ast.File, known Known) (*Table, error) {
 			bag.Add(td.Span, "type %q declared twice (first at %s)", td.Name, t.where(prev.Span))
 			continue
 		}
+		// Types are checked against the reserved set too, not just
+		// functions. `type Int = struct { … }` used to be accepted and
+		// then silently unreachable, because name resolution tries the
+		// primitives first.
+		if known.Builtins[td.Name] {
+			bag.Add(td.Span, "%q is a builtin and cannot be redeclared", td.Name)
+			continue
+		}
 		t.Types[td.Name] = td
 		for _, v := range td.Variants {
 			if prev, dup := t.Variants[v.Name]; dup {
@@ -151,6 +159,10 @@ func Load(f *ast.File, known Known) (*Table, error) {
 	for _, c := range f.Consts {
 		if prev, dup := t.Consts[c.Name]; dup {
 			bag.Add(c.Span, "const %q declared twice (first at %s)", c.Name, t.where(prev.Span))
+			continue
+		}
+		if known.Builtins[c.Name] {
+			bag.Add(c.Span, "%q is a builtin and cannot be redeclared", c.Name)
 			continue
 		}
 		t.Consts[c.Name] = c

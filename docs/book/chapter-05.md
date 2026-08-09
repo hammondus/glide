@@ -6,10 +6,9 @@ truthiness, Go's platform-sized `int`, Python's silent bignum
 promotion. Glide's primitives are boring by construction, and each
 piece of boringness is a specific bug class that has been deleted.
 
-This chapter is ✓ throughout. The sized integers `i8`…`u64` and `u8`…
-`u64` run: they are declared, checked, represented at their own width
-and trap at it. Only `i128`/`u128` remain ○, and the sized types have
-no conversions yet — a `u8` can still only come from a literal.
+This chapter is ✓ throughout. The sized integers run: declared,
+checked, represented at their own width, trapping at it, and reachable
+by explicit conversion. Only `i128`/`u128` remain ○.
 
 ---
 
@@ -73,9 +72,64 @@ error: line 1: operator + not defined for Int and Float
 
 `Int` and `Float` do not mix, and neither do `i32` and `i64`, or `u8`
 and `u16` — every pair of widths is a compile error. This is Go's
-rule, and Go proved the strictness is tolerable. The one wrinkle today
-is that Glide has no *explicit* conversion either (○), so a sized
-value can only come from a literal.
+rule, and Go proved the strictness is tolerable.
+
+#### Explicit conversion
+
+The type's own name, applied to a value:
+
+```glide
+let n = 200
+let b = u8(n)          // 200, as a u8
+println(i32(b) * 1000) // 200000
+println(Int('a'))      // 97
+println(Rune(97))      // a
+println(Int(3.7))      // 3   — truncates toward zero
+```
+
+That is Go's spelling, and Glide was already using it: `NoteId(7)`
+constructs a `distinct` type the same way. A type in expression
+position was always callable; conversion just widens which types.
+
+One difference from Go, and it is the important one:
+
+```glide
+fn main() {
+    let n = 300
+    println(u8(n))
+}
+```
+
+```
+error: line 3: u8 overflow: 300 does not fit (use wrapping_u8 to truncate)
+```
+
+Go's `uint8(300)` is `44`, silently. Glide traps. A language whose `+`
+traps at the declared width cannot hand you 44 for the same overflow
+spelled as a conversion — and `u8(300)`, with a constant, does not
+even reach runtime:
+
+```
+error: line 2: 300 does not fit in u8
+```
+
+`n.wrapping_u8()` is the truncating form, for when you mean it.
+
+Conversion is defined between numbers and `Rune`, and nowhere else.
+`String(65)` is not a conversion — Go's `string(65) == "A"` is the
+wart its own vet tool warns about, and interpolation already spells
+it as `"{n}"`. `Bool(1)` is C's legacy.
+
+`Rune` is in the set even though it is deliberately *not* an integer
+alias. That is not a contradiction: `Rune` is its own type so that it
+can never pass for a count *implicitly*, and `Int(c)` is the opposite
+of implicit.
+
+Because `u8` now means something in expression position, every
+primitive type name is reserved — `fn u8()` and `type Int = …` are
+errors. A local `let u8 = 5` still shadows it, exactly as a local
+shadows a predeclared identifier in Go, and then `u8(3)` fails with
+"Int is not callable".
 
 #### Integer overflow traps
 

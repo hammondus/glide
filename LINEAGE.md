@@ -416,6 +416,15 @@ year five; traits + composition are the whole story.
   years of code breaks on width assumptions. Java (1995) fixes the
   sizes but keeps silent overflow; C's promotion lattice
   (`i32 + i64` quietly widens) becomes a 40-year bug factory.
+- **1978 → 2009** — the *spelling* of explicit conversion. C writes
+  `(uint8_t)n`, a prefix cast that reads backwards and collides with
+  parenthesised expressions. Go writes `uint8(n)` — the type applied
+  to a value, a call — and the ambiguity disappears. Rust writes
+  `n as u8`, a third syntax for a third concept, and separately
+  regrets it: `as` silently truncates, so the Rust ecosystem's advice
+  is to reach for `try_into()` instead, and clippy has a lint family
+  for exactly this. The lesson is not which punctuation but which
+  *default*: silent truncation is the part everyone wishes back.
 - **1990s–2010s** — unsigned sizes (`size_t`) get their verdict from
   C++'s own architects: using unsigned for sizes doesn't prevent
   `len - 1` underflow, it launders it into eighteen quintillion.
@@ -450,7 +459,11 @@ the platform-int bug class), lengths and indices **signed** (a `-1`
 error traps rather than laundering into eighteen quintillion, and can
 never address memory; `u64`/`u128` are for
 hashes and bit patterns, not sizing), no implicit conversions (Go
-proved the strictness is tolerable), Go/Zig's arbitrary-precision
+proved the strictness is tolerable) with **Go's spelling for the
+explicit one** (`u8(n)`, a call — the same shape `distinct`
+construction already used) but **trapping where Go truncates**, since
+Rust's regret over silent `as` is the clearest evidence available,
+Go/Zig's arbitrary-precision
 literals via comptime, **Swift's trap-in-every-build** rather than
 Zig's and Rust's debug/release split — a program that answers
 differently under the interpreter and the compiler is the drift the

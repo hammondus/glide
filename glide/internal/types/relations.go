@@ -198,6 +198,52 @@ func Default(t Type) Type {
 	return t
 }
 
+// Numeric reports whether t is a type an explicit conversion can name
+// as its target or take as its source: the integer widths, the floats,
+// and Rune.
+//
+// Rune is in the set even though it is deliberately *not* an integer
+// alias (DESIGN.md). Excluding it would leave no way to compute a code
+// point at all, and the reason Rune is its own type is that it must
+// never pass for a count *implicitly* — an explicit `Int(c)` says
+// exactly what it means, which is the opposite problem.
+func Numeric(t Type) bool {
+	b, ok := t.(*Basic)
+	return ok && !b.IsUntyped() && (b.IsNumeric() || b.IsRune())
+}
+
+// ConvertibleTo reports whether `dst(v)` is defined, where v has type
+// src. Conversion is deliberately much narrower than a C cast: it
+// covers the numeric lattice and Rune, and nothing else.
+//
+// String is excluded on purpose. Go's `string(65) == "A"` is the wart
+// its own vet tool warns about, and Glide already spells that
+// `"{n}"`. Bool was never in it: `Int(true)` is C's legacy, not a
+// conversion anyone means.
+func ConvertibleTo(src, dst Type) bool {
+	if IsOpaque(src) || IsOpaque(dst) {
+		return true
+	}
+	if !Numeric(dst) {
+		return false
+	}
+	if b, ok := src.(*Basic); ok && b.IsUntyped() {
+		src = Default(b)
+	}
+	return Numeric(src)
+}
+
+// ValidCodePoint reports whether a magnitude/sign pair is a Unicode
+// scalar value — in range and not a surrogate half. It lives here so
+// the checker rejects `Rune(-1)` and the evaluator rejects `Rune(n)`
+// by the same rule rather than two that are meant to agree.
+func ValidCodePoint(mag uint64, neg bool) bool {
+	if neg && mag != 0 {
+		return false
+	}
+	return mag <= 0x10FFFF && (mag < 0xD800 || mag > 0xDFFF)
+}
+
 // FitsIn reports whether an integer constant fits in b. The constant
 // arrives as a magnitude plus a sign, because that is the only
 // representation in which both ends of the range are expressible:

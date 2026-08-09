@@ -1,0 +1,30 @@
+// Conversion is narrow on purpose: numbers and Rune, one argument,
+// and a constant that cannot fit is a compile error rather than a
+// trap. `Bool` and `String` are deliberately not in the set — Go's
+// `string(65) == "A"` is the wart its own vet tool warns about.
+type Colour = Red | Green
+
+fn main() {
+    println(u8(300))            // error: 300 does not fit in u8
+    println(i8(-129))           // error: does not fit in i8
+    println(u8(-1))             // error: -1 does not fit in u8
+
+    println(String(65))         // error: String is not a conversion
+    println(Bool(1))            // error: Bool is not a conversion
+    println(u8("hi"))           // error: cannot convert String to u8
+    println(u8(true))           // error: cannot convert Bool to u8
+    println(Int(.Red))          // error: cannot convert Colour to Int
+
+    println(u8(1, 2))           // error: u8 converts exactly one value, got 2 arguments
+    println(u8())               // error: u8 converts exactly one value, got 0 arguments
+
+    println(Rune(-1))           // error: -1 is not a Unicode code point
+    println(Rune(1114112))      // error: 1114112 is not a Unicode code point
+    println(Rune(55296))       // error: 55296 is not a Unicode code point
+
+    // Conversion is explicit and stays explicit: naming the target
+    // does not make the *implicit* rule any weaker elsewhere.
+    let a: u8 = 1
+    let b: u16 = 2
+    println(a + b)              // error: operator + is not defined for u8 and u16
+}

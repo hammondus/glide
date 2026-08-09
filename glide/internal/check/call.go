@@ -31,6 +31,9 @@ func (c *checker) call(x *ast.Call, want types.Type) types.Type {
 	// it is a conversion, not a function — which is why it takes
 	// exactly the base type and nothing implicitly convertible to it.
 	if m, ok := callee.(*types.Meta); ok {
+		if b, isBasic := m.T.(*types.Basic); isBasic {
+			return c.conversion(b, x)
+		}
 		if n, isNamed := m.T.(*types.Named); isNamed && n.IsDistinct() {
 			base := types.Base(n)
 			if len(x.Args) != 1 {
@@ -53,6 +56,48 @@ func (c *checker) call(x *ast.Call, want types.Type) types.Type {
 		return types.Unknown
 	}
 	return c.checkArgs(sig, x, x.Span)
+}
+
+// conversion checks `dst(v)` — the explicit numeric conversion, Go's
+// spelling. It is the only way between widths: DESIGN.md forbids the
+// implicit kind, and until M4c there was no explicit kind either, so
+// a sized value could only ever come from a literal.
+//
+// The argument is *inferred*, never checked against the target: the
+// whole point is that the source type differs. The one thing pushed
+// inward is the range check on a literal, so `u8(300)` fails here
+// rather than at runtime — the checker already knows.
+func (c *checker) conversion(dst *types.Basic, x *ast.Call) types.Type {
+	if !types.Numeric(dst) {
+		c.inferArgs(x)
+		c.errf(x.Span, "%s is not a conversion (conversion is defined between numbers and Rune only)", dst)
+		return dst
+	}
+	if len(x.Args) != 1 {
+		c.inferArgs(x)
+		c.errf(x.Span, "%s converts exactly one value, got %d arguments", dst, len(x.Args))
+		return dst
+	}
+	if len(x.Names) > 0 && x.Names[0] != "" {
+		c.errf(x.Span, "a conversion takes one positional value, not a named argument")
+	}
+	src := c.infer(x.Args[0])
+	if !types.ConvertibleTo(src, dst) {
+		c.errf(span(x.Args[0]), "cannot convert %s to %s (conversion is defined between numbers and Rune only)",
+			types.Default(src), dst)
+		return dst
+	}
+	// A constant that cannot fit is a compile error, not a trap:
+	// `u8(300)` is as knowable as `let x: u8 = 300`, and so is
+	// `Rune(-1)`.
+	c.rangeCheck(x.Args[0], dst)
+	if dst.IsRune() {
+		if mag, neg, isConst := constInt(x.Args[0]); isConst && !types.ValidCodePoint(mag, neg) {
+			c.errf(span(x.Args[0]), "%s is not a Unicode code point", signed(mag, neg))
+		}
+	}
+	c.info.Types[x.Args[0]] = types.Default(src)
+	return dst
 }
 
 // specialForm handles the builtins whose type depends on the call

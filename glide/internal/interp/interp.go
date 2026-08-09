@@ -312,6 +312,13 @@ func (in *Interp) callValue(fnv Value, args []Value, at source.Span) Value {
 	}
 	switch f := fnv.(type) {
 	case TypeV:
+		// A primitive numeric type's name is its conversion: u8(n).
+		if b, ok := types.Primitives[string(f)]; ok {
+			if !types.Numeric(b) {
+				panic(rtErr{at, fmt.Sprintf("%s is not a conversion (conversion is defined between numbers and Rune only)", b)})
+			}
+			return convert(b, one(string(f), args, at), at)
+		}
 		// A distinct type's name is its constructor: NoteId(7).
 		// Explicit construction is the entire point of distinct.
 		td := in.prog.Types[string(f)]
@@ -1242,6 +1249,14 @@ func (in *Interp) evalIdent(ex *ast.IdentExpr, env *Env) (Value, *sig) {
 		return NoneV{}, nil
 	}
 	if _, ok := in.prog.Types[ex.Name]; ok {
+		return TypeV(ex.Name), nil
+	}
+	// A primitive type's name is a value, so that calling a numeric
+	// one is a conversion: `u8(n)`. Reached after the local lookup, so
+	// a `let u8 = 5` shadows it exactly as it shadows a predeclared
+	// name in Go. Bool and String resolve too, and fail at the call
+	// with what is actually wrong rather than "undefined name".
+	if _, ok := types.Primitives[ex.Name]; ok {
 		return TypeV(ex.Name), nil
 	}
 	if vi, ok := in.prog.Variants[ex.Name]; ok {

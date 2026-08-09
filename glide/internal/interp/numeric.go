@@ -3,6 +3,7 @@ package interp
 import (
 	"fmt"
 	"math"
+	"strconv"
 
 	"glide/internal/source"
 	"glide/internal/types"
@@ -169,6 +170,147 @@ func wrappingBinop(op string, l, r Value) Value {
 	return nil
 }
 
+// numericValue reads any integer/float/Rune value as an exact integer
+// magnitude plus a sign, or as a float. Conversions all funnel through
+// this so there is one place that knows how each carrier stores its
+// value, rather than an N×N table of pairs.
+func numericValue(v Value) (mag uint64, neg bool, f float64, isFloat, ok bool) {
+	switch x := v.(type) {
+	case IntV:
+		if x < 0 {
+			// Negated as unsigned, because i64's minimum has no
+			// positive counterpart to subtract from.
+			return -uint64(x), true, 0, false, true
+		}
+		return uint64(x), false, 0, false, true
+	case UintV:
+		return uint64(x), false, 0, false, true
+	case SizedV:
+		if x.V < 0 {
+			return uint64(-x.V), true, 0, false, true
+		}
+		return uint64(x.V), false, 0, false, true
+	case RuneV:
+		return uint64(x), false, 0, false, true
+	case FloatV:
+		return 0, false, float64(x), true, true
+	}
+	return 0, false, 0, false, false
+}
+
+// convert is `dst(v)`, the explicit numeric conversion.
+//
+// Out of range traps rather than truncating, which is the one place
+// this deliberately parts company with Go: `uint8(300)` is 44 there,
+// silently. A language whose `+` traps at the declared width cannot
+// then hand you 44 for the same overflow spelled as a conversion.
+// `n.wrapping_u8()` is the truncating form, named.
+//
+// Float to integer truncates toward zero — dropping a fraction is not
+// overflow, and `/` already truncates the same way.
+func convert(dst *types.Basic, v Value, at source.Span) Value {
+	mag, neg, f, isFloat, ok := numericValue(v)
+	if !ok {
+		panic(rtErr{at, fmt.Sprintf("cannot convert %s to %s (conversion is defined between numbers and Rune only)", typeName(v), dst)})
+	}
+	if dst.IsFloat() {
+		if isFloat {
+			if dst == types.F32 {
+				return FloatV(float32(f))
+			}
+			return FloatV(f)
+		}
+		g := float64(mag)
+		if neg {
+			g = -g
+		}
+		if dst == types.F32 {
+			return FloatV(float32(g))
+		}
+		return FloatV(g)
+	}
+	// Integer or Rune target. A float source truncates toward zero
+	// first, then has to survive the same range check as any integer.
+	if isFloat {
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			panic(rtErr{at, fmt.Sprintf("cannot convert %s to %s", render(v, false), dst)})
+		}
+		t := math.Trunc(f)
+		if t < -9.223372036854776e18 || t >= 9.223372036854776e18 {
+			panic(rtErr{at, fmt.Sprintf("%s overflow: converting %s", dst, render(v, false))})
+		}
+		n := int64(t)
+		neg = n < 0
+		if neg {
+			mag = uint64(-n)
+		} else {
+			mag = uint64(n)
+		}
+	}
+	if dst.IsRune() {
+		// Stricter than Go, and deliberately: Rune is its own type
+		// precisely so an invalid code point cannot masquerade as one.
+		if !types.ValidCodePoint(mag, neg) {
+			panic(rtErr{at, fmt.Sprintf("%s is not a Unicode code point", signedMag(mag, neg))})
+		}
+		return RuneV(rune(mag))
+	}
+	if !types.FitsIn(mag, neg, dst) {
+		panic(rtErr{at, fmt.Sprintf("%s overflow: %s does not fit (use wrapping_%s to truncate)",
+			dst, signedMag(mag, neg), dst)})
+	}
+	return buildInt(dst, mag, neg)
+}
+
+// buildInt makes the value for an in-range magnitude at the target
+// width, choosing the carrier the width uses.
+func buildInt(dst *types.Basic, mag uint64, neg bool) Value {
+	if dst == types.U64 {
+		return UintV(mag)
+	}
+	n := int64(mag)
+	if neg {
+		n = -int64(mag)
+	}
+	if s, sized := sizedZero(dst); sized {
+		s.V = n
+		return s
+	}
+	return IntV(n)
+}
+
+// signedMag renders a magnitude/sign pair, which exists for the one
+// value that has no int64 to be formatted from: i64's minimum.
+func signedMag(mag uint64, neg bool) string {
+	if neg && mag != 0 {
+		return "-" + strconv.FormatUint(mag, 10)
+	}
+	return strconv.FormatUint(mag, 10)
+}
+
+// wrappingConvert is `n.wrapping_u8()`: the truncating counterpart to
+// `u8(n)`, two's-complement, never trapping. It is the operation the
+// byte-and-hash work sized integers exist for actually needs, and it
+// only exists between integer types — truncating a float is not a
+// wrap, and widening never loses anything.
+func wrappingConvert(dst *types.Basic, v Value) (Value, bool) {
+	mag, neg, _, isFloat, ok := numericValue(v)
+	if !ok || isFloat {
+		return nil, false
+	}
+	bits := mag
+	if neg {
+		bits = -mag
+	}
+	if dst == types.U64 {
+		return UintV(bits), true
+	}
+	if s, sized := sizedZero(dst); sized {
+		return s.truncate(int64(bits)), true
+	}
+	return IntV(int64(bits)), true
+}
+
 var wrappingOps = map[string]string{
 	"wrapping_add": "+",
 	"wrapping_sub": "-",
@@ -207,8 +349,33 @@ func intMethod(recv Value, name string, args []Value, at source.Span) (Value, bo
 		}
 		return wrappingNeg(recv), true
 	}
+	// wrapping_u8, wrapping_i32, … — the truncating conversions.
+	if dst, ok := wrappingTargets[name]; ok {
+		if len(args) != 0 {
+			panic(rtErr{at, fmt.Sprintf("%s takes no arguments", name)})
+		}
+		out, converted := wrappingConvert(dst, recv)
+		if !converted {
+			panic(rtErr{at, fmt.Sprintf("%s has no method %q", typeName(recv), name)})
+		}
+		return out, true
+	}
 	return nil, false
 }
+
+// wrappingTargets is the truncating-conversion method set, keyed by
+// method name. Built from types.Primitives so it cannot fall out of
+// step with the type list, and integer-only: truncating a float is
+// not a wrap, it is `Int(f)`.
+var wrappingTargets = func() map[string]*types.Basic {
+	m := map[string]*types.Basic{}
+	for name, b := range types.Primitives {
+		if b.IsInteger() && name != "Int" {
+			m["wrapping_"+name] = b
+		}
+	}
+	return m
+}()
 
 // wrappingNeg is unary minus without the trap: the modular negation of
 // a type's minimum is itself.

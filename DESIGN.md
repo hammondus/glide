@@ -334,9 +334,33 @@ Mechanics:
   every operator for a type no program yet uses. Adding them later is
   a new case, not a change to an existing one — see
   `glide/DESIGN-DECISIONS.md`.
-- **No implicit numeric conversions.** `i32 + i64` is a compile error.
-  C's silent promotion lattice is a 40-year bug factory; Go proved the
-  strictness is tolerable.
+- **No implicit numeric conversions; the explicit one is `u8(n)`.**
+  `i32 + i64` is a compile error. C's silent promotion lattice is a
+  40-year bug factory; Go proved the strictness is tolerable, and Go's
+  *spelling* for the explicit form is the one worth copying — the
+  type's own name applied to a value, which Glide already used for
+  `distinct` construction (`NoteId(7)`), so calling a type is an
+  established shape rather than new syntax.
+
+  One deliberate departure from Go: **out of range traps.** Go's
+  `uint8(300)` is `44`, in silence, and that is untenable in a language
+  whose `+` traps at the declared width — the same overflow cannot be
+  an error when spelled `x + 10` and a wrong answer when spelled
+  `u8(n)`. A constant that cannot fit is a compile error; a value that
+  cannot fit is a positioned runtime error naming `wrapping_u8`, the
+  truncating form.
+
+  The set is numbers and `Rune`, nothing else. `String(65)` is not a
+  conversion — Go's `string(65) == "A"` is the wart its own vet tool
+  warns about, and interpolation already spells it. `Bool(1)` is C's
+  legacy. `Rune` *is* in the set despite deliberately not being an
+  integer alias: excluding it would leave no way to compute a code
+  point, and the reason `Rune` is its own type is that it must never
+  pass for a count *implicitly* — `Int(c)` is the opposite problem.
+
+  Consequence: every primitive type name is reserved, since `u8` now
+  means something in expression position. A local `let u8 = 5` still
+  shadows it, as in Go, and the conversion is then simply gone.
 - **No truthiness.** Conditions take `Bool` only. `if x != 0` costs five
   characters and removes an ambiguity class. JS's version is scar tissue
   (`"0"` truthy, `[] == false`, `document.all`); even Python's principled

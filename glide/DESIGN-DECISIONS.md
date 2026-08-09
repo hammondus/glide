@@ -430,6 +430,43 @@ or it is a bug.
   acquire a method in one tier and not the other. That also fixed a
   smaller gap: `cmp` was `Int`-only, so a `u64` could not answer it.
 
+- **A primitive type name is a value, so calling it is a conversion.**
+  `u8(n)` resolves through the same `*types.Meta` callee that already
+  built `distinct` types (`NoteId(7)`), so no new call form was
+  invented — a type in expression position was already callable, and
+  this widens *which* types.
+
+  Three consequences worth stating:
+
+  1. **Primitive names are now reserved.** `fn u8()` would otherwise
+     win the name lookup and the conversion would silently vanish.
+     This also closed a pre-existing hole: `type Int = struct { … }`
+     was accepted and then unreachable, because `resolve.go` tries the
+     primitives before program declarations. `program.Load` now checks
+     the reserved set for types and consts, not only functions.
+  2. **Locals still shadow**, matching Go's universe block. `let u8 =
+     5` then `u8(3)` fails with "Int is not callable" — loud, local,
+     and not a silent reinterpretation.
+  3. **Bool and String resolve too**, even though they are not
+     convertible, so `String(65)` reports what is actually wrong with
+     it rather than "undefined name \"String\"".
+
+  The conversion itself *infers* its argument rather than checking it
+  against the target — the whole point is that the source type
+  differs — and pushes only the range check inward, so `u8(300)` is a
+  compile error while `u8(n)` for an out-of-range `n` traps at
+  runtime.
+
+- **`TestHostSurfaceMatchesRuntime` grew a second half rather than a
+  loosening.** The reserved set now holds two kinds of name with two
+  different implementations: callable builtins in the evaluator's
+  `builtins` map, and predeclared type names resolved by `evalIdent`.
+  Collapsing them into one membership assertion would let a name be
+  reserved by the checker and undefined at runtime, which is the exact
+  drift the test exists to catch, so the primitives are asserted end
+  to end instead — every numeric primitive is *run* as a conversion,
+  and `Bool`/`String` are asserted not to be.
+
 - **A tuple literal's expected element types win, as a list
   literal's already did.** `checkExpr` pushed the expectation into
   each slot and then rebuilt the tuple's type from
@@ -512,12 +549,13 @@ Still open, in the order they are worth doing:
    `Iterator<Int>` passes), and call-site inference for associated
    functions.
 
-**Sized numerics have no conversions.** They are reachable from
-literals and nothing else — no `u8(n)`, no `n.to_u8()` — so a `u8`
-cannot be computed from runtime data, which rules out the byte, hash
-and checksum work the type exists for. That is a language-surface
-decision (`u8(n)` would reuse the `*types.Meta` callee path that
-already builds distinct types) and is not made yet.
+**Two lexer gaps found while testing the conversions**, both small
+and both out of scope for the commit that found them: there are no
+hex integer literals (`0xFF`), even though `{n:hex}` *formatting*
+exists, and no float exponent notation (`1.0e30`). Neither blocks
+anything today — `Rune(128512)` works where `Rune(0x1F600)` does
+not — but the first is conspicuous the moment anyone writes
+byte-level code, which is exactly what the sized types are for.
 
 ## Deliberately absent (after M4)
 

@@ -168,12 +168,48 @@ returns a `u8`, never an `Int`.
 | `wrapping_mul(other)` | `(Self) -> Self` | modular `*`; no trap |
 | `wrapping_neg()` | `() -> Self` | modular negation; a type's minimum negates to itself |
 
+Plus one truncating conversion per integer width:
+`wrapping_i8`, `wrapping_i16`, `wrapping_i32`, `wrapping_i64`,
+`wrapping_u8`, `wrapping_u16`, `wrapping_u32`, `wrapping_u64` — each
+`() -> <that width>`.
+
 The `wrapping_*` family is the explicit escape from trap-on-overflow.
 Plain `+` `-` `*` `/` trap at the declared width in every tier
 (DESIGN.md), so hashes, checksums, PRNGs and wrapping counters say
 `wrapping_add` where a reader can see it. `wrapping_div` does not
 exist: division cannot wrap except for minimum ÷ -1, which is
 `wrapping_neg`.
+
+### Conversion
+
+A primitive numeric type's own name is its conversion — Go's spelling,
+and the only way between widths, since implicit conversion is
+forbidden by design.
+
+| Form | Meaning |
+|---|---|
+| `u8(n)`, `i32(n)`, `u64(n)`, … | between integer widths; **traps** if out of range |
+| `Float(n)`, `f32(n)` | integer or float to float |
+| `Int(f)`, `u8(f)`, … | float to integer, truncating toward zero; traps if the truncated value is out of range, or on NaN/infinity |
+| `Int(c)`, `u32(c)` | `Rune` to an integer — its code point |
+| `Rune(n)` | integer to `Rune`; traps unless `n` is a Unicode scalar value (in range, not a surrogate half) |
+| `n.wrapping_u8()`, … | the truncating counterpart: two's-complement, never traps |
+
+Out of range traps rather than truncating, which is where this parts
+company with Go — `uint8(300)` is `44` there, silently. A constant
+that cannot fit is rejected at compile time (`u8(300)`), and a value
+that cannot fit is a positioned runtime error naming `wrapping_u8`.
+
+Conversion is defined between numbers and `Rune` and nowhere else.
+`String(65)` and `Bool(1)` are errors: Go's `string(65) == "A"` is the
+wart its own vet tool warns about, and Glide already spells that
+`"{n}"`.
+
+Every primitive type name is reserved as a result — `fn u8()`,
+`type Int = …` and `const u8 = …` are all errors — because `u8` now
+means something in expression position. A local `let u8 = 5` still
+shadows it, exactly as a local shadows a predeclared identifier in Go,
+and the conversion is then simply gone.
 
 ### List
 

@@ -109,13 +109,26 @@ var stringMethods = map[string]*types.Func{
 // trap-on-overflow: `+` traps in every tier, and code that wants
 // modular arithmetic — hashes, checksums, PRNGs, wrapping counters —
 // says so at the call site (DESIGN.md).
-var intMethods = map[string]*types.Func{
-	"cmp":          meth(types.Int, p("other", tvSelf)),
-	"wrapping_add": meth(tvSelf, p("other", tvSelf)),
-	"wrapping_sub": meth(tvSelf, p("other", tvSelf)),
-	"wrapping_mul": meth(tvSelf, p("other", tvSelf)),
-	"wrapping_neg": meth(tvSelf),
-}
+var intMethods = func() map[string]*types.Func {
+	m := map[string]*types.Func{
+		"cmp":          meth(types.Int, p("other", tvSelf)),
+		"wrapping_add": meth(tvSelf, p("other", tvSelf)),
+		"wrapping_sub": meth(tvSelf, p("other", tvSelf)),
+		"wrapping_mul": meth(tvSelf, p("other", tvSelf)),
+		"wrapping_neg": meth(tvSelf),
+	}
+	// The truncating conversions: `n.wrapping_u8()` is the counterpart
+	// to `u8(n)`, which traps. Generated from types.Primitives so the
+	// method set cannot fall out of step with the type list. `i64` is
+	// spelled that way rather than `Int` because the method names the
+	// width, and `wrapping_Int` reads like an operation on a value.
+	for name, b := range types.Primitives {
+		if b.IsInteger() && name != "Int" {
+			m["wrapping_"+name] = meth(b)
+		}
+	}
+	return m
+}()
 
 // Duration constructors are suffix *properties* on a number, not
 // calls: `250.ms`, `0.5.s`. They are looked up as fields, which is
@@ -278,6 +291,16 @@ func Host() program.Known {
 		}
 	}
 	for name := range expectedTypeBuiltins {
+		bs[name] = true
+	}
+	// Every spelling of a primitive, including `i64` alongside `Int`.
+	// These were shadowable until M4c, which was harmless while a type
+	// name meant nothing in expression position — `type Int = struct {
+	// … }` was simply unreachable, since resolution tries primitives
+	// first. Now that `u8(n)` is a conversion, a program-level `fn
+	// u8()` would silently win and the conversion would vanish, so the
+	// names are reserved. Locals still shadow, as they do in Go.
+	for name := range types.Primitives {
 		bs[name] = true
 	}
 	ms := make(map[string]bool, len(modules))

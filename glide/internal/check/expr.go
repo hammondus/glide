@@ -283,6 +283,18 @@ func (c *checker) ident(x *ast.IdentExpr, want types.Type) types.Type {
 	if n, ok := c.named[x.Name]; ok {
 		return &types.Meta{T: n}
 	}
+	// A primitive numeric type's name is callable as a conversion:
+	// `u8(n)`, `Float(k)`, `Int(c)`. Reached after the local lookup on
+	// purpose — a `let u8 = 5` shadows it, exactly as a local shadows
+	// a predeclared identifier in Go, and the failure is the loud
+	// "Int is not callable" rather than a silent reinterpretation.
+	//
+	// Every primitive resolves here, not just the convertible ones, so
+	// that `String(65)` reports what is actually wrong with it rather
+	// than claiming `String` is an undefined name.
+	if b, ok := types.Primitives[x.Name]; ok {
+		return &types.Meta{T: b}
+	}
 	if vi, ok := c.tab.Variants[x.Name]; ok {
 		c.errf(x.Span, "variants are namespaced: write .%s or %s.%s (bare variant names are pattern-only)",
 			x.Name, vi.Type, x.Name)

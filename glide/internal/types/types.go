@@ -125,6 +125,7 @@ func (b *Basic) IsUntyped() bool  { return b.flags&isUntyped != 0 }
 func (b *Basic) IsInteger() bool  { return b.flags&isInteger != 0 }
 func (b *Basic) IsUnsigned() bool { return b.flags&isUnsigned != 0 }
 func (b *Basic) IsFloat() bool    { return b.flags&isFloat != 0 }
+func (b *Basic) IsRune() bool     { return b.flags&isRune != 0 }
 func (b *Basic) IsNumeric() bool  { return b.flags&(isInteger|isFloat) != 0 }
 func (b *Basic) IsOrdered() bool  { return b.flags&(isInteger|isFloat|isRune|isString) != 0 }
 

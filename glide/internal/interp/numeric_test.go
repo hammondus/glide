@@ -174,6 +174,124 @@ fn main() {
 	}
 }
 
+// Explicit conversion, Go's spelling. Before it, a sized value could
+// only come from a literal, which ruled out every use the sized types
+// exist for.
+func TestNumericConversion(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let n = 200
+    println(u8(n))
+    println(i32(u8(n)) * 1000)
+    println(Int(u8(n)) + 1000)
+    println(u64(n))
+    println(Float(7) / 2.0)
+    println(f32(1.5))
+    println(Int(3.7))
+    println(Int(-3.7))
+    println(Int(-0.5))
+    println(Int('a'))
+    println(Rune(97))
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "200\n200000\n1200\n200\n3.5\n1.5\n3\n-3\n0\n97\na\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// Out of range traps rather than truncating — the one place this
+// parts company with Go, where `uint8(300)` is 44 in silence. A
+// language whose `+` traps at the declared width cannot hand back 44
+// for the same overflow spelled as a conversion.
+func TestConversionOutOfRangeTraps(t *testing.T) {
+	for _, tc := range []struct{ body, wantErr string }{
+		{"let n = 300\n    _ = u8(n)", "u8 overflow: 300 does not fit"},
+		{"let n = 300\n    _ = u8(n)", "use wrapping_u8 to truncate"},
+		{"let n = -1\n    _ = u8(n)", "u8 overflow: -1 does not fit"},
+		{"let n = 128\n    _ = i8(n)", "i8 overflow: 128 does not fit"},
+		{"let n = 70000\n    _ = u16(n)", "u16 overflow: 70000 does not fit"},
+		{"let f = 1000000000000000000000.0\n    _ = Int(f)", "Int overflow"},
+		{"let n = -1\n    _ = Rune(n)", "-1 is not a Unicode code point"},
+		{"let n = 55296\n    _ = Rune(n)", "not a Unicode code point"}, // surrogate half
+		{`_ = u8("hi")`, "cannot convert String to u8"},
+		{"_ = String(65)", "String is not a conversion"},
+	} {
+		_, err := runProg(t, "fn main() {\n    "+tc.body+"\n}")
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: want %q, got %v", tc.body, tc.wantErr, err)
+		}
+	}
+}
+
+// A constant that cannot fit is a compile error, not a trap: `u8(300)`
+// is exactly as knowable as `let x: u8 = 300`.
+func TestConstantConversionIsRejectedStatically(t *testing.T) {
+	for _, tc := range []struct{ body, wantErr string }{
+		{"_ = u8(300)", "300 does not fit in u8"},
+		{"_ = i8(-129)", "does not fit in i8"},
+		{"_ = Rune(1114112)", "not a Unicode code point"},
+		{"_ = u8(1, 2)", "converts exactly one value"},
+	} {
+		_, err := runProg(t, "fn main() {\n    "+tc.body+"\n}")
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: want %q, got %v", tc.body, tc.wantErr, err)
+		}
+	}
+}
+
+func TestWrappingConversion(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    println(123456.wrapping_u8())
+    println(255.wrapping_u8())
+    println(123456.wrapping_i16())
+    println((0 - 1).wrapping_u8())
+    println((0 - 1).wrapping_u64())
+    println(200.wrapping_i8())
+    let b: u8 = 255
+    println(b.wrapping_i8())
+    println(b.wrapping_i64())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"64",                   // 123456 mod 256
+		"255",                  // already fits
+		"-7616",                // 123456 mod 65536, sign-extended
+		"255",                  // -1 mod 256
+		"18446744073709551615", // -1 as u64
+		"-56",                  // 200 mod 256, sign-extended
+		"-1",                   // u8 255 reinterpreted as i8
+		"255",                  // u8 255 widened
+	}, "\n") + "\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// Primitive type names are reserved, because `u8` now means something
+// in expression position: a program-level `fn u8()` would silently
+// win and the conversion would vanish. Locals still shadow, as they do
+// in Go, and the failure is loud.
+func TestPrimitiveNamesAreReserved(t *testing.T) {
+	for _, tc := range []struct{ src, wantErr string }{
+		{"fn u8() -> Int { 5 }\nfn main() {}", `"u8" is a builtin and cannot be redeclared`},
+		{"type Int = struct { n: Bool }\nfn main() {}", `"Int" is a builtin and cannot be redeclared`},
+		{"const u8 = 5\nfn main() {}", `"u8" is a builtin and cannot be redeclared`},
+		// A local shadows, and then the conversion is simply gone.
+		{"fn main() {\n    let u8 = 5\n    println(u8(3))\n}", "Int is not callable"},
+	} {
+		_, err := runProg(t, tc.src)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("want %q, got %v", tc.wantErr, err)
+		}
+	}
+}
+
 // Every integer width gets the same method set. Before M4c only Int
 // had any, so a u64 could not even answer cmp.
 func TestEveryWidthHasTheIntMethods(t *testing.T) {
