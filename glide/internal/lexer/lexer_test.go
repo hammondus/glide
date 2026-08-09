@@ -171,3 +171,34 @@ func TestComments(t *testing.T) {
 	expectKinds(t, "let x = 1 // List<(String, Int)>\n",
 		KwLet, Ident, Assign, Int, Semi, EOF)
 }
+
+// A `#!` line is skipped, but only at the very start of a file, and
+// without disturbing the line numbers everything after it reports.
+func TestShebang(t *testing.T) {
+	toks, err := Lex("#!/usr/bin/env -S glide run\nfn main() {}\n")
+	if err != nil {
+		t.Fatalf("shebang rejected: %v", err)
+	}
+	if len(toks) == 0 || toks[0].Kind != KwFn {
+		t.Fatalf("first token = %v, want KwFn", toks[0].Kind)
+	}
+	if toks[0].Line != 2 {
+		t.Errorf("fn is on line %d, want 2 — a stripped shebang would shift every diagnostic", toks[0].Line)
+	}
+
+	// No leading Semi: the shebang's newline must not terminate a
+	// statement that does not exist.
+	for _, tk := range toks {
+		if tk.Kind == Semi && tk.Line == 1 {
+			t.Error("shebang newline emitted a Semi")
+		}
+	}
+
+	// `#` is not a comment character. It stays an error everywhere
+	// else, including on a later line and mid-line.
+	for _, src := range []string{"fn main() {}\n#!/bin/sh\n", "fn main() { # x\n}\n"} {
+		if _, err := Lex(src); err == nil {
+			t.Errorf("Lex(%q) = nil error, want an unexpected-character error", src)
+		}
+	}
+}

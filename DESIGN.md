@@ -2084,10 +2084,22 @@ could disagree about where the output went.
   the Glide version; newer toolchains build *as* the pinned one or
   refuse. Breaking-changes-are-free makes pinning more necessary, not
   less.
-- **Script mode**: `glide run tool.gld`, shebang
-  `#!/usr/bin/env glide run` — the interpreter makes type-checked
-  scripting nearly free. **REPL**: likely interpreter byproduct, not a
-  commitment (REPL semantics in a static language is real design work).
+- **Script mode** ✓: `glide run tool.gld`, or `chmod +x` plus the
+  shebang `#!/usr/bin/env -S glide run` — the interpreter makes
+  type-checked scripting nearly free. The lexer skips a `#!` line at
+  byte 0 of a file and nowhere else; `#` is not a comment character.
+  It is **skipped, not stripped**, so the line still counts and
+  diagnostics report the line an editor shows — stripping would put
+  every error in every script one line out, which is the kind of thing
+  that is discovered late and fixed by everyone independently.
+  `env -S` rather than bare `env`: Linux passes everything after the
+  interpreter path to `execve` as one argument, so `#!/usr/bin/env
+  glide run` looks for a binary named "glide run". macOS splits the
+  line, so the bare form works there and breaks on a Linux
+  deploy — a portability bug in its worst shape, and worth spelling
+  `-S` everywhere in the docs to prevent. **REPL**: likely interpreter
+  byproduct, not a commitment (REPL semantics in a static language is
+  real design work).
 - **Command surface, closed**: build, run, test (contains fmt-check,
   lints, race detector, examples — the enforcement boundary), fmt, vet,
   doc, fix, get/tidy, version. No plugin system, no `glide-*`

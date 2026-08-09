@@ -1742,6 +1742,44 @@ would be a trap laid in the language's most-used operator. Go's
 enclosing scope, so `scope(timeout: 5.s)` kills it, with no context
 parameter to thread and no way to forget.
 
+## Shebang: two bytes, and a portability trap older than Linux
+
+- **1979–1980** — Dennis Ritchie adds interpreter-file support to
+  Version 8 Unix: if a file starts with `#!`, the kernel execs the
+  named interpreter with the file as an argument. The mechanism is
+  never standardised — POSIX still declines to specify it — so every
+  detail below is per-kernel behaviour rather than a rule anyone can
+  cite.
+- **The detail that bites**: how many arguments follow the interpreter
+  path. **Linux passes at most one**, and does *not* word-split it, so
+  `#!/usr/bin/env glide run` hands `env` the single argument
+  `"glide run"` and it searches for a binary of that name. **Darwin,
+  FreeBSD and NetBSD split** the line into separate arguments, so the
+  same file works on a Mac. This is the worst possible shape for a
+  portability bug: it works where it was written and fails where it is
+  deployed. Glide develops on macOS and deploys to linux/arm64, which
+  is exactly the pair that gets caught.
+- **2018** — GNU coreutils 8.30 ships `env -S`, which does the
+  splitting in userspace and therefore identically everywhere. FreeBSD
+  `env` had `-S` from 2005 and macOS inherits it. Rust's
+  `#!/usr/bin/env -S cargo +nightly -Zscript` and countless
+  `#!/usr/bin/env -S bash -euo pipefail` lines are the same fix. So
+  the portable spelling exists, is a decade old, and costs three
+  characters — which is why the Glide docs use `-S` everywhere rather
+  than mentioning it as a caveat.
+- **Skipped, not stripped.** Python (`PEP 263` era tooling), Ruby, and
+  Perl all treat the line as a comment rather than deleting it, and
+  Node's `--experimental-strip-types` era loader does the same. The
+  reason is the same everywhere: a stripped first line puts every
+  diagnostic in the file one line off, which nobody notices until they
+  are reading a stack trace under pressure. Glide's lexer advances
+  past the bytes and leaves the newline for the normal path to count.
+- **`#` is not a comment character.** Perl, Python, Ruby and shell all
+  make `#` a comment *and* get shebang support for free. Glide has
+  `//`, so the `#!` case is recognised only at byte 0 of a file and `#`
+  remains an error everywhere else — no new comment syntax bought a
+  script mode, and the grammar is unchanged.
+
 ## Build & packages: no scripts, vendored, pinned
 
 - **1976→** — make, then autotools: builds as arbitrary programs.

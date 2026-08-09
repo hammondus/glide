@@ -225,6 +225,19 @@ func isIdentStart(c byte) bool {
 func isIdentCont(c byte) bool { return isIdentStart(c) || isDigit(c) }
 
 func (lx *lexer) run() error {
+	// A `#!` line, and only at byte 0 of the file, is skipped so a
+	// chmod +x script runs. The newline is deliberately left for the
+	// loop to consume: skipping it too would leave every diagnostic in
+	// the file reporting a line one lower than the editor shows.
+	// `lx.base == 0` is what keeps an interpolation fragment beginning
+	// with `#!` from being mistaken for one — those are lexed
+	// separately and would otherwise each get their own "first line".
+	// `#` is not a comment character anywhere else, and stays an error.
+	if lx.base == 0 && strings.HasPrefix(lx.src, "#!") {
+		for lx.i < len(lx.src) && lx.src[lx.i] != '\n' {
+			lx.i++
+		}
+	}
 	for lx.i < len(lx.src) {
 		// Every emit() in this iteration spans from here. Whitespace
 		// and comment branches emit nothing, so a stale start is

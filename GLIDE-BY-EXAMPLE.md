@@ -472,6 +472,26 @@ fn main() {
 // back in true
 ```
 
+## Running a file as a script
+
+A `#!` line on the very first line is skipped, so `chmod +x` makes a
+`.gld` file an executable. Write `env -S`: Linux hands `execve`
+everything after the interpreter path as *one* argument, so bare
+`#!/usr/bin/env glide run` looks for a binary named "glide run". macOS
+splits the line, so the bare form works there and breaks on deploy.
+
+```rust
+#!/usr/bin/env -S glide run
+fn main() {
+    println("a script, with a checker")
+}
+// a script, with a checker
+```
+
+`#` is a comment character nowhere else — only these two bytes, only at
+the start of a file. The line is skipped rather than stripped, so the
+line numbers in diagnostics match what your editor shows.
+
 ## Files and the environment
 
 Anything that can fail returns a `Result`, so `fn main() -> Result<(),

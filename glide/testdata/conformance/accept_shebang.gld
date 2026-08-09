@@ -1,0 +1,11 @@
+#!/usr/bin/env -S glide run
+// A `#!` line on line 1 is skipped by the lexer so a chmod +x script
+// runs. It is skipped, not stripped: the diagnostics in this file must
+// report the lines an editor shows, so the shebang's own newline is
+// still counted.
+import os
+
+fn main() {
+    let args = os.args()
+    println("{args.len() > 0}")
+}
