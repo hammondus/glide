@@ -983,3 +983,64 @@ fn main() {
 		t.Fatalf("got %q", out)
 	}
 }
+
+// distinct: explicit construction, no implicit conversion, no
+// inherited operators, pattern destructuring, value() unwrap.
+func TestDistinct(t *testing.T) {
+	out, err := runProg(t, `
+type NoteId = distinct Int
+
+impl NoteId {
+    fn next(self) -> NoteId { NoteId(self.value() + 1) }
+}
+
+fn main() {
+    let a = NoteId(7)
+    println(a)
+    println(a == NoteId(7))
+    println(a == NoteId(8))
+    println(a.value() + 1)
+    println(a.next())
+    match a {
+        NoteId(9) => println("nine")
+        NoteId(n) => println("wrapped {n}")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "NoteId(7)\ntrue\nfalse\n8\nNoteId(8)\nwrapped 7\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+func TestDistinctNoMixing(t *testing.T) {
+	_, err := runProg(t, `
+type NoteId = distinct Int
+fn main() {
+    _ = NoteId(1) + 1
+}`)
+	if err == nil || !strings.Contains(err.Error(), "not defined") {
+		t.Fatalf("distinct must not inherit +; got %v", err)
+	}
+
+	_, err = runProg(t, `
+type NoteId = distinct Int
+fn main() {
+    _ = NoteId("seven")
+}`)
+	if err == nil || !strings.Contains(err.Error(), "no implicit conversion") {
+		t.Fatalf("base type is checked; got %v", err)
+	}
+
+	_, err = runProg(t, `
+type NoteId = distinct Int
+type UserId = distinct Int
+fn main() {
+    println(NoteId(1) == UserId(1))
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}

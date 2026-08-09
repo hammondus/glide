@@ -285,7 +285,15 @@ func (p *parser) parseTypeDecl() (*ast.TypeDecl, error) {
 		return td, nil
 	}
 	if p.cur().Kind == lexer.Ident && p.cur().Text == "distinct" {
-		return nil, p.errf("distinct types are not implemented yet (M3)")
+		// `type NoteId = distinct Int`: a nominal wrapper — explicit
+		// construction, no implicit conversion, no inherited operators.
+		p.next()
+		base, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		td.Distinct = base
+		return td, nil
 	}
 	// Sum type: Variant [ (T, T) ] | Variant | …
 	for {

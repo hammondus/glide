@@ -833,6 +833,34 @@ math) and Go's stop-at-hours line; the interpreter wraps Go's
 `time.Duration`/`time.Time`, inheriting the dual-clock semantics
 that took Go eight years and real outages to get right.
 
+## `distinct` types
+
+- **1983** — Ada derived types: `type Meters is new Integer` — the
+  first mainstream "same representation, different type" with no
+  implicit mixing. Born from exactly the bug class it targets
+  (unit confusion in defense systems).
+- **1990** — Haskell `newtype`: zero-cost nominal wrapping becomes a
+  daily idiom; the community treats "stringly-typed" as a slur
+  because the cure is one line.
+- **2009** — Go defined types (`type UserID int`) get halfway there:
+  a distinct identity, but operators are inherited and untyped
+  constants convert silently, so `userID + 3` and `Get(3)` still
+  compile — the id-vs-quantity confusion survives.
+- **2010s** — Rust has no keyword; the "newtype pattern"
+  (`struct UserId(i64);`) is the most-recommended idiom in the
+  ecosystem despite costing a `.0` at every use — strong evidence
+  people want this badly enough to pay syntax for it.
+- **2016** — Odin ships it as a keyword: `distinct` — the exact
+  spelling Glide borrows. NASA's Mars Climate Orbiter (1999,
+  pound-seconds vs newton-seconds, $327M) remains the canonical
+  argument.
+
+**Glide takes** Odin's keyword with Ada's strictness: explicit
+construction (`NoteId(7)`), no inherited operators (Go's mistake —
+an id is not a quantity), destructure by pattern (`NoteId(n)`) or
+`.value()`, and codecs (json/sql mapping) unwrap at the boundary —
+the conversion a codec performs is the explicit, visible kind.
+
 ## Comptime, not macros
 
 - **1963** — Lisp macros: full compile-time metaprogramming,

@@ -1,6 +1,7 @@
 package interp
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
@@ -57,6 +58,36 @@ func (st *scopeState) recordPanic(p any) {
 		st.pan = p
 	}
 	st.mu.Unlock()
+}
+
+// hostCtx bridges the current task's cancellation and deadline into
+// a context.Context for host calls (http, sql). Call the returned
+// release exactly once when the call is done.
+func (in *Interp) hostCtx() (context.Context, func()) {
+	base := context.Background()
+	stopDeadline := func() {}
+	if dl := in.cur.deadline; !dl.IsZero() {
+		base, stopDeadline = context.WithDeadline(base, dl)
+	}
+	ctx, stop := context.WithCancel(base)
+	done := make(chan struct{})
+	if ch := in.cur.cancel; ch != nil {
+		go func() {
+			select {
+			case <-ch:
+				stop()
+			case <-done:
+			}
+		}()
+	}
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			close(done)
+			stop()
+			stopDeadline()
+		})
+	}
 }
 
 // unblock releases the GIL, runs the (blocking) wait, and restores

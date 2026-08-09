@@ -44,11 +44,13 @@ type VariantDecl struct {
 	Fields []FieldDecl // named-field form: NotFound{ id: Int }
 }
 
-// TypeDecl: exactly one of Fields (struct) / Variants (sum) is set.
+// TypeDecl: exactly one of Fields (struct) / Variants (sum) /
+// Distinct (nominal wrapper base type) is set.
 type TypeDecl struct {
 	Name     string
 	Fields   []FieldDecl
 	Variants []VariantDecl
+	Distinct string
 	Line     int
 }
 

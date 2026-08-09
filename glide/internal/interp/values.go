@@ -96,7 +96,15 @@ type (
 	// Wrapping Go's types buys the dual wall/monotonic clock for free.
 	DurationV time.Duration
 	InstantV  struct{ T time.Time }
-	TaskV     struct {
+
+	// DistinctV is a `type NoteId = distinct Int` value: a nominal
+	// wrapper. No implicit conversion, no inherited operators —
+	// mixing with the base type is a loud error, which is the point.
+	DistinctV struct {
+		Type string
+		V    Value
+	}
+	TaskV struct {
 		done      chan struct{} // closed after result/pan are set
 		result    Value
 		pan       any  // child panic; the scope re-panics it at exit
@@ -179,6 +187,16 @@ func typeName(v Value) string {
 		return "Duration"
 	case InstantV:
 		return "Instant"
+	case *DistinctV:
+		return x.Type
+	case *RouterV:
+		return "Router"
+	case *RequestV:
+		return "Request"
+	case *ResponseV:
+		return "Response"
+	case *DbV:
+		return "Db"
 	}
 	return fmt.Sprintf("%T", v)
 }
@@ -279,6 +297,16 @@ func render(v Value, quoted bool) string {
 		return "<sender>"
 	case *ReceiverV:
 		return "<receiver>"
+	case *DistinctV:
+		return x.Type + "(" + render(x.V, true) + ")"
+	case *RouterV:
+		return "<router>"
+	case *RequestV:
+		return "<request>"
+	case *ResponseV:
+		return fmt.Sprintf("<response %d>", x.status)
+	case *DbV:
+		return "<db>"
 	case DurationV:
 		return time.Duration(x).String()
 	case InstantV:
@@ -296,6 +324,9 @@ func eq(a, b Value, line int) bool {
 	case InstantV:
 		y, ok := b.(InstantV)
 		return ok && x.T.Equal(y.T) // Go's ==-on-time.Time trap, dodged
+	case *DistinctV:
+		y, ok := b.(*DistinctV)
+		return ok && x.Type == y.Type && eq(x.V, y.V, line)
 	case TupleV:
 		y, ok := b.(TupleV)
 		if !ok || len(x) != len(y) {

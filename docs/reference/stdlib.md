@@ -46,11 +46,50 @@ Import at the top of the file; imports are inert (run nothing).
 |---|---|---|
 | `fs.read_string(path)` | `(String) -> Result<String, Error>` | whole file as a String |
 
-Designed growth (○): the committed core set — `http`, `tls`,
-`crypto`, `json`, `time`, `process`, `flag`, `regex`, `log`,
-`template`, `sql`, `rand`, compression, persistent collections,
-`Mutex<T>` — per `STDLIB-GOALS.md`. None callable yet; `http`/`sql`/
-`json` host shims arrive with M3.
+### `json` ✓ (M2 shim — `derive Json` is the real design)
+
+| Function | Signature | Notes |
+|---|---|---|
+| `json.encode(v)` | `(T) -> String` | structural walk: structs and String-keyed Maps → objects (insertion/field order), Lists and tuples → arrays, `None` → `null`, distinct unwraps, `Instant` → RFC 3339. Variants and functions error (they wait for derive) |
+| `json.decode(s)` | `(String) -> Result<T, Error>` | dynamic values: objects → Map (keys sorted — Go's decoder loses order), arrays → List, whole numbers → Int else Float, `null` → `None`. Trailing garbage is an error. Typed decode arrives with `derive Json` |
+
+JSON literals in source want raw strings: `` `{"k": 1}` `` — in an
+always-interpolating string the `{` would open an interpolation.
+
+### `http` ✓ (M2 shim)
+
+| Surface | Signature | Notes |
+|---|---|---|
+| `http.router()` | `() -> Router` | Go-1.22 mux level: methods + `{wildcards}` |
+| `r.get/post/put/delete(pat, h)` | `(String, fn(Request) -> …) -> ()` | requires a `mut` path. Write patterns as raw strings (`` `/notes/{id}` ``) — `{id}` would interpolate. Handler returns a `Response` or `Result<Response, E>`; `Err(e)` maps to 500 + rendered error (the one default mapping); a handler panic is 500 + stderr |
+| `http.serve(addr, r)` | `(String, Router) -> Result<(), Error>` | blocks; green thread per request; **cancellation point** — the enclosing scope's death gracefully shuts the server down. `Err` only on listener failure |
+| `http.get(url)` | `(String) -> Result<Response, Error>` | 30s timeout out of the box; scope cancellation/deadline abort the request |
+| `http.post(url, body)` | `(String, String) -> Result<Response, Error>` | body sent as `application/json` |
+| `req.path_param(name)` | `(String) -> String?` | `None` when absent |
+| `req.body()` / `req.method()` / `req.path()` | `-> String` | |
+| `resp.status()` / `resp.body()` | `-> Int` / `-> String` | client-side reading |
+| `http.text(s)` / `http.json(v)` / `http.created()` / `http.bad_request(msg)` / `http.not_found()` | `-> Response` | the closed constructor set |
+
+### `sql` ✓ (M2 shim — sqlite only; `derive Row` is the real design)
+
+| Surface | Signature | Notes |
+|---|---|---|
+| `sql.open(dsn)` | `(String) -> Result<Db, Error>` | `"sqlite:path"` or `"sqlite::memory:"` (pure-Go driver — no CGO) |
+| `db.exec(q [, params])` | `(String, Map?) -> Result<Int, Error>` | rows affected; **cancellation point** |
+| `db.query(q [, params])` | `(String, Map?) -> Result<List<Map>, Error>` | rows as column→value Maps, column order |
+| `db.query_one(q [, params])` | `(String, Map?) -> Result<Option<Map>, Error>` | `None` = no row; >1 row is an `Err` |
+| `db.close()` | `() -> Result<(), Error>` | pairs with `defer` |
+
+Named parameters only (`:name`, the one canonical syntax); params are
+a Map (`["id": 7]`). Missing and unused names are both errors naming
+the parameter — the comptime check, enforced dynamically for now.
+NULL is `None` in both directions (`sql.NullString` never exists);
+distinct values bind by unwrapping; `Instant` stores as RFC 3339.
+
+Designed growth (○): the rest of the committed core set — `tls`,
+`crypto`, `process`, `flag`, `regex`, `log`, `template`, `rand`,
+compression, persistent collections, `Mutex<T>` — per
+`STDLIB-GOALS.md`.
 
 ## Concurrency (M3)
 
@@ -104,6 +143,7 @@ runtime error ("X has no method …").
 | `replace(old, new)` | `(String, String) -> String` | all occurrences |
 | `to_upper()` / `to_lower()` | `-> String` | Unicode simple case mapping, no locale (locale is a library — Turkish-i) |
 | `repeat(k)` | `(Int) -> String` | like `List.repeat`; k < 0 panics |
+| `parse_int()` | `-> Int?` | base 10, surrounding whitespace tolerated; `None` on anything else |
 | `runes()` | `-> Iterator<Rune>` | lazy; invalid UTF-8 yields U+FFFD per byte (recorded) |
 | `bytes()` | `-> Iterator<Int>` | lazy; raw bytes |
 | `cmp(other)` | `(String) -> Int` | three-way: negative / 0 / positive |

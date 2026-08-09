@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -85,6 +86,14 @@ func displayArg(name string, args []Value, line int) string {
 func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
 	if in.constEval {
 		panic(rtErr{line, fmt.Sprintf("a const initializer cannot call %s.%s (pure expressions only)", mod, name)})
+	}
+	switch mod {
+	case "json":
+		return in.jsonCall(name, args, line)
+	case "http":
+		return in.httpCall(name, args, line)
+	case "sql":
+		return in.sqlCall(name, args, line)
 	}
 	switch mod + "." + name {
 	case "os.args":
@@ -170,8 +179,12 @@ var durationUnits = map[string]time.Duration{
 // through a mut path (checked in evalCall, where the receiver
 // expression is still available).
 var builtinMutMethods = map[string]bool{
-	"List.push":    true,
-	"List.sort_by": true,
+	"List.push":     true,
+	"List.sort_by":  true,
+	"Router.get":    true,
+	"Router.post":   true,
+	"Router.put":    true,
+	"Router.delete": true,
 }
 
 // Methods, dispatched on receiver type.
@@ -281,6 +294,15 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 				i++
 				return IntV(b), true
 			}}
+		case "parse_int":
+			if len(args) != 0 {
+				panic(rtErr{line, "parse_int takes no arguments"})
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(string(r)), 10, 64)
+			if err != nil {
+				return NoneV{}
+			}
+			return IntV(n)
 		case "trim_prefix":
 			return StrV(strings.TrimPrefix(string(r), string(strArg(name, args, line))))
 		case "trim_suffix":
@@ -455,6 +477,64 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 		case "close":
 			panic(rtErr{line, "only the sender half closes a channel"})
 		}
+	case *RouterV:
+		switch name {
+		case "get", "post", "put", "delete":
+			if len(args) != 2 {
+				panic(rtErr{line, fmt.Sprintf("%s takes (pattern, handler)", name)})
+			}
+			pat, ok := args[0].(StrV)
+			if !ok {
+				panic(rtErr{line, fmt.Sprintf("%s: the pattern is a String", name)})
+			}
+			switch args[1].(type) {
+			case *ClosureV, *FuncV:
+			default:
+				panic(rtErr{line, fmt.Sprintf("%s: the handler is a function, got %s", name, typeName(args[1]))})
+			}
+			r.routes = append(r.routes, route{method: strings.ToUpper(name), pattern: string(pat), handler: args[1]})
+			return UnitV{}
+		}
+	case *RequestV:
+		switch name {
+		case "path_param":
+			p := strArg(name, args, line)
+			v := r.r.PathValue(string(p))
+			if v == "" {
+				return NoneV{}
+			}
+			return StrV(v)
+		case "body":
+			if len(args) != 0 {
+				panic(rtErr{line, "body takes no arguments"})
+			}
+			return StrV(r.body)
+		case "method":
+			if len(args) != 0 {
+				panic(rtErr{line, "method takes no arguments"})
+			}
+			return StrV(r.r.Method)
+		case "path":
+			if len(args) != 0 {
+				panic(rtErr{line, "path takes no arguments"})
+			}
+			return StrV(r.r.URL.Path)
+		}
+	case *ResponseV:
+		switch name {
+		case "status":
+			if len(args) != 0 {
+				panic(rtErr{line, "status takes no arguments"})
+			}
+			return IntV(r.status)
+		case "body":
+			if len(args) != 0 {
+				panic(rtErr{line, "body takes no arguments"})
+			}
+			return StrV(r.body)
+		}
+	case *DbV:
+		return in.sqlMethod(r, name, args, line)
 	case *ScopeV:
 		switch name {
 		case "spawn":

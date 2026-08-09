@@ -13,10 +13,14 @@ deliberately cut because the real compiler makes them obsolete.
    `mut self` with call-path checks, `if let`, generators
    (`yield` / `yield from`), `test` blocks with property-based
    generation and shrinking, `expect` with both-sides reporting.
-3. **M3: run program 2 (HTTP + SQL)** — named-field variants,
+3. **M3 (done): run program 2 (HTTP + SQL)** — named-field variants,
    dot-shorthand (`.NotFound(id)`), `distinct` types, named
-   arguments, `defer`, structured concurrency, http/sql/json host
-   shims, `derive` doing real work.
+   arguments, `defer`, structured concurrency (scope/spawn/join,
+   cancellation, channels, select, time), http/sql/json host shims.
+   `examples/notes.gld` is program 2 adapted to the ratified
+   language (no or-blocks, no derive — the dynamic shims stand in
+   for `derive Json`/`Row` until the comptime era). One deviation
+   recorded: `derive` itself is comptime-era work, not M3.
 
 ## Decisions
 
@@ -142,12 +146,40 @@ deliberately cut because the real compiler makes them obsolete.
   own value). The whole wait happens with the GIL released, with
   the task's cancellation channel as an extra case.
 
-## Deliberately absent (after M3 concurrency)
+- **First (and only) third-party dependency: `modernc.org/sqlite`.**
+  Chosen over mattn/go-sqlite3 because it is pure Go: no CGO, so
+  cross-compilation stays `GOOS=… go build` and no C toolchain ever
+  enters the build. Cost accepted: a large transitive module tree (a
+  machine-translated SQLite). The alternative of a fake in-memory
+  store would dogfood nothing real. Everything else remains stdlib.
+- **json/sql shims do dynamically what derive will do statically.**
+  `json.encode` walks values structurally; `db.query` returns rows
+  as column→value Maps; `:name` placeholders are verified at call
+  time (missing AND unused names are errors). None of this survives
+  into the compiled tier — `derive Json`/`derive Row` generate the
+  typed versions and the comptime check moves the placeholder
+  verification to compile time. The shim exists to prove the
+  *surfaces*, not the mechanism.
+- **distinct in M2**: `DistinctV{Type, V}` — construction checks the
+  base type name dynamically; operators simply don't match in binop
+  (no code needed — falling through IS the semantics); `.value()`
+  is the built-in unwrap; codecs (json encode, sql bind) unwrap
+  transparently, because a codec's conversion is the explicit kind.
+  Not yet a map key (needs hashable boxing; add when a program
+  wants it).
+- **Route patterns and JSON literals are raw strings** — discovered
+  the hour the http shim landed: `"/notes/{id}"` interpolates `id`.
+  `` `/notes/{id}` `` is the idiom, and it is exactly what raw
+  strings were ratified for. Documented in stdlib.md.
 
-`distinct` types, static generics (parsed, ignored), trait
-*checking* (impl blocks register methods; conformance is asserted,
-not verified), `Mutex<T>` (stdlib-era; ownership-transfer culture
-first), http/sql/json host shims (the rest of M3), `derive`, method
-values as closures (`x.method` unapplied), `or |e|` blocks
-(declined — see DESIGN.md), time formatting/parsing/calendars
-(the `time` module's own later design).
+## Deliberately absent (after M3)
+
+Static generics (parsed, ignored), trait *checking* (impl blocks
+register methods; conformance is asserted, not verified), `Mutex<T>`
+(stdlib-era; ownership-transfer culture first), `derive` (comptime
+era — the json/sql shims stand in), typed json decode / typed query
+rows (wait for derive), method values as closures (`x.method`
+unapplied), `or |e|` blocks (declined — see DESIGN.md), time
+formatting/parsing/calendars (the `time` module's own later design),
+error-to-status middleware for http (the one default mapping — Err →
+500 — until middleware is designed).

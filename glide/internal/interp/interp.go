@@ -89,7 +89,10 @@ type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code) }
 
-var knownModules = map[string]bool{"fs": true, "os": true, "time": true}
+var knownModules = map[string]bool{
+	"fs": true, "os": true, "time": true,
+	"json": true, "http": true, "sql": true,
+}
 
 func New() *Interp {
 	return &Interp{
@@ -316,6 +319,18 @@ func (in *Interp) callValue(fnv Value, args []Value, line int) Value {
 		}
 	}
 	switch f := fnv.(type) {
+	case TypeV:
+		// A distinct type's name is its constructor: NoteId(7).
+		// Explicit construction is the entire point of distinct.
+		td := in.types[string(f)]
+		if td != nil && td.Distinct != "" {
+			v := one(string(f), args, line)
+			if got := typeName(v); got != td.Distinct {
+				panic(rtErr{line, fmt.Sprintf("%s wraps %s, got %s (no implicit conversion)", f, td.Distinct, got)})
+			}
+			return &DistinctV{Type: string(f), V: v}
+		}
+		panic(rtErr{line, fmt.Sprintf("%s is not callable (structs use braces: %s{ … })", f, f)})
 	case *FuncV:
 		base := in.global
 		if f.Items != nil {
@@ -862,6 +877,14 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 				return nil, false
 			}
 			return match(pt.Args[0], rv.V)
+		}
+		// Distinct pattern mirrors construction: NoteId(x) binds the
+		// wrapped value.
+		if dv, isDist := v.(*DistinctV); isDist {
+			if dv.Type != pt.Name || len(pt.Args) != 1 {
+				return nil, false
+			}
+			return match(pt.Args[0], dv.V)
 		}
 		vv, isVar := v.(*VariantV)
 		if !isVar || vv.Name != pt.Name || len(pt.Args) != len(vv.Args) {
@@ -1850,6 +1873,14 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 			}
 			return in.callFuncNamed(m, nil, args, ex.Names, ex.Line), nil
 		}
+		// value() unwraps a distinct type — the one built-in escape
+		// hatch (explicit, so the conversion is visible at the site).
+		if dv, isDist := recv.(*DistinctV); isDist && f.Name == "value" {
+			if len(args) != 0 {
+				panic(rtErr{ex.Line, "value takes no arguments"})
+			}
+			return dv.V, nil
+		}
 		// User-defined methods on structs and variants; a trait
 		// default fills in when the type doesn't override.
 		if tn := userTypeName(recv); tn != "" {
@@ -1925,6 +1956,8 @@ func userTypeName(v Value) string {
 		return x.Type
 	case *VariantV:
 		return x.Type
+	case *DistinctV:
+		return x.Type // impl NoteId { … } works like any user type
 	}
 	return ""
 }

@@ -73,7 +73,6 @@ Reserved for later eras (using one today is a parse error):
 
 | Keyword | Meaning | Status |
 |---|---|---|
-| `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |
 | `unsafe` | `unsafe fn` / `unsafe { }` | ○ |
 | `embed` | build-time file embedding | ○ |
 | `derive` | comptime derive (Json, Debug, Enum, …) | ○ |
@@ -131,6 +130,8 @@ Type annotations are written but unchecked in M2.
 | `fn(A) -> B` | one function type for named fns, closures, method values | ○ (closures exist ✓; the *type* is unchecked) |
 | `i8…i128`, `u8…u128`, `f32` | sized numerics | ○ |
 | `Rune` | own type; `==`/ordering with other Runes only; Display prints the character, Debug quotes it | ✓ |
+| `distinct` | `type NoteId = distinct Int` — nominal wrapper: explicit construction `NoteId(7)` (wrong base type errors), **no inherited operators** (`NoteId(1) + 1` errors — an id is not a quantity), `==` within the same distinct type only, pattern `NoteId(n)` destructures, `.value()` unwraps, `impl NoteId { … }` works like any user type. Codecs (json/sql) unwrap at the boundary | ✓ (dynamic; the checker makes it static) |
+| `Duration`, `Instant` | see stdlib Concurrency/Time | ✓ |
 | `BigInt`, `Decimal` | stdlib, by name, never silent promotion | ○ |
 | `any Trait` | boxed trait object, visible dispatch | ○ |
 

@@ -1,0 +1,116 @@
+// notes.gld — GRAMMAR.md program 2, adapted to the ratified
+// language: distinct ids, named-field error variants, ?-conversion
+// instead of or-blocks, structured concurrency instead of shutdown
+// plumbing. Self-driving: it serves, exercises its own API over
+// real HTTP, then returns — which cancels the server and the
+// sweeper (no shutdown code exists anywhere).
+
+import http
+import json
+import sql
+import time
+
+type NoteId = distinct Int
+
+type ApiError =
+    NotFound{ id: NoteId }
+    | BadInput{ msg: String }
+    | Db{ cause: Error }
+
+impl ApiError {
+    // ? inside a handler converts any stdlib Error into .Db —
+    // wrap-and-propagate with zero map_err noise.
+    fn from(e: Error) -> ApiError { Db{ cause: e } }
+}
+
+fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Some(id) = (req.path_param("id") ?? "").parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let found = db.query_one(
+        "select id, title, body from notes where id = :id",
+        ["id": NoteId(id)],
+    )?
+    match found {
+        Some(row) => Ok(http.json(row))
+        None => Ok(http.not_found())
+    }
+}
+
+fn create_note(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Ok(input) = json.decode(req.body()) else {
+        return Ok(http.bad_request("invalid JSON"))
+    }
+    let title = input["title"] ?? ""
+    if title == "" {
+        return Ok(http.bad_request("title is required"))
+    }
+    _ = db.exec(
+        "insert into notes (title, body, created) values (:title, :body, :now)",
+        ["title": title, "body": input["body"], "now": time.now()],
+    )?
+    Ok(http.created())
+}
+
+// The sweeper lives exactly as long as the server: same scope.
+// Its errors are deliberately absorbed (?? 0) — program 2's design
+// question in miniature, answered by ?? on Result.
+fn sweeper(db: Db) {
+    for {
+        time.sleep(10.mins)
+        _ = db.exec("delete from notes where created < :cutoff",
+                    ["cutoff": time.now() - 720.h]) ?? 0
+    }
+}
+
+fn post_note(body: String) -> String {
+    match http.post("http://127.0.0.1:17640/notes", body) {
+        Ok(resp) => "POST         -> {resp.status()} {resp.body().trim()}"
+        Err(e) => "POST failed: {e}"
+    }
+}
+
+fn fetch_note(id: String) -> String {
+    match http.get("http://127.0.0.1:17640/notes/" + id) {
+        Ok(resp) => "GET {id:4} -> {resp.status()} {resp.body().trim()}"
+        Err(e) => "GET failed: {e}"
+    }
+}
+
+fn run() -> Result<String, Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    _ = db.exec(`create table notes (
+        id integer primary key,
+        title text not null,
+        body text,
+        created text not null
+    )`)?
+
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+    r.post(`/notes`, |req| create_note(db, req))
+
+    scope s {
+        _ = s.spawn(|| http.serve("127.0.0.1:17640", r))
+        _ = s.spawn(|| sweeper(db))
+        time.sleep(80.ms)
+
+        let mut report = []
+        report.push(post_note(`{"title": "first", "body": "hello"}`))
+        report.push(post_note(`{"title": "second"}`))
+        report.push(post_note(`{"body": "no title"}`))
+        report.push(fetch_note("1"))
+        report.push(fetch_note("2"))
+        report.push(fetch_note("999"))
+        report.push(fetch_note("abc"))
+        return Ok(report.join("\n"))
+    }
+}
+
+fn main() {
+    match run() {
+        Ok(report) => println(report)
+        Err(e) => eprintln("failed: {e}")
+    }
+}
