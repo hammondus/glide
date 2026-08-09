@@ -1849,11 +1849,34 @@ fn main() {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 
-	// Target type without a `from`: raw propagation, no error.
-	out, err = runProg(t, `
+	// Target type without a `from`: a compile error. M1-M3 propagated
+	// the String straight through, so `Result<Int, ApiError>` could
+	// hold something that was not an ApiError at all — the declared
+	// error type was decoration. Either the target declares
+	// `fn from(e: String) -> ApiError`, or the signature says
+	// `Result<Int, Error>`, which accepts anything by design.
+	// See DESIGN-DECISIONS.md, "the checker closed two holes".
+	_, err = runProg(t, `
 type ApiError = Db(String) | Nope
 fn inner() -> Result<Int, String> { Err("raw") }
 fn outer() -> Result<Int, ApiError> {
+    Ok(inner()?)
+}
+fn main() {
+    println(match outer() {
+        Err(e) => "got {e:?}"
+        _      => "?"
+    })
+}`)
+	if err == nil || !strings.Contains(err.Error(), "has no `from` that accepts it") {
+		t.Fatalf("unconvertible propagation must not compile; got %v", err)
+	}
+
+	// Declaring the erased error type is the other way out, and it
+	// needs no `from` at all.
+	out, err = runProg(t, `
+fn inner() -> Result<Int, String> { Err("raw") }
+fn outer() -> Result<Int, Error> {
     Ok(inner()?)
 }
 fn main() {

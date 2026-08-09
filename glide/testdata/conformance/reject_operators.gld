@@ -1,0 +1,10 @@
+fn main() {
+    let n = 1
+    let s = "x"
+    println(n + s)          // error: operator + is not defined for Int and String
+    println(n == s)         // error: can never be equal
+    println(1.5 % 2.0)      // error: operator % is not defined
+    if n { println("no") }  // error: if condition must be Bool, got Int
+    println(!n)             // error: expected Bool, found Int
+    println(-s)             // error: unary - is not defined for String
+}

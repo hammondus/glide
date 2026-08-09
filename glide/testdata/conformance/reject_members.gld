@@ -1,0 +1,12 @@
+type Point = struct { x: Int, y: Int }
+
+fn main() {
+    let p = Point{ x: 1, y: 2 }
+    println(p.z)              // error: has no field "z"
+    println(p.scale())        // error: has no method "scale"
+    println(Point{ x: 1 })    // error: missing field "y"
+    println(Point{ x: 1, y: 2, z: 3 })  // error: has no field "z"
+    let s = "hi"
+    println(s[0])             // error: strings have no index operator
+    for ch in 42 { println(ch) }        // error: is not iterable
+}

@@ -2,9 +2,11 @@
 
 **Glide**: effortless motion, no visible struggle, real speed —
 "human-friendly but performant" in one word. Binary: `glide`.
-File extension: `.gld`. Status: M1–M3 shipped — the tree-walking
-interpreter runs the whole ratified surface (see `glide/DESIGN-DECISIONS.md`),
-but nothing is type-checked yet. M4, the checker, is in progress.
+File extension: `.gld`. Status: M1–M3 shipped and M4b landed — the
+tree-walking interpreter runs the whole ratified surface and now
+type-checks it first, in both tiers, with no way to opt out (see
+`glide/DESIGN-DECISIONS.md`). Generic *bound* checking and trait
+conformance (M4c) are the remaining checker work.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee
@@ -308,7 +310,12 @@ Mechanics:
 - **i128/u128 are primitives**: a `u128` *is* an IPv6 address, a UUID, a
   128-bit hash. Lowered to 64-bit op pairs (no hardware support; LLVM
   does this well). Beware the historical i128 ABI mismatch at the C FFI
-  boundary.
+  boundary. **Deferred past M4** (open question resolved): Go has no
+  native 128-bit integer, `big.Int` would put an allocation and a lie
+  in the value representation, and a hi/lo pair means hand-writing
+  every operator for a type no program yet uses. Adding them later is
+  a new case, not a change to an existing one — see
+  `glide/DESIGN-DECISIONS.md`.
 - **No implicit numeric conversions.** `i32 + i64` is a compile error.
   C's silent promotion lattice is a 40-year bug factory; Go proved the
   strictness is tolerable.
@@ -607,6 +614,12 @@ pointer comparisons. Ship both halves in the stdlib, day one:
   implicit conversion in the language, and it only fires at `?` — the
   alternative is `.map_err` on every `?`, which is `if err != nil`
   reincarnated. Rust tried life without it; nobody would go back.
+  *Enforced as of M4b*: propagating an error the target type cannot
+  accept — no `from`, and the target is not `Error` — is a compile
+  error. M1–M3 propagated it raw, which meant a declared error type
+  could hold something that was not one of its variants at all. The
+  free-conversion half is exactly why `Error` is the right signature
+  for application code: it needs no `from` and never will.
 - **Context is a method**: `open(path).context("loading config")?`.
   The `Error` trait carries `cause() -> Error?`; printing renders the
   chain. (Go's `%w` gets these semantics right with the worst possible
@@ -1879,7 +1892,11 @@ four declines:
   representation, zero cost, no implicit conversion. UserId≠OrderId,
   metres≠seconds as compile errors. Closes the hole the day-one sketch
   opened (`UserId` never specified). Cheapest safety-per-character in
-  the document.
+  the document. *Enforced as of M4b*: `UserId(1) == OrderId(1)` is a
+  compile error, not a `false`. M1–M3 answered `false`, because `==`
+  was structural and two values with different wrapper names simply
+  never matched — which made the exact mistake distinct types exist to
+  prevent produce a plausible-looking answer.
 - **Deterministic scheduling in tests** (FoundationDB/TigerBeetle
   lineage): seeded deterministic scheduler mode in `glide test` —
   failing interleavings become rerunnable seeds; the runner fuzzes
@@ -2057,13 +2074,6 @@ scripting tail wagging the compiled dog. Decided:
 - **Embedding API shape** — Glide↔Go value-marshaling rules (sum
   types/`Result`/`Option` as Go values), interrupt and resource-limit
   surface. Decide while wrapping the interpreter, not before.
-- **128-bit integers.** `i128`/`u128` are ratified in the primitive
-  types, and Go has no native 128-bit integer to lower them onto in the
-  interpreter. Three answers: `big.Int` (correct, slow, and a Value
-  representation that lies about being a machine integer), a hi/lo pair
-  (fast, real work for every operator), or defer the two types past M4.
-  Decide before sized numerics land, because the Value representation is
-  hard to change afterwards.
 - **Does the runtime keep the dynamic checks once the checker is
   static?** `mut`, the nested-shadow ban, let-else divergence, the
   tail-value rule and arity/field existence are all enforced in the

@@ -1034,13 +1034,19 @@ fn main() {
 		t.Fatalf("base type is checked; got %v", err)
 	}
 
+	// Two distinct types over the same base are still two types, and
+	// comparing them is a compile error rather than a silent `false`.
+	// M1-M3 answered `false` here, because == was structural and the
+	// two values simply never matched; that made the mistake the
+	// wrapper exists to prevent produce a plausible-looking answer.
+	// See DESIGN-DECISIONS.md, "the checker closed two holes".
 	_, err = runProg(t, `
 type NoteId = distinct Int
 type UserId = distinct Int
 fn main() {
     println(NoteId(1) == UserId(1))
 }`)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "can never be equal") {
+		t.Fatalf("comparing sibling distinct types must not compile; got %v", err)
 	}
 }

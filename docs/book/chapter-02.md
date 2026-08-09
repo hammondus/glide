@@ -642,11 +642,12 @@ direct reward for exiling C FFI to the margins.
 - Today that binary is a tree-walking interpreter with `glide run` and
   `glide test`. The designed command surface is closed at nine
   commands, with no plugin mechanism.
-- Type annotations are parsed and ignored. **M4, the checker, is the
-  work in progress** — written in Go, reversing an earlier plan to
-  defer it to a Glide-written frontend. Until it lands, the rules a
-  checker would enforce statically are enforced dynamically, so
-  programs cannot cheat; they just find out late.
+- Type annotations are checked, as of M4b — written in Go, reversing
+  an earlier plan to defer the checker to a Glide-written frontend.
+  Checking is mandatory in every tier and there is no way to skip it.
+  **M4c is the work in progress**: generic bounds, trait conformance
+  and match exhaustiveness are the rules still enforced dynamically,
+  so a program cannot cheat on them either — it just finds out late.
 - `glide test` is the hygiene boundary: format check, lints, unused
   code, doc links, race detector. The compiler never errors on
   formatting or unused variables, because that breaks the edit loop.

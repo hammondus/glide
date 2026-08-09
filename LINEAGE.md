@@ -142,6 +142,46 @@ where the expected type is an Option. The discipline recorded above
 was chosen for error quality; a tractable checker is the second
 dividend, and M4 is where it gets collected.
 
+## Landing a checker gradually: report only when certain
+
+- **1990s–2000s** — every production type checker carries an internal
+  "I do not know" type that suppresses cascading errors. Go's
+  `go/types` has `Typ[Invalid]`; a node typed `Invalid` is compatible
+  with everything precisely so one mistake does not produce twenty
+  diagnostics downstream. C and C++ compilers have done the same for
+  decades under the name *error recovery*.
+- **2012→** — TypeScript makes the idea a *language* feature rather
+  than a compiler internal: `any` is assignable to and from
+  everything, and it exists so a codebase can be checked
+  incrementally, file by file, while the rest stays unchecked and
+  running. Microsoft's own migration of large JavaScript codebases is
+  the evidence that the direction matters: **under**-approximating
+  errors converts a project gradually; **over**-approximating stops it
+  dead on day one.
+- **2014→** — the "gradual typing" literature (Siek and Taha's term,
+  2006) and its industrial descendants — Python's `mypy`, PHP's Hack,
+  Ruby's Sorbet, Flow — all take the same bargain, for the same
+  reason: a checker that rejects working code is not adopted, whatever
+  it catches.
+- **Counter-evidence** — checkers introduced as strict-from-day-one
+  into an existing codebase are routinely turned off instead of
+  satisfied. That is why every one of the tools above shipped an
+  escape valve *first* and tightened later.
+
+**Glide takes** the under-approximating half of that bargain and
+refuses the escape valve. `types.Unknown` is compatible with
+everything in both directions and never produces a diagnostic, so the
+checker could be made **mandatory in both tiers on its first commit**
+— there is no `--no-check`, because there was never a stage at which
+one was needed. The difference from TypeScript is deliberate: `any` is
+something a *programmer* writes, and it therefore never goes away;
+`Unknown` is something only the *checker* produces, so every commit
+that models more of the language shrinks it, and a program cannot ask
+for it. The same treatment covers type parameters until M4c: inside
+`fn f<T: Ord>(a: T, b: T)`, `a < b` is accepted in silence rather than
+guessed at, because bound checking is not built yet and a guess in
+either direction would be worse than a shrug.
+
 ## One frontend, two backends
 
 - **1991→** — OCaml ships `ocamlc` (bytecode), `ocamlopt` (native)
@@ -262,12 +302,23 @@ struct costume.
   with a context chain. Go independently validates context chains
   with `%w` wrapping (1.13, 2019) — right semantics, wrapping
   controlled by a format verb.
+- **The erased target is load-bearing, not a convenience.** Rust's
+  `Box<dyn Error>` has a blanket `From` for every error type, which is
+  what makes `?` usable in application code at all: without it, a
+  function that calls into five libraries needs five hand-written
+  conversions before it can propagate anything. `anyhow::Error` is the
+  ergonomic repackaging of exactly that blanket impl, and its adoption
+  is the measure of how much the ceremony cost. The named half stays
+  strict on purpose — that is where enumerability lives.
 
 **Glide takes** both proven halves, in the stdlib on day one:
 sum-type errors for libraries (failure modes enumerable, `match`
 exhaustive), dynamic `Error` with a `.context()` chain for
 applications (anyhow's lesson, made official), `?` with conversion
-firing only at the propagation point, and — after the fight GRAMMAR.md
+firing only at the propagation point — into a *named* error type via
+its `from`, into `Error` for free, and nowhere else: as of M4b,
+propagating an error a named target cannot accept is a compile error
+rather than the silent raw propagation the dynamic tier allowed — and — after the fight GRAMMAR.md
 asked for — no dedicated handle-in-place construct: the sketched
 `or |e|` (Zig's `catch |err|`, the near-precedent) was declined
 because `?`-conversion covers its flagship wrap-and-propagate use,

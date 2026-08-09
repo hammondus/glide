@@ -1,0 +1,13 @@
+type NoteId = distinct Int
+type UserId = distinct Int
+
+fn main() {
+    let a = NoteId(1)
+    println(NoteId("x"))        // error: no implicit conversion
+    println(a + 1)              // error: operator + is not defined
+    println(a == UserId(1))     // error: can never be equal
+    println(a.value() + 1)
+    match a {
+        NoteId(n) => println(n)
+    }
+}

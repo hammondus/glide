@@ -1,9 +1,15 @@
-// Package interp is a tree-walking evaluator for the wordfreq subset
-// of Glide. It is dynamically checked: type annotations are parsed
-// and ignored, and rules the compiler will enforce statically (mut,
-// shadowing, let-else divergence, the tail-value rule) are enforced
-// at runtime here. Errors use Go panics internally, recovered at Run;
-// Glide-level control flow (return, `?`) uses explicit signals.
+// Package interp is a tree-walking evaluator for Glide, and one of
+// the language's two shipping tiers.
+//
+// It does not check types: internal/check does that, for both tiers,
+// and load() runs it before a single expression is evaluated. What
+// remains here is evaluation plus a belt-and-braces layer of runtime
+// assertions for rules the checker also enforces (mut, shadowing,
+// let-else divergence, the tail-value rule, arity). Those are kept
+// deliberately — a checker bug should surface as a loud, positioned
+// interpreter error rather than as the evaluator quietly doing
+// something undefined. Errors use Go panics internally, recovered at
+// Run; Glide-level control flow (return, `?`) uses explicit signals.
 package interp
 
 import (
@@ -17,6 +23,7 @@ import (
 	"time"
 
 	"glide/internal/ast"
+	"glide/internal/check"
 	"glide/internal/program"
 	"glide/internal/source"
 )
@@ -35,6 +42,12 @@ type Interp struct {
 	// uses (internal/program) so the two tiers cannot disagree about
 	// what a name means.
 	prog *program.Table
+
+	// info is what the checker learned: types on expressions, and the
+	// variant each `.Shorthand` resolved to. The evaluator does not
+	// need it yet; it is the seam the checker-era rewrites of
+	// `?`-conversion and shorthand resolution plug into.
+	info *check.Info
 
 	genCache map[*ast.FuncDecl]bool
 	global   *Env
@@ -116,16 +129,12 @@ func (in *Interp) errAt(at source.Span, format string, args ...any) error {
 	return &source.Error{File: in.src, Diags: []source.Diagnostic{d}}
 }
 
-// hostKnows is what a program may import and may not redeclare. The
-// checker is handed the same value, so a name that collides in one
-// tier collides in both.
-func hostKnows() program.Known {
-	bs := make(map[string]bool, len(builtins))
-	for name := range builtins {
-		bs[name] = true
-	}
-	return program.Known{Builtins: bs, Modules: knownModules}
-}
+// hostKnows is what a program may import and may not redeclare. It
+// comes from the checker's own tables rather than from this package's
+// `builtins` map, so the two tiers cannot disagree about which names
+// are reserved — TestHostSurfaceMatchesRuntime asserts the tables and
+// the implementations describe the same set.
+func hostKnows() program.Known { return check.Host() }
 
 // load indexes a file's declarations and evaluates its consts. Shared
 // by Run and RunTests.
@@ -140,6 +149,16 @@ func (in *Interp) load(f *ast.File) error {
 		return err
 	}
 	in.prog = prog
+
+	// The checker runs before anything is evaluated, in both tiers,
+	// always. There is no flag to skip it: an interpreter that can
+	// run unchecked Glide makes unchecked Glide the real scripting
+	// dialect and the annotations rot again (DESIGN.md).
+	info, err := check.File(f, prog)
+	if err != nil {
+		return err
+	}
+	in.info = info
 
 	in.global = newEnv(nil, true)
 	// Consts: the only module-level state — evaluated once, in

@@ -1,10 +1,11 @@
 // Package ast defines the syntax tree for Glide.
 //
-// Type annotations are still carried as raw text, and M4a replaces that
-// with a real TypeExpr. The strings are a leftover from M1-M3, when the
-// interpreter was dynamically checked; they are not a design position.
-// See ../../DESIGN-DECISIONS.md for the reversal that scheduled the
-// checker here in Go rather than in a later Glide-written frontend.
+// Nodes carry syntax and position, and nothing else: no types, no
+// resolved names. What the checker learns attaches separately, in
+// check.Info, keyed by node — go/types.Info's arrangement, and for
+// its reasons (../../DESIGN-DECISIONS.md). Positions are the one
+// exception, embedded directly, because a position is a property of
+// the syntax rather than something derived from it.
 package ast
 
 import (
@@ -137,11 +138,16 @@ type FieldDecl struct {
 	Pub  bool
 }
 
+// VariantDecl is one arm of a sum type. Payload holds the positional
+// form's types (`Green(Int, Int)`); Fields the named form
+// (`NotFound{ id: Int }`); both empty is a bare variant. M1-M3 kept
+// only a payload *count* here and discarded the types, which is why
+// `Some(x)` could be handed anything at all.
 type VariantDecl struct {
 	source.Span
-	Name   string
-	Arity  int         // positional payload count; 0 = bare variant
-	Fields []FieldDecl // named-field form: NotFound{ id: Int }
+	Name    string
+	Payload []*TypeExpr
+	Fields  []FieldDecl
 }
 
 // TypeDecl: exactly one of Fields (struct) / Variants (sum) /

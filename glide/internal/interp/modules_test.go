@@ -19,7 +19,14 @@ type NoteId = distinct Int
 
 fn main() {
     println(json.encode(Note{ title: "hi \"you\"", stars: 5 }))
-    println(json.encode(["b": 2, "a": [1, true, None]]))
+    // Heterogeneous literals stopped being writable when the checker
+    // landed — [1, true, None] has no element type — so the three
+    // scalar encodings are exercised separately. Mixed-type documents
+    // come back with typed encoding (derive Json).
+    println(json.encode(["b": 2, "c": 3]))
+    println(json.encode(["a": [1, 2, 3]]))
+    println(json.encode([true, false]))
+    println(json.encode(["z": None]))
     println(json.encode(NoteId(9)))
     match json.decode(`+"`"+`{"x": 1.5, "n": 3, "z": null, "l": ["s"]}`+"`"+`) {
         Ok(v) => println(v)
@@ -34,7 +41,10 @@ fn main() {
 		t.Fatal(err)
 	}
 	want := `{"title":"hi \"you\"","stars":5}` + "\n" +
-		`{"b":2,"a":[1,true,null]}` + "\n" +
+		`{"b":2,"c":3}` + "\n" +
+		`{"a":[1,2,3]}` + "\n" +
+		`[true,false]` + "\n" +
+		`{"z":null}` + "\n" +
 		"9\n" +
 		`["l": ["s"], "n": 3, "x": 1.5, "z": None]` + "\n" +
 		"rejected\n"

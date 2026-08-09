@@ -1,0 +1,13 @@
+// Sized numerics: literals must fit, and nothing converts implicitly.
+fn wants_i32(n: i32) -> i32 { n }
+
+fn main() {
+    let a: u8 = 300         // error: 300 does not fit in u8
+    let b: i8 = -129        // error: does not fit in i8
+    let c: u8 = 255
+    let d: Int = 7
+    println(wants_i32(d))   // error: expected i32, found Int
+    println(a + c)
+    println(b)
+    println(d)
+}

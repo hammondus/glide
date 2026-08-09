@@ -43,6 +43,11 @@ func (s Span) To(other Span) Span {
 
 func (s Span) IsValid() bool { return s.End >= s.Pos && (s.Pos > 0 || s.End > 0) }
 
+// Position returns the span itself. Every AST node embeds a Span, so
+// this method makes "give me any node's position" one interface
+// assertion instead of a switch over every node type.
+func (s Span) Position() Span { return s }
+
 // File is a source file plus the line index needed to turn offsets
 // into human positions and rendered snippets.
 type File struct {

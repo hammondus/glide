@@ -1,0 +1,14 @@
+fn main() {
+    let flag = true
+    let x = if flag { 1 } else { "two" }   // error: different types
+    let y = match flag {
+        true  => 1
+        false => "no"                       // error: different types
+    }
+    let zs = [1, "two"]                     // error: list elements are Int
+    let m = ["a": 1, "b": "two"]            // error: map values are Int
+    println(x)
+    println(y)
+    println(zs.len())
+    println(m.len())
+}

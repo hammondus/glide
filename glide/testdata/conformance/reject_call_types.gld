@@ -1,0 +1,13 @@
+fn takes_int(n: Int) -> Int { n * 2 }
+fn two(a: Int, b: Int = 2) -> Int { a + b }
+
+fn main() {
+    let never_runs = false
+    if never_runs {
+        println(takes_int("no"))   // error: expected Int, found String
+    }
+    println(two(b: 1))             // error: is missing its "a" argument
+    println(two(1, 2, 3))          // error: takes 2 argument(s), got 3
+    println(two(1, c: 2))          // error: has no parameter "c"
+    println(nosuch(1))             // error: undefined name "nosuch"
+}

@@ -1,0 +1,47 @@
+// The everyday surface, all of which must check clean.
+type Colour = Red | Green(Int) | Shade{ pct: Int }
+
+type Point = struct {
+    x: Int
+    y: Int
+}
+
+impl Point {
+    fn new(x: Int, y: Int) -> Point { Point{ x: x, y: y } }
+    fn sum(self) -> Int { self.x + self.y }
+}
+
+const origin_x = 0
+
+fn describe(c: Colour) -> String {
+    match c {
+        Red        => "red"
+        Green(n)   => "green {n}"
+        Shade{ pct } => "shade {pct}"
+    }
+}
+
+fn halve(n: Int) -> Result<Int, Error> {
+    if n % 2 == 0 { Ok(n / 2) } else { Err("odd") }
+}
+
+fn main() {
+    let p = Point.new(origin_x, 3)
+    println(p.sum())
+    println(describe(.Green(2)))
+    println(describe(Colour.Red))
+
+    let names = ["a", "b"]
+    let mut counts = ["a": 1]
+    counts["b"] = 2
+    for (k, v) in counts { println("{k}={v}") }
+    for n in names { println(n) }
+
+    let doubled = names.iter().map(|s| s.len() * 2).collect()
+    println(doubled.len())
+
+    let maybe: Int? = None
+    println(maybe ?? -1)
+
+    println(halve(4) ?? 0)
+}

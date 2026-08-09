@@ -6,17 +6,29 @@ import (
 	"fmt"
 	"os"
 
+	"glide/internal/check"
 	"glide/internal/interp"
 	"glide/internal/parser"
+	"glide/internal/program"
 	"glide/internal/source"
 )
 
+const usage = `usage: glide run <file.gld> [args...]
+       glide test <file.gld>
+       glide check <file.gld>`
+
 func main() {
-	if len(os.Args) < 3 || (os.Args[1] != "run" && os.Args[1] != "test") {
-		fmt.Fprintln(os.Stderr, "usage: glide run <file.gld> [args...]\n       glide test <file.gld>")
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	mode, path := os.Args[1], os.Args[2]
+	switch mode {
+	case "run", "test", "check":
+	default:
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(2)
+	}
 	src, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "glide: %v\n", err)
@@ -28,6 +40,21 @@ func main() {
 		// source line — it renders itself.
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	// `glide check` is go-vet-shaped: report and stop. It is a
+	// convenience, never a way to *skip* checking — run and test check
+	// too, and there is no flag that turns that off.
+	if mode == "check" {
+		tab, err := program.Load(file, check.Host())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if _, err := check.File(file, tab); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	if mode == "test" {
 		if failed := interp.RunTests(file, os.Stdout); failed > 0 {

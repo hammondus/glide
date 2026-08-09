@@ -36,10 +36,21 @@ or it is a bug.
      and AST node with caret-rendered diagnostics, and `load()` factored
      into `internal/program` — the declaration table the checker and the
      evaluator share.
-   - **M4b — the checker core.** Bidirectional local checking,
-     expected-type propagation, boxed `Option`, sized numerics in the
-     runtime, static versions of the rules currently enforced
-     dynamically, and `?` conversion resolved from real types.
+   - **M4b — the checker core (done, with two gaps named below).**
+     `internal/types` (the semantic type universe) and `internal/check`
+     (bidirectional local checking with expected-type propagation),
+     mandatory in both tiers, plus the conformance corpus. Static
+     versions of the call/field/method/operator/mutation rules,
+     `.Shorthand` resolved in the expected type, `Timeout` as a real
+     type, integer literal range checking, and `?` conversion resolved
+     from real types — retiring `resultErrType`'s string slicing.
+     Still open inside M4b: **boxing `Option`** and **sized numerics
+     in the runtime**. The checker knows `i8`–`u64`/`f32` as types and
+     rejects `let x: u8 = 300`; the *runtime* still stores every
+     integer as an i64, so a sized type does not wrap or trap at its
+     own width yet. Every program correct under sized semantics
+     behaves identically — only the overflow point differs — but this
+     is a stated gap, not a design position.
    - **M4c — generics and traits.** Declaration-site bound checking,
      trait structural conformance. The interpreter runs generics
      type-erased; monomorphisation is the compiled tier's problem.
@@ -284,15 +295,117 @@ or it is a bug.
   `` `/notes/{id}` `` is the idiom, and it is exactly what raw
   strings were ratified for. Documented in stdlib.md.
 
-## Scheduled for M4
+- **The checker reports only when it is certain.** Everything it
+  cannot yet model has type `Unknown`, which is compatible with
+  everything in both directions and never produces a diagnostic.
+  A type parameter is treated the same way (`types.IsOpaque`): inside
+  `fn compare<T: Ord>(a: T, b: T)`, `a < b` is accepted in silence
+  because bound checking is M4c and rejecting it would be a guess.
+
+  This is the load-bearing decision of M4b, and it is what makes a
+  *mandatory* checker safe to land half-finished. An
+  under-approximation of errors gets better every commit and never
+  breaks a working program; an over-approximation is a language that
+  rejects code that runs. TypeScript's internal `any` and go/types'
+  `Invalid` are the same device. `TestUnknownNeverReports` and
+  `TestExamplesCheckClean` are the guards.
+
+- **The checker is mandatory in both tiers; there is no `--no-check`.**
+  `glide run`, `glide test` and the eventual compiler all check first.
+  `glide check` exists as a go-vet-shaped convenience — report and
+  stop — never as a way to skip. An interpreter that can run unchecked
+  Glide makes unchecked Glide the real scripting dialect, and the
+  annotations rot exactly the way they did in M1–M3.
+
+- **Types attach to AST nodes, not to a lowered IR** (`check.Info`,
+  `go/types.Info`-shaped: `Types`, `Shorthand`, `Funcs`). A second tree
+  would double the node definitions and double the eventual port to
+  Glide, and Glide's first backend emits Go — whose own compiler does
+  the optimising, so there is nothing an intermediate representation
+  would buy. The evaluator keeps walking the AST unchanged.
+
+- **The host surface has one source of truth: the checker's tables.**
+  `check.Host()` derives the reserved names and importable modules from
+  the same tables that give them types, and `interp.hostKnows()`
+  delegates to it. `TestHostSurfaceMatchesRuntime` asserts the typed
+  set and the implemented set are equal, so a builtin cannot exist in
+  one tier's head and not the other's.
+
+- **`Error` is the erased error type: anything propagates into it.**
+  `fn run() -> Result<T, Error>` accepts an `Err` of any type, with no
+  `from`. Named error types still convert through `E.from` as designed;
+  `Error` is the one target that needs no conversion. This is Rust's
+  `Box<dyn Error>` bargain, and it is what the runtime already did.
+  Without it, every application-level function would need a
+  hand-written `from` for every error type any callee might raise —
+  precisely the ceremony `?` exists to delete.
+
+- **Inference is one function of unification, bounded by a single
+  call.** `unify` binds a signature's type parameters from the
+  arguments actually passed, and that is the whole solver: no
+  cross-function unification, no occurs check, no constraint store.
+  Mandatory signatures are what buys this (LINEAGE.md). A type
+  parameter the call site could not bind is *erased* to `Unknown`
+  rather than leaked — `Tree.new()` outside `impl Tree<T>` is "a Tree
+  of something", not a free variable that then fails to equal
+  anything. Call-site inference proper (`Tree.new()` learning `Int`
+  from a later `t.insert(1)`) is M4c.
+
+- **The checker closed two holes the dynamic tier had papered over.**
+  Both are language changes, both make an existing annotation mean
+  what `DESIGN.md` already said it meant, and both changed a test that
+  asserted the old behaviour:
+  1. **Propagating an unconvertible error is now an error.** M1–M3 let
+     `?` push a `String` error straight into a `Result<Int, ApiError>`
+     when `ApiError` had no `from` — so the declared error type was
+     decoration. Now it is a compile error; declare the `from`, or
+     declare `Result<_, Error>`, which accepts anything by design.
+  2. **Comparing sibling `distinct` types is now an error.** `NoteId(1)
+     == UserId(1)` answered `false` in M1–M3, because `==` was
+     structural and the two values simply never matched. That made the
+     exact mistake the wrapper exists to prevent produce a plausible
+     answer. `distinct` means "a loud error on mixing", and silence
+     that evaluates to `false` is the opposite of loud.
+
+  A third case is a *capability* loss rather than a bug fix, and is
+  recorded as such: a heterogeneous literal like `[1, true, None]` has
+  no element type and no longer compiles. It only ever worked because
+  the runtime was dynamic. Mixed-shape JSON comes back with typed
+  encoding (`derive Json`); until then `json.encode` takes one shape
+  at a time. `modules_test.go` was rewritten accordingly.
+
+- **The conformance corpus is a first-class artifact**
+  (`testdata/conformance/`), not a Go table test that happens to live
+  in files. Each `.gld` file is a whole program; a `// error: <text>`
+  comment on a line asserts exactly one diagnostic there containing
+  that text, and any unexpected diagnostic fails. Every implementation
+  of the frontend — this Go checker, the Glide port, both backends —
+  must pass it unchanged. It exists from M4b's first commit rather
+  than being written afterwards, because its whole job is to be older
+  than the thing it constrains. Accept-cases matter as much as
+  reject-cases: most checker bugs are false positives.
+
+- **128-bit integers are deferred past M4** (resolving DESIGN.md's open
+  question). `big.Int` would put an allocation and a lie in the Value
+  representation — a `u128` that does not wrap is not a machine
+  integer — and a hi/lo pair means hand-writing division, modulo,
+  shifts and formatting for a type no program currently uses. Deferring
+  does not foreclose: adding `i128`/`u128` later is a new Value case
+  and a new `types.Basic`, not a change to any existing one. The one
+  thing that had to be got right now was not baking "every integer is
+  an int64" into the *type* representation, and `types.Basic` carries
+  an explicit width for exactly that reason.
+
+## Scheduled for M4c
 
 Static generics (M4a parses type parameters and bounds into the AST;
-nothing checks them yet), trait *checking* (impl
-blocks register methods; conformance is asserted, not verified), boxed
-`Option`, sized numerics, `.Shorthand` resolved in the expected type
-rather than a global namespace, `Timeout` as a real type, static match
-exhaustiveness, receiver-mut on builtin methods, the spawn-captures-mut
-ban, integer literal range checking. Each has its own entry above or in
+M4b resolves them into `types.Var` and erases them at call sites;
+nothing checks a *bound* yet), trait *checking* (impl blocks register
+methods; conformance is asserted, not verified), boxed `Option`, sized
+numerics in the runtime, static match exhaustiveness, the
+spawn-captures-mut ban, generator element types (a `yield`ing function
+is exempt from the tail-value check today), and call-site inference for
+associated functions. Each has its own entry above or in
 `../docs/reference/language.md`; they are listed together here because
 they are one body of work, not a scattering of small ones.
 

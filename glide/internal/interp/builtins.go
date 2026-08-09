@@ -234,7 +234,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 				panic(rtErr{at, "lines takes no arguments"})
 			}
 			// Rust's semantics: split on \n, strip a trailing \r from
-			// each at, and a final newline yields no empty last at.
+			// each line, and a final newline yields no empty last line.
 			l := &ListV{}
 			s := string(r)
 			for len(s) > 0 {

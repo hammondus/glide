@@ -1,0 +1,25 @@
+type ApiError = Db(String) | Nope
+
+fn raises() -> Result<Int, String> { Err("raw") }
+
+// No `from`: the declared error type would be a lie.
+fn unconvertible() -> Result<Int, ApiError> {
+    Ok(raises()?)          // error: has no `from` that accepts it
+}
+
+// Error is the erased error type and needs no conversion.
+fn erased() -> Result<Int, Error> {
+    Ok(raises()?)
+}
+
+fn not_a_result() -> Int {
+    raises()?              // error: this function returns Int, not a Result
+}
+
+fn main() {
+    println(unconvertible() ?? 0)
+    println(erased() ?? 0)
+    println(not_a_result())
+    let n = 1
+    println(n?)            // error: ? requires a Result, found Int
+}

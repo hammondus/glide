@@ -44,11 +44,19 @@ recorded sacrifice unless new evidence turns up.
   *against* when it exists (e.g. Rust removing green threads).
 - Breaking changes are free — sole user, no compatibility promise. Never
   argue "but that would break existing code" at this stage.
-- Plan before code. Current phase: **M4, the checker**. The
-  tree-walking interpreter (M1–M3) runs the whole ratified surface but
-  type-checks nothing; M4 fixes that, in Go, reversing an earlier
-  decision to defer the checker to a Glide-written frontend. See
-  `glide/DESIGN-DECISIONS.md` for the reversal and its reasoning.
+- Plan before code. Current phase: **M4c** — generic bound checking,
+  trait conformance, match exhaustiveness, boxed `Option`, sized
+  numerics in the runtime. M4a (representation) and M4b (the checker
+  core, `internal/types` + `internal/check`) have landed: every
+  program is type-checked before it runs, in every tier, with no
+  `--no-check` and no plan for one. The checker reports only what it
+  is certain of — anything it does not model is `Unknown` and passes
+  in silence — so widening coverage can never break a working
+  program. `glide/testdata/conformance/` is the corpus every future
+  implementation of the frontend must pass unchanged; add to it in
+  the same commit as any rule you change. See
+  `glide/DESIGN-DECISIONS.md` for the reversal that put the checker
+  in Go and for what M4b closed.
 - **The interpreter ships.** It is not scaffolding that retires at
   self-hosting — it is a statically-checked scripting tier, sharing one
   frontend with the compiler so the two cannot drift. Never justify a

@@ -420,10 +420,11 @@ func (p *parser) parseTypeDecl() (*ast.TypeDecl, error) {
 			}
 		} else if p.accept(lexer.LParen) {
 			for p.cur().Kind != lexer.RParen {
-				if _, err := p.parseType(); err != nil {
+				pt, err := p.parseType()
+				if err != nil {
 					return nil, err
 				}
-				v.Arity++
+				v.Payload = append(v.Payload, pt)
 				if !p.accept(lexer.Comma) {
 					break
 				}
@@ -726,14 +727,15 @@ func (p *parser) parseTypeCore() (*ast.TypeExpr, error) {
 // Statements
 
 func (p *parser) parseBlock() (*ast.Block, error) {
-	if _, err := p.expect(lexer.LBrace, "block"); err != nil {
+	open, err := p.expect(lexer.LBrace, "block")
+	if err != nil {
 		return nil, err
 	}
-	b := &ast.Block{}
+	b := &ast.Block{Span: open.Span}
 	for {
 		p.skipSemis()
 		if p.cur().Kind == lexer.RBrace {
-			p.next()
+			b.Span = open.Span.To(p.next().Span)
 			return b, nil
 		}
 		if p.cur().Kind == lexer.EOF {
@@ -969,7 +971,55 @@ func (p *parser) loopLabel() (string, error) {
 
 // Patterns
 
+// parsePattern parses one pattern and stamps its span. Spans are
+// attached here, once, rather than in each of the twelve pattern
+// constructors: a pattern always spans exactly the tokens it
+// consumed, so the wrapper knows the answer and the cases do not have
+// to remember to say it.
 func (p *parser) parsePattern() (ast.Pattern, error) {
+	start := p.cur().Span
+	pat, err := p.parsePatternCore()
+	if err != nil {
+		return nil, err
+	}
+	end := start
+	if p.pos > 0 {
+		end = p.toks[p.pos-1].Span
+	}
+	setPatSpan(pat, start.To(end))
+	return pat, nil
+}
+
+func setPatSpan(pat ast.Pattern, sp source.Span) {
+	switch x := pat.(type) {
+	case *ast.IdentPat:
+		x.Span = sp
+	case *ast.WildPat:
+		x.Span = sp
+	case *ast.TuplePat:
+		x.Span = sp
+	case *ast.ListPat:
+		x.Span = sp
+	case *ast.CtorPat:
+		x.Span = sp
+	case *ast.StructPat:
+		x.Span = sp
+	case *ast.IntPat:
+		x.Span = sp
+	case *ast.StrPat:
+		x.Span = sp
+	case *ast.BoolPat:
+		x.Span = sp
+	case *ast.RangePat:
+		x.Span = sp
+	case *ast.RunePat:
+		x.Span = sp
+	case *ast.RuneRangePat:
+		x.Span = sp
+	}
+}
+
+func (p *parser) parsePatternCore() (ast.Pattern, error) {
 	switch p.cur().Kind {
 	case lexer.KwMut:
 		p.next()
@@ -1162,7 +1212,7 @@ func (p *parser) parseStructPat(typeName string, at source.Span) (ast.Pattern, e
 				return nil, err
 			}
 		}
-		sp.Fields = append(sp.Fields, ast.FieldPat{Name: t.Text, Pat: fp})
+		sp.Fields = append(sp.Fields, ast.FieldPat{Name: t.Text, Pat: fp, Span: t.Span})
 		if !p.accept(lexer.Comma) {
 			p.skipSemis()
 			if _, err := p.expect(lexer.RBrace, "struct pattern"); err != nil {
@@ -1283,7 +1333,9 @@ func (p *parser) parseUnary() (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &ast.Unary{Op: opTok.Text, X: x, Span: opTok.Span}, nil
+		// The span covers the operand too: a diagnostic about `-129`
+		// should underline `-129`, not just the minus.
+		return &ast.Unary{Op: opTok.Text, X: x, Span: opTok.Span.To(exprSpan(x))}, nil
 	}
 	return p.parsePostfix()
 }
@@ -1368,24 +1420,34 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 	}
 }
 
+// exprSpan is any expression's position. Every node embeds a
+// source.Span, so this is one assertion rather than a switch over the
+// whole expression set.
+func exprSpan(e ast.Expr) source.Span {
+	if s, ok := e.(interface{ Position() source.Span }); ok {
+		return s.Position()
+	}
+	return source.Span{}
+}
+
 func (p *parser) parsePrimary() (ast.Expr, error) {
 	t := p.cur()
 	switch t.Kind {
 	case lexer.Int:
 		p.next()
-		return &ast.IntLit{V: t.Int}, nil
+		return &ast.IntLit{V: t.Int, Span: t.Span}, nil
 	case lexer.Float:
 		p.next()
-		return &ast.FloatLit{V: t.Float}, nil
+		return &ast.FloatLit{V: t.Float, Span: t.Span}, nil
 	case lexer.Rune:
 		p.next()
-		return &ast.RuneLit{V: rune(t.Int)}, nil
+		return &ast.RuneLit{V: rune(t.Int), Span: t.Span}, nil
 	case lexer.KwTrue:
 		p.next()
-		return &ast.BoolLit{V: true}, nil
+		return &ast.BoolLit{V: true, Span: t.Span}, nil
 	case lexer.KwFalse:
 		p.next()
-		return &ast.BoolLit{V: false}, nil
+		return &ast.BoolLit{V: false, Span: t.Span}, nil
 	case lexer.String:
 		p.next()
 		lit := &ast.StrLit{Span: t.Span}
@@ -1435,9 +1497,9 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 	case lexer.Pipe, lexer.OrOr:
 		return p.parseClosure()
 	case lexer.LParen:
-		p.next()
-		if p.accept(lexer.RParen) {
-			return &ast.UnitLit{}, nil
+		open := p.next().Span
+		if p.cur().Kind == lexer.RParen {
+			return &ast.UnitLit{Span: open.To(p.next().Span)}, nil
 		}
 		first, err := structsOK(p, p.parseExpr)
 		if err != nil {
@@ -1455,9 +1517,11 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 					break
 				}
 			}
-			if _, err := p.expect(lexer.RParen, "tuple"); err != nil {
+			end, err := p.expect(lexer.RParen, "tuple")
+			if err != nil {
 				return nil, err
 			}
+			tl.Span = open.To(end.Span)
 			return tl, nil
 		}
 		if _, err := p.expect(lexer.RParen, "parenthesised expression"); err != nil {
@@ -1634,16 +1698,17 @@ func (p *parser) parseSelect() (ast.Expr, error) {
 }
 
 func (p *parser) parseListOrMap() (ast.Expr, error) {
-	p.next() // [
+	open := p.next().Span // [
 	if p.cur().Kind == lexer.Colon {
 		p.next()
-		if _, err := p.expect(lexer.RBrack, "empty map literal"); err != nil {
+		end, err := p.expect(lexer.RBrack, "empty map literal")
+		if err != nil {
 			return nil, err
 		}
-		return &ast.MapLit{}, nil
+		return &ast.MapLit{Span: open.To(end.Span)}, nil
 	}
-	if p.accept(lexer.RBrack) {
-		return &ast.ListLit{}, nil
+	if p.cur().Kind == lexer.RBrack {
+		return &ast.ListLit{Span: open.To(p.next().Span)}, nil
 	}
 	if p.cur().Kind == lexer.DotDot {
 		// Leading spread: this is a list, no map ambiguity.
@@ -1651,7 +1716,7 @@ func (p *parser) parseListOrMap() (ast.Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return p.finishListLit(el)
+		return p.finishListLit(open, el)
 	}
 	first, err := p.parseExpr()
 	if err != nil {
@@ -1683,15 +1748,17 @@ func (p *parser) parseListOrMap() (ast.Expr, error) {
 			m.Keys = append(m.Keys, k)
 			m.Vals = append(m.Vals, v)
 		}
-		if _, err := p.expect(lexer.RBrack, "map literal"); err != nil {
+		end, err := p.expect(lexer.RBrack, "map literal")
+		if err != nil {
 			return nil, err
 		}
+		m.Span = open.To(end.Span)
 		return m, nil
 	}
-	return p.finishListLit(first)
+	return p.finishListLit(open, first)
 }
 
-func (p *parser) finishListLit(first ast.Expr) (ast.Expr, error) {
+func (p *parser) finishListLit(open source.Span, first ast.Expr) (ast.Expr, error) {
 	l := &ast.ListLit{Elems: []ast.Expr{first}}
 	for p.accept(lexer.Comma) {
 		if p.cur().Kind == lexer.RBrack {
@@ -1703,9 +1770,11 @@ func (p *parser) finishListLit(first ast.Expr) (ast.Expr, error) {
 		}
 		l.Elems = append(l.Elems, e)
 	}
-	if _, err := p.expect(lexer.RBrack, "list literal"); err != nil {
+	end, err := p.expect(lexer.RBrack, "list literal")
+	if err != nil {
 		return nil, err
 	}
+	l.Span = open.To(end.Span)
 	return l, nil
 }
 

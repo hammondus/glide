@@ -1,0 +1,21 @@
+// Implicit T -> T?, None taking its type from context, and the two
+// unwrapping forms.
+fn find(xs: List<Int>, want: Int) -> Int? {
+    for x in xs {
+        if x == want { return x }          // T -> T? with no Some()
+    }
+    None
+}
+
+fn main() {
+    let xs = [1, 2, 3]
+    if let hit = find(xs, 2) { println(hit + 1) }
+
+    match find(xs, 9) {
+        Some(n) => println(n)
+        None    => println("absent")
+    }
+
+    let explicit: String? = Some("here")
+    println(explicit ?? "gone")
+}

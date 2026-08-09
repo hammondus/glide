@@ -418,14 +418,19 @@ func (lx *lexer) lexOp() error {
 		"*=": StarEq, "/=": SlashEq, "%=": PercentEq,
 		"=>": FatArrow,
 	}
+	// Advance first, then emit: emit() spans [lx.start, lx.i), so a
+	// token emitted before its own characters are consumed gets a
+	// zero-width span. Every operator carried one until M4b, which is
+	// why carets under `+` and `}` were a single column wherever they
+	// were not one character wide.
 	if k, ok := twoKinds[two]; ok {
 		if k == DotDot && lx.i+2 < len(lx.src) && lx.src[lx.i+2] == '=' {
-			lx.emit(DotDotEq, "..=")
 			lx.i += 3
+			lx.emit(DotDotEq, "..=")
 			return nil
 		}
-		lx.emit(k, two)
 		lx.i += 2
+		lx.emit(k, two)
 		return nil
 	}
 	oneKinds := map[byte]Kind{
@@ -452,8 +457,8 @@ func (lx *lexer) lexOp() error {
 				}
 			}
 		}
-		lx.emit(k, string(c))
 		lx.i++
+		lx.emit(k, string(c))
 		return nil
 	}
 	// Decode the whole rune: c is one *byte*, and reporting the first

@@ -77,10 +77,12 @@ lists/maps/tuples, structs and methods, sum types with `match`, `Result`
 spawn, channels, `select`), and built-in testing with property-based
 tests — plus `http`, `sql` and `json`.
 
-**Nothing is type-checked yet.** Annotations are parsed and ignored;
-the rules a compiler would enforce statically are enforced dynamically
-instead, so programs can't cheat, they just find out late. **M4, the
-static checker, is the work in progress.**
+**Programs are type-checked before they run** (M4b), in every tier,
+with no way to opt out. The checker reports only what it is certain
+of — anything it does not yet model passes in silence — so what is
+still enforced dynamically is a shrinking list, not a policy: generic
+bounds, trait conformance and match exhaustiveness are **M4c, the work
+in progress**.
 
 The interpreter is not scaffolding. The plan is two tiers over one
 shared frontend — `glide run` as a statically-checked scripting

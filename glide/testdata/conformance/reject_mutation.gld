@@ -1,0 +1,10 @@
+fn main() {
+    let n = 1
+    n = 2                  // error: cannot mutate through immutable binding "n"
+    let xs = [1]
+    xs.push(2)             // error: cannot mutate through immutable binding "xs"
+    let mut ys = [1]
+    ys.push(2)
+    println(ys.len())
+    println(n)
+}

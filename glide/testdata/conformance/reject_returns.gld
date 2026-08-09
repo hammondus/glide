@@ -1,0 +1,21 @@
+fn declared_int() -> Int {
+    "not an int"        // error: expected Int, found String
+}
+
+fn early() -> Int {
+    return "no"         // error: expected Int, found String
+}
+
+fn nothing() -> Int {
+    return              // error: this `return` has no value
+}
+
+fn empty() -> Int {
+}                       // error: this function returns Int, but its body ends with ()
+
+fn main() {
+    println(empty())
+    println(declared_int())
+    println(early())
+    println(nothing())
+}

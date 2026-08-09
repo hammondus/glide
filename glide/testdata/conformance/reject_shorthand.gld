@@ -1,0 +1,13 @@
+type Colour = Red | Green(Int)
+
+fn paint(c: Colour) -> String { "painted" }
+
+fn main() {
+    println(paint(.Red))
+    println(paint(.Purple))     // error: Colour has no variant "Purple"
+    println(paint(.Green()))    // error: takes 1 argument(s), got 0
+    println(paint(Red))         // error: variants are namespaced
+    match Colour.Red {
+        Rd => println("typo")   // error: Rd is not a constructor
+    }
+}

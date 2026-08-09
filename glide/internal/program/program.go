@@ -109,7 +109,7 @@ func Load(f *ast.File, known Known) (*Table, error) {
 				bag.Add(td.Span, "variant %q already declared by type %s", v.Name, prev.Type)
 				continue
 			}
-			vi := Variant{Type: td.Name, Arity: v.Arity}
+			vi := Variant{Type: td.Name, Arity: len(v.Payload)}
 			for _, fd := range v.Fields {
 				vi.Fields = append(vi.Fields, fd.Name)
 			}

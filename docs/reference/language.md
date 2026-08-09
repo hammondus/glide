@@ -6,17 +6,19 @@ book (`docs/book/`) teaches; this file reminds.
 
 **Status markers** — the language is ahead of its implementation:
 
-- ✓ — runs in the current interpreter (M3)
+- ✓ — runs in the current interpreter (M4b)
 - ○ — designed (recorded in `DESIGN.md`), not yet implemented; using
-  it today is a parse or runtime error
+  it today is a parse, check, or runtime error
 
-Nothing is *type-checked* yet: annotations are parsed and ignored.
-Rules marked ✓ are enforced dynamically (mut, shadowing, let-else
-divergence, tail values), so programs cannot cheat — they just find
-out late. **M4 is the checker**, in progress; as each rule becomes
-static its row here changes with it. The checker is mandatory in
-every tier and there is no way to skip it (`glide check` exists;
-`--no-check` never will).
+Annotations are checked as of M4b: every program is type-checked
+before it runs, in every tier, with no way to skip it (`glide check`
+exists as a report-and-stop convenience; `--no-check` never will).
+The checker reports only what it is certain of — anything it does not
+yet model is treated as unknown and passes in silence — so a ✓ row
+means "checked or enforced", and the rows still marked ○ are the ones
+where the *evaluator* is the only thing standing between you and the
+mistake. **M4c** finishes the job: generic bound checking, trait
+conformance, and match exhaustiveness.
 
 ## Source files
 
@@ -131,8 +133,9 @@ Type annotations are written but unchecked in M2.
 | `T?` = `Option<T>` | unboxed in M2: `Some` is identity, so `Option<Option<T>>` is unrepresentable until the checker era | ✓ |
 | `Result<T, E>` | `Ok(v)` / `Err(e)` | ✓ |
 | `Range` | value of `lo..hi` | ✓ |
-| `fn(A) -> B` | one function type for named fns, closures, method values | ○ (closures exist ✓; the *type* is unchecked) |
-| `i8…i128`, `u8…u128`, `f32` | sized numerics | ○ |
+| `fn(A) -> B` | one function type for named fns, closures, method values | ✓ for named fns and closures (a closure passed to `filter`/`sort_by`/`map` is checked against the parameter's signature); method values unapplied (`x.method`) ○ |
+| `i8…i64`, `u8…u64`, `f32` | sized numerics | ✓ as *types* (declared, checked, literal range enforced: `let x: u8 = 300` is a compile error; no implicit conversions) — the runtime still stores every integer as i64, so a sized type does not yet wrap or trap at its own width ○ |
+| `i128`, `u128` | 128-bit integers | ○ — ratified, deferred past M4 (Go has no native 128-bit integer; see `glide/DESIGN-DECISIONS.md`) |
 | `Rune` | own type; `==`/ordering with other Runes only; Display prints the character, Debug quotes it | ✓ |
 | `distinct` | `type NoteId = distinct Int` — nominal wrapper: explicit construction `NoteId(7)` (wrong base type errors), **no inherited operators** (`NoteId(1) + 1` errors — an id is not a quantity), `==` within the same distinct type only, pattern `NoteId(n)` destructures, `.value()` unwraps, `impl NoteId { … }` works like any user type. Codecs (json/sql) unwrap at the boundary | ✓ (dynamic; the checker makes it static) |
 | `Duration`, `Instant` | see stdlib Concurrency/Time | ✓ |
@@ -202,8 +205,10 @@ path). Discard is explicit: `_ = expr` ✓.
 - `type Name = VariantA | VariantB(T) | NotFound{ id: Int } | …` —
   sum type with positional or named-field payloads ✓. Variants are
   namespaced: `Color.Red` in full, `.Red` where the shorthand reads
-  (M2 resolves it in the global variant namespace; the checker era
-  resolves in the expected type). Bare variant names are
+  — resolved in the *expected type* as of M4b ✓ (M1–M3 resolved it in
+  a file-wide variant namespace; where there is no expected type to
+  resolve in, that fallback still applies, since variant names are
+  file-unique). Bare variant names are
   pattern-only — in an expression they error with the fix. Named
   fields: construct `.NotFound{ id: 7 }`, read `e.id`, match
   `NotFound{ id }` under the same mention-all-or-`..` rule as
@@ -221,7 +226,9 @@ Angle brackets, never square. **No turbofish, ever.**
 
 - Declaration sites bind parameters: `fn max<T: Ord>(a: T, b: T) -> T`,
   `type Pair<A, B> = struct { … }`, `trait Container<T> { … }`.
-  Parsed into the AST ✓ (M4a); **not yet checked** ○.
+  Parsed into the AST and resolved into real types ✓ (M4a/M4b);
+  **bounds are not yet checked** ○ — inside a generic body a `T` is
+  opaque, so operations on it pass in silence until M4c.
 - Bounds are inline colon lists only: `<T: Ord + Hash>`. Unconstrained
   is bare `<T>` — no `[T any]` ceremony. **No `where` clause** in v0:
   two ways to write bounds violates house rules ✓ (parsed).
@@ -316,6 +323,20 @@ patterns in function signatures, ref/binding modes.
 
 ## Semantics quick-list
 
+- Every program is type-checked before it runs, in every tier. ✓
+  (M4b). What is checked today: call argument types, arity, named
+  arguments and defaults; struct and variant literals (fields
+  present, no extras, no zero values); field, method and associated
+  function existence; operator operand types (including the
+  `Duration`/`Instant` set and `distinct`'s refusal to inherit any);
+  `if`/`for`/guard conditions; branch and match arms agreeing;
+  list/map element homogeneity; iterability; declared return types
+  and the tail-value rule; `?` on a Result with a reachable error
+  type; `.Shorthand` against the expected type; `mut` paths;
+  integer-literal range against a sized type; and every name being
+  defined. What is *not* yet checked, and stays dynamic until M4c:
+  generic bounds, trait conformance, match exhaustiveness, and a
+  generator's element type. ○
 - No null; no zero values; mandatory initialisation. ✓ (by
   construction in M2)
 - Errors are values; `?` propagates; panics are for bugs, kill the

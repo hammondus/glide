@@ -301,10 +301,13 @@ fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
 error: line 1: expected a type, found 'fn'
 ```
 
-Since annotations are parsed and ignored anyway (Chapter 2), any
-identifier works as a placeholder today — which is why the examples
-above write `F` and `Counter`. When the checker lands, the real
-spelling arrives with it.
+There is still no *written* spelling for a function type: the parser
+takes a type name, and `fn(Int) -> Int` does not parse. The checker
+has the type internally — a closure passed to `filter` or `sort_by` is
+checked against the parameter's signature, and a wrong return type is
+a compile error — but you cannot yet write one down, which is why the
+examples above use a placeholder name. The spelling is designed; only
+the grammar is missing.
 
 The important part is not the spelling; it is that there is exactly
 **one** function type. No distinction between "closure that captures by

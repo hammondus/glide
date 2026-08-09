@@ -447,8 +447,10 @@ language.** It is two orders of magnitude slower than compiled Go and
 it is not the shipping tier. Generators cost a goroutine each; there is
 no compute parallelism; every field access is a map lookup.
 
-**Assuming annotations are checked.** They are parsed and ignored.
-Write them anyway — they are the specification the checker will read.
+**Assuming every annotation is checked.** As of M4b most are, but the
+checker reports only what it is certain of: generic bounds, trait
+conformance and match exhaustiveness pass in silence until M4c. A
+program that checks clean is not yet a program that is fully verified.
 
 **Assuming the M2 warts are semantics.** `Option` unboxing (so
 `Option<Option<T>>` is unrepresentable, Chapter 14), builtin methods

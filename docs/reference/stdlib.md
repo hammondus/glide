@@ -1,6 +1,6 @@
 # Glide Standard Library Reference
 
-What a running program can call **today**, in the M3 interpreter.
+What a running program can call **today**, in the M4b interpreter.
 The designed stdlib — what this grows into — lives in
 `STDLIB-GOALS.md` (aspirational inventory) and `DESIGN.md` (committed
 designs); this file only documents what executes. In the interpreter
@@ -21,7 +21,7 @@ implemented ✓; pointers to the designed future are marked ○.
 | `eprintln(v)` | `(T) -> ()` | stderr + newline |
 | `Ok(v)` | `(T) -> Result<T, E>` | success constructor |
 | `Err(e)` | `(E) -> Result<T, E>` | failure constructor |
-| `Some(v)` | `(T) -> T?` | identity in M2 (Option is unboxed) |
+| `Some(v)` | `(T) -> T?` | identity at runtime — Option is still unboxed, so `Option<Option<T>>` is unrepresentable ○ |
 | `None` | `T?` | the absent value (a literal, not a call) |
 | `expect(cond)` | test blocks only | on failure reports both sides of a comparison and continues |
 
@@ -107,7 +107,8 @@ compression, persistent collections, `Mutex<T>` — per
 
 Both halves clone (mpmc). Blocking operations here are cancellation
 points. Send transfers ownership — enforced in the checker era,
-dormant in M2.
+dormant today ○. Calling `close()` or `send()` on a receiver (or
+`recv()` on a sender) is a compile error naming the right half ✓.
 
 Time ✓: `Duration` and `Instant` are distinct types. Constructors
 are Int/Float suffix properties `.ns` `.us` `.ms` `.s` `.mins` `.h`
@@ -227,3 +228,12 @@ Hand-written against the interpreter source
 builtins/methods/modules). When a feature or method lands, its row
 lands here in the same commit — same discipline as `DESIGN.md` /
 `LINEAGE.md`.
+
+As of M4b there is a second place every row must exist: the checker's
+signature tables in `glide/internal/check/universe.go`, which give
+these surfaces *types*. A method implemented but not typed is
+reported as unknown by the checker and cannot be called; a method
+typed but not implemented crashes at runtime. `TestHostSurfaceMatchesRuntime`
+holds the builtin and module *names* in step automatically; the
+per-method signatures are hand-kept, and this file is the list they
+are kept against.

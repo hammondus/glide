@@ -38,12 +38,13 @@ is not hedging: a book that silently mixes shipped behaviour with
 aspiration is worse than no book, and stale documentation is the one
 sin this project's `CLAUDE.md` names explicitly.
 
-Nothing is *type-checked* yet. Type annotations are parsed and ignored;
-M4, the static checker, is the work in progress. Until it lands the
-rules a checker would enforce statically are enforced dynamically
-instead, so programs still cannot cheat — they just find out late:
-`mut`, the nested-shadow ban, `let … else` divergence, and the
-tail-value rule all fail at runtime today.
+Type annotations are *checked* as of M4b: every program is
+type-checked before it runs, in every tier, and there is no flag to
+skip it. The checker reports only what it is certain of, so the rules
+it does not yet cover — generic bounds, trait conformance, match
+exhaustiveness — are still enforced dynamically and still fail late.
+That list is M4c, and it shrinks; chapters written before M4b landed
+may still describe a rule as runtime-only.
 
 ## The chapter anatomy
 
