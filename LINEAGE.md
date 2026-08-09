@@ -107,6 +107,79 @@ the right line), inference local to bodies. The ML *data model* came
 along (sum types, matching); the ML *inference discipline* was
 deliberately left behind.
 
+## Checking: bidirectional, not Hindley–Milner
+
+- **1969/1978** — Hindley and Milner's algorithm infers everything by
+  *unification*: collect constraints across the whole program, solve
+  them, report a failure wherever the solver happened to notice. That
+  last clause is the whole problem — the error surfaces at the point
+  the constraints became unsatisfiable, which is routinely nowhere
+  near the mistake.
+- **1997–2000** — Pierce and Turner name and popularise **local type
+  inference** / *bidirectional typing*: propagate expected types
+  *inward* (checking mode) and synthesise types *outward* (inference
+  mode), meeting where an annotation is required. Errors land where
+  the two disagree, which is where the programmer wrote the wrong
+  thing.
+- **2000s–2010s** — it becomes the mainstream default rather than the
+  exotic option: Scala, C# `var`, TypeScript, Swift, Kotlin and Rust
+  all check bidirectionally with mandatory (or near-mandatory)
+  signatures at function boundaries. Rust is the sharpest case — it
+  has full HM machinery available inside bodies and still requires
+  every `fn` signature, precisely for the error-locality.
+- **2019** — Dunfield and Krishnaswami's survey documents that the
+  technique's practical appeal is implementability: no constraint
+  store, no global solve, no occurs-check subtleties, and the
+  algorithm reads like the typing rules.
+
+**Glide takes** bidirectional checking as the direct consequence of
+mandatory signatures. Because every function's type is written down,
+nothing needs to be inferred across a call — checking is a local walk
+with an expected type threaded in, and two of Glide's ratified
+features *require* that thread to exist anyway: `.Shorthand` variants
+resolve in the expected type, and implicit `T -> T?` coercion fires
+where the expected type is an Option. The discipline recorded above
+was chosen for error quality; a tractable checker is the second
+dividend, and M4 is where it gets collected.
+
+## One frontend, two backends
+
+- **1991→** — OCaml ships `ocamlc` (bytecode), `ocamlopt` (native)
+  and an interactive toplevel over **one** lexer, parser and type
+  checker. Thirty-plus years of evidence that a language can have an
+  interpreted tier and a compiled tier without becoming two dialects.
+  GHC and GHCi are the same story in Haskell.
+- **2010s** — Roslyn (C#) makes the shared frontend a public API:
+  compiler, IDE, and C# Interactive all consume the same parse and
+  bind. The IDE-and-compiler-disagree bug class disappears because
+  there is nothing left to disagree.
+- **2016→** — Rust's **Miri** interprets MIR — the same intermediate
+  form the codegen backends consume — and rustc's own compile-time
+  const-evaluator *is* that engine. The interpreter is not a separate
+  implementation of Rust; it is another consumer of the one frontend.
+- **Zig** — the self-hosted compiler evaluates `comptime` by
+  interpreting its own IR, for the same reason.
+- **Counter-evidence, and it is why this matters** — the languages
+  that grew a second implementation independently spent years on
+  divergence: Python's CPython/PyPy/Jython semantics drifting at the
+  edges, JavaScript before the ES specs and test262 forced agreement,
+  and the C compilers' decades of "works on gcc, breaks on MSVC". The
+  cost is not that a program fails; it is that programmers stop
+  trusting either implementation and start coding to the intersection.
+
+**Glide takes** the shared frontend as the mechanism that lets both
+tiers ship. Lexer, parser and checker are one implementation; the
+interpreter and the compiler differ only in how they execute a checked
+program. "Runs interpreted, fails compiled" is then unreachable by
+construction rather than merely tested for — and where the two *could*
+still differ (anything the language leaves unspecified, and comptime's
+host-vs-target boundary) the design pins it explicitly instead of
+letting the first implementation decide. An earlier plan achieved
+no-drift by *freezing* the interpreter at self-hosting; that bought the
+same guarantee at the price of the scripting tier slowly becoming an
+older language, and was dropped once the shared frontend made it
+unnecessary.
+
 ## Sum types & `match`
 
 - **1970s** — Edinburgh. Rod Burstall's NPL and Hope, then Robin
@@ -1426,18 +1499,31 @@ the borrow checker — Glide's 90% at 10% of the concepts).
   demonstrating both that self-hosting is a milestone worth
   engineering toward and that the runtime is the actual mountain
   (Go's runtime is Go with a hundred pragmas).
+- **The seed never goes away.** Once a compiler is written in its own
+  language, building it requires a copy of it. Everyone lands
+  somewhere on the same short list: Go pins **Go 1.4** (the last C
+  version) as its bootstrap toolchain; Rust builds stage0 with the
+  **previous release**, downloaded; Zig ships **`zig1.wasm`**, a
+  portable blob, after years of a C++ stage1; GHC needs a prior GHC.
+  Nobody escapes it, and the ones who tried to (checked-in binaries)
+  are the ones people complain about.
 
 **Glide takes** the shortcut with eyes open: tree-walking interpreter
 in Go proves the risky semantics (generators, structured concurrency,
-comptime); the compiler frontend gets written in Glide and run on the
-interpreter (compilers are the ML feature set's best-case workload —
-ASTs are sum types, a checker is exhaustive matching); then a
-Glide→Go transpiler compiles itself. The runtime model was Go's from
-day one *precisely so this lowering is nearly 1:1* — GC, scheduler,
-defer, channels all prepaid and battle-tested, cross-compilation and
-static binaries free, bootstrap chain auditable from a mainstream
-toolchain. No binary seed, no trusting-trust anxiety. LLVM + own
-runtime stays the someday-mountain, optional.
+comptime); the checker is written in Go too (see the reversal in
+`glide/DESIGN-DECISIONS.md` — writing it in Glide first meant writing
+a checker in a language that checks nothing); the frontend is *then*
+rewritten in Glide against a proven design and a conformance corpus;
+then a Glide→Go transpiler compiles itself. The runtime model was Go's
+from day one *precisely so this lowering is nearly 1:1* — GC,
+scheduler, defer, channels all prepaid and battle-tested,
+cross-compilation and static binaries free, bootstrap chain auditable
+from a mainstream toolchain. Glide's seed problem is unusually cheap
+because the transpiler emits *Go source*: commit the generated Go and
+any Go toolchain rebuilds the chain — no binary seed, no
+trusting-trust anxiety. LLVM + own runtime is the someday-mountain,
+and the only step that removes Go from the pipeline rather than from
+the source tree.
 
 ## Embedding: the interpreter as a scripting library
 
@@ -1453,9 +1539,10 @@ runtime stays the someday-mountain, optional.
   being small and pinnable, not by decree.
 - **2006→today** — Lua 5.1 freezes in the wild: LuaJIT never leaves
   5.1, Redis embeds 5.1 and stays there, World of Warcraft likewise,
-  while Lua-the-language moves on to 5.4. Proof that a *frozen*
-  embedded version is a fully-lived life — the precedent for Glide's
-  freeze-at-self-hosting plan.
+  while Lua-the-language moves on to 5.4. Read correctly, this is
+  evidence about *hosts pinning*, not about upstream stopping: Lua kept
+  shipping. An earlier Glide plan cited it as the precedent for
+  freezing the interpreter at self-hosting; that inverted the lesson.
 - **2012–2024** — JS interpreters written in Go: otto (2012), goja
   (2016, ES5.1 in pure Go, much of ES6+ later), sobek (2024, Grafana's
   goja fork that scripts k6). The exact structural precedent — an interpreter in Go,
@@ -1463,15 +1550,18 @@ runtime stays the someday-mountain, optional.
   the language they embed is untyped.
 - **Counter-evidence** — embedding CPython: a large runtime, a GIL,
   and an embedding API that tracks the evolving language. Blender and
-  GIMP carry it; nobody calls it light. Tracking a moving language
-  from inside host binaries is the expensive branch — the one Glide
-  declines by freezing.
+  GIMP carry it; nobody calls it light. What makes it expensive is the
+  *API* surface and the runtime's size, not the fact that the language
+  moves — the distinction that killed Glide's freeze plan.
 
-**Glide takes** the Lua/goja lane: the tree-walking interpreter (which
-must exist for bootstrap anyway) gets a small public Go embedding API;
-hosts pin it as a Go module version; stdlib shims are injectable so
-the embedder chooses capabilities (untrusted scripts are never handed
-`fs` or `net`); and at self-hosting the embedded interpreter freezes
-rather than tracking the language, so the evolving language keeps
-exactly one implementation. Embedding never argues a language change —
-influence flows one way, compiled language to script, by decree.
+**Glide takes** the Lua/goja lane: the tree-walking interpreter gets a
+small public Go embedding API; hosts pin it as a Go module version;
+stdlib shims are injectable so the embedder chooses capabilities
+(untrusted scripts are never handed `fs` or `net`). The interpreter
+tracks the language rather than freezing at self-hosting — the
+"exactly one implementation" property that the freeze was meant to
+buy is delivered instead by the shared frontend (see *One frontend,
+two backends*), and delivered better, because the scripting tier stays
+the same language rather than becoming an older one. Embedding never
+argues a language change — influence flows one way, compiled language
+to script, by decree.

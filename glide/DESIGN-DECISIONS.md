@@ -1,8 +1,15 @@
 # Interpreter implementation decisions
 
 Language decisions live in `../DESIGN.md`. This file records how the
-*interpreter* (bootstrap step 1) is built, and which corners are
-deliberately cut because the real compiler makes them obsolete.
+*interpreter* is built, and which corners are deliberately cut.
+
+Note the change of footing as of M4: the interpreter is no longer
+"bootstrap step 1, retires later". It is a shipping tier — a
+statically-checked scripting language — sharing one frontend with the
+compiler. "The real compiler makes it obsolete" is no longer available
+as a justification for cutting a corner; a corner is either a stated
+tier difference (speed, and a binary that runs with nothing installed)
+or it is a bug.
 
 ## Milestones
 
@@ -21,16 +28,121 @@ deliberately cut because the real compiler makes them obsolete.
    language (no or-blocks, no derive — the dynamic shims stand in
    for `derive Json`/`Row` until the comptime era). One deviation
    recorded: `derive` itself is comptime-era work, not M3.
+4. **M4 (in progress): the checker.** Annotations stop being
+   documentation. Three landings:
+   - **M4a — representation (done).** No checking yet: a real
+     `ast.TypeExpr` replacing the annotation strings, generic parameter
+     lists parsed instead of discarded, byte-offset spans on every token
+     and AST node with caret-rendered diagnostics, and `load()` factored
+     into `internal/program` — the declaration table the checker and the
+     evaluator share.
+   - **M4b — the checker core.** Bidirectional local checking,
+     expected-type propagation, boxed `Option`, sized numerics in the
+     runtime, static versions of the rules currently enforced
+     dynamically, and `?` conversion resolved from real types.
+   - **M4c — generics and traits.** Declaration-site bound checking,
+     trait structural conformance. The interpreter runs generics
+     type-erased; monomorphisation is the compiled tier's problem.
 
 ## Decisions
 
-- **Dynamically checked.** Type annotations are parsed, kept as
-  strings, and ignored. The interpreter proves *semantics*; the
-  checker arrives with the Glide-written frontend (bootstrap step 2).
-  Writing a static checker in Go now would be thrown-away work.
-  Rules the compiler will enforce statically are enforced dynamically
-  instead so programs still can't cheat: mut, nested-shadow ban,
-  let-else divergence, the tail-value rule.
+- **Statically checked, and the checker is written here in Go.**
+  *Reverses the original M1 decision*, which was: "type annotations are
+  parsed, kept as strings, and ignored; the checker arrives with the
+  Glide-written frontend; writing a static checker in Go now would be
+  thrown-away work." Both halves of that turned out to be wrong.
+
+  The "thrown-away" half depended on the interpreter retiring at
+  self-hosting. It does not — it ships (`../DESIGN.md`, Implementation
+  path). Work that lands in a shipping tier is not thrown away, which
+  removes the entire basis of the deferral.
+
+  The sequencing half inverted its own dependency. The bootstrap
+  justified a Glide-written frontend on the grounds that "compilers are
+  the best-case workload for this feature set — ASTs are sum types, a
+  checker is exhaustive matching". True, and none of it was *available*:
+  exhaustiveness was dynamic, generics never reached the AST,
+  `Option<Option<T>>` was unrepresentable, trait conformance was
+  asserted rather than verified. That plan wrote the largest and most
+  type-dense Glide program that will ever exist in the one tier that
+  checks none of it.
+
+  What actually survives into Glide is not the Go code — it is the
+  design (type representation, bidirectional rules, expected-type
+  propagation, diagnostic wording) and the conformance corpus. Those are
+  the expensive part, they are cheaper to get right in a checked
+  language against an existing test suite, and having them turns the
+  Glide frontend into a transcription instead of a rediscovery.
+
+  Accepted cost: the Go frontend gets written once and ported once.
+- **The conformance corpus is a first-class artifact**, not Go table
+  tests: `testdata/conformance/**.gld`, each program carrying its
+  expected verdict and, for rejections, the exact diagnostic. Every
+  implementation must pass it unchanged — this Go checker, the Glide
+  port, and both backends. It is the device that makes "no drift between
+  tiers" checkable rather than merely intended, and it is why it gets
+  written alongside the first checker commit rather than afterwards.
+- **Types attach as side tables, not a second tree** (`go/types.Info`
+  shape): the checker annotates AST nodes rather than lowering to its
+  own IR. A separate typed tree would double the node definitions and
+  the eventual port cost, and buy nothing — the first backend emits Go,
+  so Go's compiler does the optimising an IR would exist to enable. It
+  also means the evaluator keeps walking the AST, so M4a and M4b need no
+  rewrite of `interp`. Revisit only at step 5 (own codegen), where a
+  real IR earns its place.
+- **The declaration table is one implementation, in `internal/program`.**
+  "Is `Red` a variant, and of what type?" and "does `Tree` have a method
+  `insert`?" have to get the same answer in both tiers, and the only
+  reliable way to guarantee that is one piece of code rather than two
+  that are meant to agree. `program.Load` indexes imports, fns, types,
+  variants, traits, methods and consts, and enforces the rules that need
+  no type information: nothing declared twice, no shadowing a builtin,
+  no impl for an unknown type, no unknown import.
+
+  What the host provides is passed in as `program.Known` (builtin names,
+  importable modules) rather than reached for, so the checker is handed
+  the same set the evaluator uses — a program that redeclares `println`
+  must fail identically in both tiers or they have already drifted.
+
+  Const *evaluation* deliberately stays in the interpreter: it produces
+  values, not declarations. The table records that a const exists and
+  where; the evaluator decides what it is worth.
+
+  Unlike the parser, this pass reports **every** collision and returns a
+  usable table alongside the error, because that is what the checker and
+  an editor both need.
+- **Positions are byte offsets; line and column are rendering.** Every
+  token and every AST node carries a `source.Span` (half-open byte
+  range); `source.File` turns an offset into line:col and a caret
+  snippet when a diagnostic is actually printed. M1–M3 carried a bare
+  `Line int` on about half the nodes and *nothing* on the rest — Param,
+  FieldDecl, Closure, every literal and every pattern — which put a
+  hard floor under diagnostic quality: "line 42" cannot point at one
+  field of three on that line. Columns count runes, not bytes, so a
+  multi-byte character earlier in the line doesn't shift the caret; the
+  caret's run-up is copied from the source so tabs stay aligned.
+- **Runtime errors carry spans too, not line numbers.** `rtErr` holds a
+  `source.Span` and renders through the same `source.File` as a parse
+  error, so both look identical and a checker diagnostic can never
+  disagree with a runtime one about where something is. This is a
+  two-tier consequence, not a cosmetic one: `glide run` is a shipping
+  tier, and its errors are the ones users see.
+- **Interpolation segments are lexed in file coordinates.** `LexAt`
+  takes the segment's byte offset, so a diagnostic inside `"{x + 1}"`
+  points into the string rather than at the string. The alternative —
+  lexing the snippet standalone and rebasing line numbers — is what
+  M1–M3 did, and it could never produce a column at all.
+- **The parser stays fail-fast; the *checker* is what needs to
+  continue.** `source.Bag` exists and collects, but the parser reports
+  one error and stops. Parser error recovery is a large, famously
+  low-yield feature: resynchronising a recursive-descent parser after a
+  syntax error reliably produces one true diagnostic followed by
+  several phantoms, and the phantoms train you to ignore the list. The
+  requirement that motivated a collector — DESIGN.md's typed holes,
+  where checking must continue past an error — belongs to the checker,
+  which is new code in M4b and gets built multi-error from the start.
+  Revisit only if editing real Glide shows one-error-per-parse actually
+  costs something.
 - **Go panics for runtime errors, explicit signals for Glide control
   flow.** `return` and `?` thread a `sig` value up the evaluator
   (they are semantics); runtime errors panic and are recovered once
@@ -172,13 +284,23 @@ deliberately cut because the real compiler makes them obsolete.
   `` `/notes/{id}` `` is the idiom, and it is exactly what raw
   strings were ratified for. Documented in stdlib.md.
 
-## Deliberately absent (after M3)
+## Scheduled for M4
 
-Static generics (parsed, ignored), trait *checking* (impl blocks
-register methods; conformance is asserted, not verified), `Mutex<T>`
-(stdlib-era; ownership-transfer culture first), `derive` (comptime
-era — the json/sql shims stand in), typed json decode / typed query
-rows (wait for derive), method values as closures (`x.method`
+Static generics (M4a parses type parameters and bounds into the AST;
+nothing checks them yet), trait *checking* (impl
+blocks register methods; conformance is asserted, not verified), boxed
+`Option`, sized numerics, `.Shorthand` resolved in the expected type
+rather than a global namespace, `Timeout` as a real type, static match
+exhaustiveness, receiver-mut on builtin methods, the spawn-captures-mut
+ban, integer literal range checking. Each has its own entry above or in
+`../docs/reference/language.md`; they are listed together here because
+they are one body of work, not a scattering of small ones.
+
+## Deliberately absent (after M4)
+
+`Mutex<T>` (stdlib-era; ownership-transfer culture first), `derive`
+(comptime era — the json/sql shims stand in), typed json decode / typed
+query rows (wait for derive), method values as closures (`x.method`
 unapplied), `or |e|` blocks (declined — see DESIGN.md), time
 formatting/parsing/calendars (the `time` module's own later design),
 error-to-status middleware for http (the one default mapping — Err →

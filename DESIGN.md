@@ -2,7 +2,9 @@
 
 **Glide**: effortless motion, no visible struggle, real speed —
 "human-friendly but performant" in one word. Binary: `glide`.
-File extension: `.gld`. Status: pre-implementation, semantics on paper.
+File extension: `.gld`. Status: M1–M3 shipped — the tree-walking
+interpreter runs the whole ratified surface (see `glide/DESIGN-DECISIONS.md`),
+but nothing is type-checked yet. M4, the checker, is in progress.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee
@@ -105,7 +107,16 @@ Glide takes both layers:
 - Static, strongly typed. **Function signatures always explicit** (they are
   documentation); type inference *inside* bodies only. Local-only inference
   keeps error messages pointing at the right line — whole-program
-  Hindley–Milner is why Haskell errors baffle.
+  Hindley–Milner is why Haskell errors baffle. Mandatory signatures also
+  buy a cheap checker: bidirectional checking, no unification across
+  function boundaries, no HM machinery. That is the payoff for the
+  discipline, and it is the whole reason M4 is tractable.
+- **The checker is mandatory in every tier, and there is no way to skip
+  it.** `glide run` type-checks before it executes; there is no
+  `--no-check`. An interpreter that can run unchecked code makes
+  unchecked Glide the de-facto scripting dialect and rots the annotations
+  back into comments — which is exactly the state M4 exists to end. A
+  check-only mode (`glide check`, like `go vet`) is fine; a skip is not.
 - **No null.** `T?` is sugar for `Option<T>`; the compiler forces handling
   of the empty case.
 - **Sum types + exhaustive matching** are the star feature. Modelling
@@ -1108,10 +1119,25 @@ Go's model, with its defects designed out:
   fuel-limited evaluation (instruction quota, exceeding is a compile
   error, explicitly raisable); deterministic by construction, so caching
   comptime results is always sound (the fast dev backend leans on this).
+- **Comptime is target-defined, never host-defined.** This is the one
+  place the shared frontend cannot make the two tiers agree for free. In
+  the interpreter, comptime and runtime are the same evaluator, so
+  consistency is automatic. In the compiler, comptime runs on the *host*
+  while the program runs on the *target* — and cross-compiling is the
+  normal case here, not the exception (macOS dev machine, linux/arm64
+  deploy). So every platform-dependent quantity a comptime expression
+  can observe — integer widths, pointer size, endianness, `usize` —
+  resolves against the **target**, and a comptime expression that could
+  only be answered by the host is a compile error rather than a silently
+  host-flavoured answer. Zig hit exactly this edge. Decided now, while
+  it is nearly free; retrofitting it after `derive` is in use would not
+  be.
 - **v0 scope**: const eval + reflection API + `derive`. The reflection
   API is the genuinely hard design problem (prior art: Zig `@typeInfo`,
   C# source generators — neither fully right); prove it in the
-  interpreter before any backend exists.
+  interpreter before any backend exists. Ordering note: reflection is a
+  *view onto the type representation*, so it lands after M4 — designing
+  it first means designing the type model twice.
 - **Known gap, accepted forever**: DSL-style macros (`html!` templates,
   new syntax). Comptime functions over string constants get us
   compile-checked SQL; they don't get new syntax. Embedded custom-syntax
@@ -1896,35 +1922,81 @@ Two mountains wearing one name; the compiler is a hill with a shortcut,
 the runtime is the actual decade — deferred indefinitely by the
 shortcut.
 
+**One frontend, two backends.** Lexer, parser and checker are a single
+implementation, shared. The interpreter and the compiler differ in how
+they *execute* a checked program — never in what they accept, and never
+in what it means. Drift between tiers is then unreachable by
+construction rather than merely tested for: "runs interpreted, fails
+compiled" is the failure mode that discredits every dual-tier language,
+and it cannot happen when exactly one thing decides. Prior art is
+strong — OCaml's `ocamlc`/`ocamlopt`/toplevel have shared a frontend
+since the early 90s, and rustc's own const-evaluator *is* the Miri
+engine, interpreting the same MIR its codegen backends consume.
+
+**Both tiers ship; neither is scaffolding.** The interpreter does not
+retire at self-hosting. `glide run` is a statically-checked scripting
+language in one static binary, which is a product in its own right —
+the niche is real and thinly served. The compiled tier's only
+user-visible advantages are speed, and a binary that runs on a machine
+with nothing installed.
+
+**The end state is Glide, all the way down.** Frontend, checker,
+interpreter and transpiler all written in Glide; Go present only as a
+compilation target and a bootstrap seed, never in the source of truth.
+Native codegen with our own GC and scheduler (step 5) is a stated
+ambition rather than a v1 goal — but a stated one, which means
+architectural choices along the way must not foreclose it. In
+particular, **Go's runtime semantics must not leak into the language
+spec**: anything two backends could implement differently (map
+iteration order, integer overflow, evaluation order, defer-vs-panic
+ordering, float rounding) gets specified in the language, or is
+*deliberately* declared unspecified. It must never be "whatever the
+interpreter happened to do first".
+
 The bootstrap sequence:
-1. **Go tree-walking interpreter** — proves semantics (generators,
-   structured concurrency, comptime reflection are the three riskiest).
-   Stdlib as host shims (Go code behind Glide interfaces — which is
-   also how SQLite works day one, via modernc).
-2. **Compiler frontend written in Glide** (lexer/parser/checker), run
-   on the interpreter. Dogfooding starts here — compilers are the
-   best-case workload for this feature set (ASTs are sum types, a
+1. **Go tree-walking interpreter** (M1–M3, done) — proves semantics
+   (generators ✓, structured concurrency ✓; comptime reflection is the
+   third and still unproven). Stdlib as host shims (Go code behind
+   Glide interfaces — which is also how SQLite works day one, via
+   modernc).
+2. **The checker, in Go** (M4). Not a detour: this is the *reference
+   implementation of the frontend architecture*, designed in a language
+   that checks the work, against an existing test suite, and later
+   transcribed into Glide rather than rediscovered there. Writing it
+   here also stops step 3 from being written in a tier that checks
+   nothing — see the reversal recorded in `glide/DESIGN-DECISIONS.md`.
+3. **Compiler frontend written in Glide** (lexer/parser/checker), run
+   on the interpreter. Dogfooding at scale starts here — compilers are
+   the best-case workload for this feature set (ASTs are sum types, a
    checker is exhaustive matching, `?` threads the phases; the ML
-   family was designed for this). The compiler in Glide will be nicer
-   code than the interpreter that runs it.
-3. **First native backend: a Glide→Go transpiler**, which then
-   compiles itself; the interpreter retires to bootstrap seed (and
-   lives on, frozen, as the embedding library — next section). Our
-   runtime model was Go's from day one — green threads, tracing GC,
-   defer, channels, value structs — so Glide lowers onto Go source
-   nearly 1:1 and every hellish part is prepaid: GC + scheduler (Go's,
-   battle-tested), cross-compilation (GOOS/GOARCH), static binaries,
-   readable/debuggable output. Auditable bootstrap chain from a
-   mainstream toolchain — no binary seed, no trusting-trust anxiety.
-   Resolves the tiered-backend plan for years: interpreter = dev tier,
-   transpiled Go = shipping tier.
-4. **Someday, optionally: LLVM + own runtime** — the real mountain.
-   Runtime code runs underneath the language's guarantees (no-GC
-   unsafe dialect, compiler special-casing — Go's runtime is Go with a
-   hundred pragmas). Only mandatory when we want our own release
-   backend; halfway camps exist (LLVM code against a minimal C or
-   Go-linked runtime). The unsafe section's primitives (raw pointers,
-   pinning, moving-GC coupling) are exactly what this needs.
+   family was designed for this). It replaces the Go frontend in both
+   tiers; the conformance corpus is what proves the replacement is
+   faithful.
+4. **First native backend: a Glide→Go transpiler**, which then
+   compiles itself. Our runtime model was Go's from day one — green
+   threads, tracing GC, defer, channels, value structs — so Glide
+   lowers onto Go source nearly 1:1 and every hellish part is prepaid:
+   GC + scheduler (Go's, battle-tested), cross-compilation
+   (GOOS/GOARCH), static binaries, readable/debuggable output.
+   Auditable bootstrap chain from a mainstream toolchain — no binary
+   seed, no trusting-trust anxiety.
+5. **Someday: LLVM + own runtime** — the real mountain, and the only
+   step that removes Go from the pipeline entirely. Runtime code runs
+   underneath the language's guarantees (no-GC unsafe dialect, compiler
+   special-casing — Go's runtime is Go with a hundred pragmas). Only
+   mandatory when we want our own release backend; halfway camps exist
+   (LLVM code against a minimal C or Go-linked runtime). The unsafe
+   section's primitives (raw pointers, pinning, moving-GC coupling) are
+   exactly what this needs.
+
+**The bootstrap seed is permanent, not transitional.** Once the
+frontend is Glide, building Glide requires a Glide — the universal
+condition (Go needs Go 1.4, rustc needs rustc N−1, Zig ships
+`zig1.wasm`). Glide's version is unusually cheap because step 4 emits
+*Go source*: commit that generated Go as the seed and any Go toolchain
+bootstraps the chain. "No Go" therefore means no Go in the source of
+truth and none at runtime — not no Go on the build machine, which is
+the same relationship most languages have with a C compiler.
 
 Known wrinkle to de-risk **early**: lowering Glide semantics Go lacks —
 sum types → tagged structs (mechanical), matches → switches
@@ -1949,11 +2021,18 @@ scripting tail wagging the compiled dog. Decided:
   they're awkward to marshal to Go, no dynamic-eval softening of the
   type story. The moment embedding argues *for* a language change, it
   loses.
-- **Post-self-hosting, the embedded interpreter freezes** at the
-  then-current language version instead of tracking — the evolving
-  language keeps exactly one implementation. Frozen ≠ dead: it remains
-  a complete, type-checked scripting language (the Lua 5.1 precedent —
-  see LINEAGE).
+- **The interpreter tracks the language; it does not freeze.** An
+  earlier draft had it freezing at self-hosting, so that "the evolving
+  language keeps exactly one implementation". That goal was right and
+  the mechanism was wrong: under one-frontend-two-backends there *is*
+  exactly one implementation of the language — the shared frontend —
+  and two ways of executing what it accepts. Freezing bought
+  drift-avoidance at the price of the scripting tier slowly becoming a
+  different, older language. Sharing the frontend buys the same
+  guarantee and costs nothing. Hosts still pin a version, as they pin
+  any Go module; that is ordinary dependency management, not a language
+  freeze (the Lua 5.1 precedent in LINEAGE describes what pinning looks
+  like in the wild, not a plan to stop shipping).
 - **Stdlib shims are injectable per host.** They are already Go code
   behind Glide interfaces; making the provided set *chosen by the
   embedder, not hard-wired* buys capability-style sandboxing for free —
@@ -1978,6 +2057,39 @@ scripting tail wagging the compiled dog. Decided:
 - **Embedding API shape** — Glide↔Go value-marshaling rules (sum
   types/`Result`/`Option` as Go values), interrupt and resource-limit
   surface. Decide while wrapping the interpreter, not before.
+- **128-bit integers.** `i128`/`u128` are ratified in the primitive
+  types, and Go has no native 128-bit integer to lower them onto in the
+  interpreter. Three answers: `big.Int` (correct, slow, and a Value
+  representation that lies about being a machine integer), a hi/lo pair
+  (fast, real work for every operator), or defer the two types past M4.
+  Decide before sized numerics land, because the Value representation is
+  hard to change afterwards.
+- **Does the runtime keep the dynamic checks once the checker is
+  static?** `mut`, the nested-shadow ban, let-else divergence, the
+  tail-value rule and arity/field existence are all enforced in the
+  evaluator today, and ~140 Go tests plus `GLIDE-BY-EXAMPLE.md`'s
+  `// error:` contracts assert their exact message text. Belt-and-braces
+  costs a duplicated rule in two places forever; removing them makes the
+  checker load-bearing for memory safety of the evaluator's own
+  assumptions. Lean: keep them, as assertions rather than diagnostics —
+  a checker bug should surface as a loud interpreter panic, not as
+  undefined behaviour.
+- **Closure parameter annotations.** The book says they are allowed and
+  rarely needed; no grammar for them exists (the parser takes bare
+  identifiers), and bidirectional checking infers them from context
+  anyway. Either the grammar arrives in M4 or the documentation changes
+  — pick one rather than letting the discrepancy persist.
+- **Map iteration order** is currently recorded as *provisional*
+  interpreter behaviour (insertion-ordered). With two backends it has to
+  become a language decision: specified (insertion order, and the
+  transpiler must reproduce it) or deliberately unspecified (and then
+  the interpreter should randomise, Go-style, so programs cannot come to
+  depend on it). Silence is the one option that guarantees drift.
+- **A REPL.** A scripting tier eventually wants one, and static checking
+  plus an interactive prompt is solved but not free (GHCi, F#
+  Interactive) — it needs incremental checking and a story for
+  redefinition. Not M4; worth knowing it is coming before the checker's
+  API ossifies around whole-file checking.
 
 
 

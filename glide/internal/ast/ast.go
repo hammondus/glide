@@ -1,11 +1,31 @@
-// Package ast defines the syntax tree for the wordfreq subset of
-// Glide. Type annotations are carried as raw text: the interpreter is
-// dynamically checked and the real checker arrives with the
-// Glide-written frontend (bootstrap step 2).
+// Package ast defines the syntax tree for Glide.
+//
+// Type annotations are still carried as raw text, and M4a replaces that
+// with a real TypeExpr. The strings are a leftover from M1-M3, when the
+// interpreter was dynamically checked; they are not a design position.
+// See ../../DESIGN-DECISIONS.md for the reversal that scheduled the
+// checker here in Go rather than in a later Glide-written frontend.
 package ast
 
+import (
+	"strings"
+
+	"glide/internal/source"
+)
+
+// Import is `import name` — a span so an unknown module can be
+// pointed at rather than merely named.
+type Import struct {
+	source.Span
+	Name string
+}
+
 type File struct {
-	Imports []string
+	// Source is what every node's Span indexes into: the checker and
+	// the interpreter both need it to render a diagnostic, and hanging
+	// it here means neither has to be handed it separately.
+	Source  *source.File
+	Imports []Import
 	Funcs   []*FuncDecl
 	Types   []*TypeDecl
 	Impls   []*ImplBlock
@@ -23,22 +43,102 @@ const (
 	MutSelf
 )
 
+// TypeKind discriminates the three shapes a written type can take.
+// It is an explicit tag rather than "exactly one field is set" because
+// the checker switches on it constantly and a missed case should be a
+// visible hole, not a silent zero value.
+type TypeKind int
+
+const (
+	TypeName  TypeKind = iota // Int, List<Int>, Result<T, E>
+	TypeTuple                 // (A, B)
+	TypeUnit                  // ()
+)
+
+// TypeParam is one entry in a *declaration-site* `<...>` list:
+// `<T>`, or `<T: Ord + Hash>`. Bounds are trait names exactly as
+// written — resolving them is the checker's job.
+//
+// Declaration sites (fn, type, trait) bind parameters and may carry
+// bounds. `impl` headers do not: `impl Iterable<T> for Tree<T>`
+// mentions T twice and binds it once, so the parser records those as
+// type *arguments* (TypeExpr) and leaves "which of these are binders"
+// to the checker. That reading also survives a specialised impl like
+// `impl Stack<Int>`, which the grammar does not currently forbid.
+type TypeParam struct {
+	Name   string
+	Bounds []*TypeExpr // nil = unconstrained
+	source.Span
+}
+
+// TypeExpr is a type as *written*, not a resolved type: `Foo` is a
+// name the checker still has to look up, and two TypeExprs spelling
+// the same type are distinct nodes. Resolution attaches separately,
+// go/types.Info-style (see ../../DESIGN-DECISIONS.md).
+//
+// M1-M3 kept these as display strings. That made three things
+// impossible: pointing a diagnostic *inside* a type, walking a type
+// without re-parsing it, and telling `Result<A, B>` from a type whose
+// name happens to contain a comma. String() reproduces the old display
+// form exactly, so error text and `glide fmt` output are unchanged.
+type TypeExpr struct {
+	Kind     TypeKind
+	Name     string      // TypeName only
+	Args     []*TypeExpr // TypeName only: List<Int> -> [Int]
+	Elems    []*TypeExpr // TypeTuple only, always >= 2
+	Optional bool        // trailing `?`, any kind
+	source.Span
+}
+
+func (t *TypeExpr) String() string {
+	if t == nil {
+		return ""
+	}
+	var s string
+	switch t.Kind {
+	case TypeUnit:
+		s = "()"
+	case TypeTuple:
+		parts := make([]string, len(t.Elems))
+		for i, e := range t.Elems {
+			parts[i] = e.String()
+		}
+		s = "(" + strings.Join(parts, ", ") + ")"
+	default:
+		s = t.Name
+		if len(t.Args) > 0 {
+			parts := make([]string, len(t.Args))
+			for i, a := range t.Args {
+				parts[i] = a.String()
+			}
+			s += "<" + strings.Join(parts, ", ") + ">"
+		}
+	}
+	if t.Optional {
+		s += "?"
+	}
+	return s
+}
+
 type FuncDecl struct {
-	Name    string
-	Self    SelfMode
-	Params  []Param
-	RetType string // "" = declares no return value
-	Body    *Block
-	Line    int
+	Name       string
+	TypeParams []TypeParam
+	Self       SelfMode
+	Params     []Param
+	RetType    *TypeExpr // nil = declares no return value
+	Body       *Block
+	source.Span
 }
 
 type FieldDecl struct {
+	source.Span
 	Name string
-	Type string
+	Type *TypeExpr
 	Pub  bool
 }
 
 type VariantDecl struct {
+	source.Span
 	Name   string
 	Arity  int         // positional payload count; 0 = bare variant
 	Fields []FieldDecl // named-field form: NotFound{ id: Int }
@@ -47,11 +147,12 @@ type VariantDecl struct {
 // TypeDecl: exactly one of Fields (struct) / Variants (sum) /
 // Distinct (nominal wrapper base type) is set.
 type TypeDecl struct {
-	Name     string
-	Fields   []FieldDecl
-	Variants []VariantDecl
-	Distinct string
-	Line     int
+	Name       string
+	TypeParams []TypeParam
+	Fields     []FieldDecl
+	Variants   []VariantDecl
+	Distinct   *TypeExpr
+	source.Span
 }
 
 // ConstDecl is module-level `const name = expr`: evaluated once at
@@ -60,49 +161,58 @@ type TypeDecl struct {
 type ConstDecl struct {
 	Name string
 	E    Expr
-	Line int
+	source.Span
 }
 
 // TraitDecl: methods with a Body are defaults, inherited by any type
 // that declares `impl Trait for Type` and doesn't override; a nil
 // Body is a required signature (unverified until the checker).
 type TraitDecl struct {
-	Name string
-	Fns  []*FuncDecl
-	Line int
+	Name       string
+	TypeParams []TypeParam
+	Fns        []*FuncDecl
+	source.Span
 }
 
+// ImplBlock: `impl Tree<T>` or `impl Iterable<T> for Tree<T>`.
+// TargetArgs/TraitArgs hold the `<...>` lists as type *arguments* —
+// see TypeParam for why an impl header is not a declaration site.
 type ImplBlock struct {
-	Target string // type the methods attach to
-	Trait  string // "" for inherent impls
-	Fns    []*FuncDecl
-	Line   int
+	Target     string // type the methods attach to
+	TargetArgs []*TypeExpr
+	TraitArgs  []*TypeExpr
+	Trait      string // "" for inherent impls
+	Fns        []*FuncDecl
+	source.Span
 }
 
 type TestDecl struct {
 	Name   string
 	Params []Param
 	Body   *Block
-	Line   int
+	source.Span
 }
 
 type BenchDecl struct {
 	Name string
 	Body *Block
-	Line int
+	source.Span
 }
 
 // Param: Default (nil = required) is re-evaluated per call, in scope
 // of the params to its left — never Python's shared-once value.
 type Param struct {
-	Name, Type string
-	Default    Expr
+	source.Span
+	Name    string
+	Type    *TypeExpr
+	Default Expr
 }
 
 // Block: HasDefer/HasFns are set at parse when a DeferStmt/FnStmt
 // sits directly in Stmts, so evalBlock's hot path skips the
 // bookkeeping entirely.
 type Block struct {
+	source.Span
 	Stmts    []Stmt
 	HasDefer bool
 	HasFns   bool
@@ -114,27 +224,27 @@ type Stmt interface{ stmt() }
 
 type LetStmt struct {
 	Pat  Pattern
-	Type string
+	Type *TypeExpr // nil = no annotation; inferred from Init
 	Init Expr
 	Else *Block // nil unless `let … else`
-	Line int
+	source.Span
 }
 
 type AssignStmt struct {
 	Target Expr   // IdentExpr or Index; IdentExpr "_" discards
 	Op     string // "=", "+=", "-="
 	Value  Expr
-	Line   int
+	source.Span
 }
 
 type ExprStmt struct {
-	E    Expr
-	Line int
+	E Expr
+	source.Span
 }
 
 type ReturnStmt struct {
-	E    Expr // nil = return unit
-	Line int
+	E Expr // nil = return unit
+	source.Span
 }
 
 type ForStmt struct {
@@ -143,7 +253,7 @@ type ForStmt struct {
 	Cond  Expr    // conditional loop only; all nil = loop forever
 	Body  *Block
 	Label string // `search: for … { break search }`; "" = unlabeled
-	Line  int
+	source.Span
 }
 
 // YieldStmt makes the enclosing function a generator. From delegates
@@ -151,31 +261,34 @@ type ForStmt struct {
 type YieldStmt struct {
 	E    Expr
 	From bool
-	Line int
+	source.Span
 }
 
 type BreakStmt struct {
 	Label string // "" = nearest loop
-	Line  int
+	source.Span
 }
 
 type ContinueStmt struct {
 	Label string // "" = nearest loop
-	Line  int
+	source.Span
 }
 
 // FnStmt is a nested fn: Rust's rule — a plain function that does
 // NOT capture enclosing locals (capture is what closures are for).
 // Hoisted to block entry, so helpers read fine below their callers
 // and siblings can be mutually recursive.
-type FnStmt struct{ Decl *FuncDecl }
+type FnStmt struct {
+	source.Span
+	Decl *FuncDecl
+}
 
 // DeferStmt: Err marks `errdefer` — runs only when the enclosing
 // block exits on the error path.
 type DeferStmt struct {
 	Body *Block
 	Err  bool
-	Line int
+	source.Span
 }
 
 func (*LetStmt) stmt()      {}
@@ -194,16 +307,21 @@ func (*FnStmt) stmt()       {}
 type Pattern interface{ pat() }
 
 type IdentPat struct {
+	source.Span
 	Name string
 	Mut  bool
 }
-type WildPat struct{}
-type TuplePat struct{ Elems []Pattern }
+type WildPat struct{ source.Span }
+type TuplePat struct {
+	source.Span
+	Elems []Pattern
+}
 
 // ListPat: Elems holds the non-rest element patterns; Rest is the
 // index in Elems where a `..rest` sits (-1 for exact-arity), RestName
 // its binding name ("_" discards).
 type ListPat struct {
+	source.Span
 	Elems    []Pattern
 	Rest     int
 	RestName string
@@ -213,6 +331,7 @@ type ListPat struct {
 // variant. In patterns, case is load-bearing: capitalised names are
 // constructors, lowercase names bind.
 type CtorPat struct {
+	source.Span
 	Name string
 	Args []Pattern
 }
@@ -223,6 +342,7 @@ type CtorPat struct {
 // change nothing at match sites) — without it every field must be
 // mentioned, enforced when the pattern is applied.
 type FieldPat struct {
+	source.Span
 	Name string
 	Pat  Pattern
 }
@@ -230,20 +350,34 @@ type StructPat struct {
 	Type   string
 	Fields []FieldPat
 	Rest   bool
-	Line   int
+	source.Span
 }
 
 // Literal patterns match by equality; range patterns by half-open
 // containment — the same meaning `..` has everywhere else.
-type IntPat struct{ V int64 }
-type StrPat struct{ V string }
-type BoolPat struct{ V bool }
+type IntPat struct {
+	source.Span
+	V int64
+}
+type StrPat struct {
+	source.Span
+	V string
+}
+type BoolPat struct {
+	source.Span
+	V bool
+}
 type RangePat struct {
+	source.Span
 	Lo, Hi int64
 	Incl   bool // `..=`
 }
-type RunePat struct{ V rune }
+type RunePat struct {
+	source.Span
+	V rune
+}
 type RuneRangePat struct {
+	source.Span
 	Lo, Hi rune
 	Incl   bool // `..=`
 }
@@ -265,13 +399,26 @@ func (*RuneRangePat) pat() {}
 
 type Expr interface{ expr() }
 
-type IntLit struct{ V int64 }
-type FloatLit struct{ V float64 }
-type BoolLit struct{ V bool }
-type RuneLit struct{ V rune }
-type UnitLit struct{}
+type IntLit struct {
+	source.Span
+	V int64
+}
+type FloatLit struct {
+	source.Span
+	V float64
+}
+type BoolLit struct {
+	source.Span
+	V bool
+}
+type RuneLit struct {
+	source.Span
+	V rune
+}
+type UnitLit struct{ source.Span }
 
 type StrPart struct {
+	source.Span
 	IsExpr bool
 	Lit    string
 	E      Expr
@@ -279,14 +426,14 @@ type StrPart struct {
 }
 type StrLit struct {
 	Parts []StrPart
-	Line  int
+	source.Span
 }
 
 // BlockExpr is a bare { … } in expression or statement position: a
 // scope whose tail expression is its value.
 type BlockExpr struct {
 	Body *Block
-	Line int
+	source.Span
 }
 
 // ScopeExpr is `scope [(config)] [handle] { body }` — a structured-
@@ -298,7 +445,7 @@ type ScopeExpr struct {
 	Timeout  Expr
 	Deadline Expr
 	Body     *Block
-	Line     int
+	source.Span
 }
 
 // SelectExpr waits on multiple channel operations; arms wear match's
@@ -306,7 +453,7 @@ type ScopeExpr struct {
 // recv (Pat + Ch), send (Ch + SendVal), or else (Else).
 type SelectExpr struct {
 	Arms []SelectArm
-	Line int
+	source.Span
 }
 type SelectArm struct {
 	Pat     Pattern // recv arms: pattern over the Option<T>
@@ -315,23 +462,32 @@ type SelectArm struct {
 	Else    bool
 	Guard   Expr // nil = always enabled; evaluated once at entry
 	Body    Expr
-	Line    int
+	source.Span
 }
 
 type IdentExpr struct {
 	Name string
-	Line int
+	source.Span
 }
 
-type TupleLit struct{ Elems []Expr }
-type ListLit struct{ Elems []Expr }
-type MapLit struct{ Keys, Vals []Expr }
+type TupleLit struct {
+	source.Span
+	Elems []Expr
+}
+type ListLit struct {
+	source.Span
+	Elems []Expr
+}
+type MapLit struct {
+	source.Span
+	Keys, Vals []Expr
+}
 
 // Spread is `..xs` inside a list literal — the only place the parser
 // creates one. The spread value may be any iterable.
 type Spread struct {
-	E    Expr
-	Line int
+	E Expr
+	source.Span
 }
 
 // DotName is `.Variant` — Swift's dot shorthand. M2 resolves it in
@@ -339,23 +495,23 @@ type Spread struct {
 // checker era resolves it in the expected type instead.
 type DotName struct {
 	Name string
-	Line int
+	source.Span
 }
 
 type Binary struct {
 	Op   string
 	L, R Expr
-	Line int
+	source.Span
 }
 type Unary struct {
-	Op   string
-	X    Expr
-	Line int
+	Op string
+	X  Expr
+	source.Span
 }
 type RangeExpr struct {
 	Lo, Hi Expr
 	Incl   bool // `..=` — hi included
-	Line   int
+	source.Span
 }
 
 // Call: Names parallels Args ("" = positional; nil = all positional).
@@ -364,28 +520,29 @@ type Call struct {
 	Fn    Expr
 	Args  []Expr
 	Names []string
-	Line  int
+	source.Span
 }
 type Index struct {
 	X, I Expr
-	Line int
+	source.Span
 }
 type Field struct {
 	X    Expr
 	Name string
-	Line int
+	source.Span
 }
 type TupleIndex struct {
-	X    Expr
-	N    int
-	Line int
+	X Expr
+	N int
+	source.Span
 }
 type Try struct {
-	X    Expr
-	Line int
+	X Expr
+	source.Span
 }
 
 type Closure struct {
+	source.Span
 	Params    []string
 	BodyExpr  Expr // one of BodyExpr / BodyBlock is set
 	BodyBlock *Block
@@ -396,7 +553,7 @@ type If struct {
 	Then      *Block
 	ElseIf    Expr // *If or *IfLet — either form may chain
 	ElseBlock *Block
-	Line      int
+	source.Span
 }
 
 // IfLet unwraps an Option: pattern binds the inner value when the
@@ -407,7 +564,7 @@ type IfLet struct {
 	Then      *Block
 	ElseIf    Expr // *If or *IfLet — either form may chain
 	ElseBlock *Block
-	Line      int
+	source.Span
 }
 
 // StructLit: Type{ name: expr, ..Base }. Base (may be nil) supplies
@@ -417,7 +574,7 @@ type StructLit struct {
 	Names []string
 	Vals  []Expr
 	Base  Expr
-	Line  int
+	source.Span
 }
 
 // MatchArm: Pats are comma alternatives (`1, 2 =>`, Go-style); with
@@ -426,13 +583,13 @@ type MatchArm struct {
 	Pats  []Pattern
 	Guard Expr // nil = unguarded
 	Body  Expr
-	Line  int
+	source.Span
 }
 
 type Match struct {
 	X    Expr
 	Arms []MatchArm
-	Line int
+	source.Span
 }
 
 // CondMatch is subjectless `match { cond => … }`: Go's expressionless
@@ -440,11 +597,11 @@ type Match struct {
 type CondArm struct {
 	Cond Expr // nil = the `_` arm
 	Body Expr
-	Line int
+	source.Span
 }
 type CondMatch struct {
 	Arms []CondArm
-	Line int
+	source.Span
 }
 
 func (*IntLit) expr()     {}

@@ -1,6 +1,6 @@
 # Glide Standard Library Reference
 
-What a running program can call **today**, in the M2 interpreter.
+What a running program can call **today**, in the M3 interpreter.
 The designed stdlib — what this grows into — lives in
 `STDLIB-GOALS.md` (aspirational inventory) and `DESIGN.md` (committed
 designs); this file only documents what executes. In the interpreter

@@ -79,9 +79,9 @@ func (in *Interp) runCase(t *ast.TestDecl, args []Value) (err error) {
 		switch p := recover().(type) {
 		case nil:
 		case testFail:
-			err = fmt.Errorf("line %d: %s", p.line, p.msg)
+			err = in.errAt(p.at, "%s", p.msg)
 		case rtErr:
-			err = fmt.Errorf("line %d: %s", p.line, p.msg)
+			err = in.errAt(p.at, "%s", p.msg)
 		case exitPanic:
 			err = fmt.Errorf("test called os.exit(%d)", p.code)
 		default:
@@ -92,7 +92,7 @@ func (in *Interp) runCase(t *ast.TestDecl, args []Value) (err error) {
 	defer in.exitRoot()
 	env := newEnv(in.global, true)
 	for i, p := range t.Params {
-		env.declare(p.Name, args[i], false, t.Line)
+		env.declare(p.Name, args[i], false, t.Span)
 	}
 	_, _ = in.evalBlock(t.Body, env)
 	return nil
@@ -109,16 +109,33 @@ func describeArgs(params []ast.Param, args []Value) string {
 // generate builds a value for a parameter type. Case 0 is always the
 // simplest value the type has — the empty-case bug is too common to
 // leave to chance.
-func generate(typ string, rng *rand.Rand, caseNo int) (Value, error) {
-	switch typ {
+//
+// Matching on the TypeExpr rather than its spelling is what lets
+// List<T> recurse: M1-M3 switched on the string "List<Int>" and so
+// supported exactly that one list. shrinkValue is already structural,
+// so nothing downstream needed to change.
+func generate(typ *ast.TypeExpr, rng *rand.Rand, caseNo int) (Value, error) {
+	if typ == nil || typ.Kind != ast.TypeName || typ.Optional {
+		return nil, fmt.Errorf("cannot generate values of type %s (supported: Int, Bool, String, List<T>)", typ)
+	}
+	switch typ.Name {
 	case "Int":
+		if len(typ.Args) != 0 {
+			break
+		}
 		if caseNo == 0 {
 			return IntV(0), nil
 		}
 		return IntV(rng.Intn(201) - 100), nil
 	case "Bool":
+		if len(typ.Args) != 0 {
+			break
+		}
 		return BoolV(caseNo%2 == 0), nil
 	case "String":
+		if len(typ.Args) != 0 {
+			break
+		}
 		if caseNo == 0 {
 			return StrV(""), nil
 		}
@@ -128,18 +145,28 @@ func generate(typ string, rng *rand.Rand, caseNo int) (Value, error) {
 			sb.WriteByte(byte('a' + rng.Intn(26)))
 		}
 		return StrV(sb.String()), nil
-	case "List<Int>":
+	case "List":
+		if len(typ.Args) != 1 {
+			break
+		}
 		if caseNo == 0 {
-			return &ListV{}, nil
+			return &ListV{}, nil // case 0 is the empty list, whatever the element type
 		}
 		n := rng.Intn(30)
 		l := &ListV{}
 		for i := 0; i < n; i++ {
-			l.Elems = append(l.Elems, IntV(rng.Intn(201)-100))
+			// Element case numbers start at 1: case 0 is reserved for
+			// "the simplest value", and a list of thirty zeroes is a
+			// worse test than a list of thirty random elements.
+			e, err := generate(typ.Args[0], rng, i+1)
+			if err != nil {
+				return nil, err
+			}
+			l.Elems = append(l.Elems, e)
 		}
 		return l, nil
 	}
-	return nil, fmt.Errorf("cannot generate values of type %s (supported: Int, Bool, String, List<Int>)", typ)
+	return nil, fmt.Errorf("cannot generate values of type %s (supported: Int, Bool, String, List<T>)", typ)
 }
 
 // shrink greedily minimises failing inputs: for lists, fewer

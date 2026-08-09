@@ -1,8 +1,11 @@
 package lexer
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"glide/internal/source"
 )
 
 func kinds(t *testing.T, src string) []Kind {
@@ -109,30 +112,47 @@ func TestNestedStringInInterpolation(t *testing.T) {
 	}
 }
 
+// lexErr lexes src and renders any error the way the CLI would. A
+// lexer error carries its position as a byte offset and no file, so
+// rendering is what turns it into "name:line:col: message" — testing
+// the rendered form exercises the whole chain rather than a prefix the
+// lexer used to paste on by hand.
+func lexErr(t *testing.T, src string) string {
+	t.Helper()
+	_, err := Lex(src)
+	if err == nil {
+		t.Fatalf("Lex(%q) succeeded, want an error", src)
+	}
+	var d source.Diagnostic
+	if !errors.As(err, &d) {
+		t.Fatalf("Lex(%q) error is not positioned: %v", src, err)
+	}
+	return source.NewFile("t.gld", src).Render(d)
+}
+
 func TestStringErrorDiagnostics(t *testing.T) {
 	// A missing '}' before more interpolations must be caught at the
 	// stray '{' inside the spec, not misreported as an unterminated
 	// string when the closing quote is later mistaken for an opener.
-	_, err := Lex(`println("{"total":10{qty:4}{price:7}")`)
-	if err == nil || !strings.Contains(err.Error(), "format spec") {
-		t.Fatalf("missing '}' in spec: got %v", err)
+	got := lexErr(t, `println("{"total":10{qty:4}{price:7}")`)
+	if !strings.Contains(got, "format spec") {
+		t.Fatalf("missing '}' in spec: got %v", got)
 	}
-	if !strings.Contains(err.Error(), "1:21") {
-		t.Fatalf("wrong position for stray '{': got %v", err)
+	if !strings.Contains(got, "t.gld:1:21:") {
+		t.Fatalf("wrong position for stray '{': got %v", got)
 	}
 
 	// A genuinely missing closing quote reports the string's opening
 	// column so it can't be confused with an interpolation error.
-	_, err = Lex(`println("{"total":10}{qty:4}")` + "\n" + `println("oops)`)
-	if err == nil || !strings.Contains(err.Error(), "2:15: unterminated string (opened at column 9)") {
-		t.Fatalf("missing closing quote: got %v", err)
+	got = lexErr(t, `println("{"total":10}{qty:4}")`+"\n"+`println("oops)`)
+	if !strings.Contains(got, "t.gld:2:15: unterminated string (opened at column 9)") {
+		t.Fatalf("missing closing quote: got %v", got)
 	}
 
 	// A quote inside an interpolation running to end-of-line hints at
 	// the likely dropped '}'.
-	_, err = Lex(`"{f("oops)`)
-	if err == nil || !strings.Contains(err.Error(), "missing '}'") {
-		t.Fatalf("unterminated nested string: got %v", err)
+	if got := lexErr(t, `"{f("oops)`); !strings.Contains(got, "missing '}'") {
+		t.Fatalf("unterminated nested string: got %v", got)
 	}
 }
 

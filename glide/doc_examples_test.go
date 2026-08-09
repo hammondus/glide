@@ -8,6 +8,7 @@ package glide_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"glide/internal/interp"
 	"glide/internal/parser"
+	"glide/internal/source"
 )
 
 type docBlock struct {
@@ -79,7 +81,7 @@ func TestDocExamples(t *testing.T) {
 			}
 
 			run := func() (string, error) {
-				file, err := parser.ParseFile(b.src)
+				file, err := parser.ParseFile("example.gld", b.src)
 				if err != nil {
 					return "", err
 				}
@@ -96,8 +98,8 @@ func TestDocExamples(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error %q, ran fine", wantErr)
 				}
-				if err.Error() != wantErr {
-					t.Fatalf("error mismatch:\n doc:  %s\n got:  %s", wantErr, err)
+				if got := docErrText(err); got != wantErr {
+					t.Fatalf("error mismatch:\n doc:  %s\n got:  %s\n\nfull:\n%v", wantErr, got, err)
 				}
 				return
 			}
@@ -112,4 +114,19 @@ func TestDocExamples(t *testing.T) {
 			}
 		})
 	}
+}
+
+// docErrText spells an error the way GLIDE-BY-EXAMPLE.md's "// error:"
+// contracts do: "line N: message". Errors now render with a filename,
+// a column and a source snippet, none of which belongs in a doc
+// contract — the doc asserts *what* went wrong and on which line, and
+// stays readable.
+func docErrText(err error) string {
+	var se *source.Error
+	if errors.As(err, &se) && len(se.Diags) > 0 {
+		d := se.Diags[0]
+		line, _ := se.File.LineCol(d.Pos)
+		return fmt.Sprintf("line %d: %s", line, d.Msg)
+	}
+	return err.Error()
 }

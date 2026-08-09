@@ -44,6 +44,14 @@ recorded sacrifice unless new evidence turns up.
   *against* when it exists (e.g. Rust removing green threads).
 - Breaking changes are free — sole user, no compatibility promise. Never
   argue "but that would break existing code" at this stage.
-- Plan before code. Current phase: semantics and grammar on paper.
-  First implementation will be a tree-walking interpreter to prove
-  semantics cheaply.
+- Plan before code. Current phase: **M4, the checker**. The
+  tree-walking interpreter (M1–M3) runs the whole ratified surface but
+  type-checks nothing; M4 fixes that, in Go, reversing an earlier
+  decision to defer the checker to a Glide-written frontend. See
+  `glide/DESIGN-DECISIONS.md` for the reversal and its reasoning.
+- **The interpreter ships.** It is not scaffolding that retires at
+  self-hosting — it is a statically-checked scripting tier, sharing one
+  frontend with the compiler so the two cannot drift. Never justify a
+  cut corner with "the real compiler makes this obsolete"; that
+  argument is retired. A difference between the tiers is either stated
+  in DESIGN.md (speed, and standalone binaries) or it is a bug.

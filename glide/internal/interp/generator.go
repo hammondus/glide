@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"glide/internal/ast"
+	"glide/internal/source"
 )
 
 // Generators: a function whose body contains `yield` returns an
@@ -118,7 +119,7 @@ func exprYields(e ast.Expr) bool {
 // so a generator inside a spawned task cannot wedge the interpreter,
 // and the handoff is a cancellation point on both sides (the
 // producer inherits its creator's cancellation context).
-func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
+func (in *Interp) runGenerator(body *ast.Block, env *Env, at source.Span) *IterV {
 	ch := make(chan Value)
 	stop := make(chan struct{})
 	var stopOnce sync.Once
@@ -127,7 +128,7 @@ func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
 	var crash any // rtErr etc. from the generator body, re-thrown at Next
 	cancel := in.cur.cancel
 
-	yield := &BuiltinV{Name: "yield", Fn: func(_ *Interp, args []Value, yline int) Value {
+	yield := &BuiltinV{Name: "yield", Fn: func(_ *Interp, args []Value, yat source.Span) Value {
 		var out struct {
 			stopped   bool
 			cancelled bool
@@ -203,7 +204,7 @@ func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
 func (in *Interp) evalYield(st *ast.YieldStmt, env *Env) *sig {
 	b := env.lookup(yieldKey)
 	if b == nil {
-		panic(rtErr{st.Line, "yield outside a generator"})
+		panic(rtErr{st.Span, "yield outside a generator"})
 	}
 	yield := b.v.(*BuiltinV)
 	v, sg := in.eval(st.E, env)
@@ -211,15 +212,15 @@ func (in *Interp) evalYield(st *ast.YieldStmt, env *Env) *sig {
 		return sg
 	}
 	if !st.From {
-		yield.Fn(in, []Value{v}, st.Line)
+		yield.Fn(in, []Value{v}, st.Span)
 		return nil
 	}
-	next := in.iterate(v, st.Line)
+	next := in.iterate(v, st.Span)
 	for {
 		item, ok := next()
 		if !ok {
 			return nil
 		}
-		yield.Fn(in, []Value{item}, st.Line)
+		yield.Fn(in, []Value{item}, st.Span)
 	}
 }

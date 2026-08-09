@@ -70,11 +70,22 @@ fn greet(name: String) {
 
 ## Status
 
-**Early and moving fast.** The language is designed on paper ahead of its
-implementation; a tree-walking interpreter (milestone M2) runs the core
-today: bindings, functions, closures, lists/maps/tuples, structs and
-methods, sum types with `match`, `Result` + `?`, generators, and built-in
-testing with property-based tests. The compiler comes later.
+**Early and moving fast.** A tree-walking interpreter (milestones M1–M3)
+runs the whole ratified surface today: bindings, functions, closures,
+lists/maps/tuples, structs and methods, sum types with `match`, `Result`
++ `?`, generators, `distinct` types, structured concurrency (scope,
+spawn, channels, `select`), and built-in testing with property-based
+tests — plus `http`, `sql` and `json`.
+
+**Nothing is type-checked yet.** Annotations are parsed and ignored;
+the rules a compiler would enforce statically are enforced dynamically
+instead, so programs can't cheat, they just find out late. **M4, the
+static checker, is the work in progress.**
+
+The interpreter is not scaffolding. The plan is two tiers over one
+shared frontend — `glide run` as a statically-checked scripting
+language, and a compiler for standalone binaries — so the two can
+differ in speed but never in meaning. The compiler comes after M4.
 
 One user, no compatibility promise — breaking changes are free until
 further notice, deliberately.

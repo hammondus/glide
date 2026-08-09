@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"glide/internal/source"
 )
 
 type Kind int
@@ -134,15 +136,17 @@ type StrPart struct {
 	S      string
 	Spec   string
 	Line   int
+	Pos    int // byte offset of S in the file, so sub-lexing keeps file coordinates
 }
 
 type Token struct {
-	Kind  Kind
-	Text  string
-	Int   int64
-	Float float64
-	Parts []StrPart // String tokens only
-	Line  int
+	source.Span // byte range in the file this token was lexed from
+	Kind        Kind
+	Text        string
+	Int         int64
+	Float       float64
+	Parts       []StrPart // String tokens only
+	Line        int
 }
 
 // Tokens whose presence at end-of-line means the statement is complete.
@@ -154,22 +158,39 @@ var endsExpr = map[Kind]bool{
 }
 
 type lexer struct {
-	src  string
-	i    int
-	line int
-	toks []Token
+	src   string
+	i     int
+	start int // byte offset the token being scanned began at
+	base  int // offset of src within the enclosing file (interpolation)
+	line  int
+	toks  []Token
 }
 
-func Lex(src string) ([]Token, error) {
-	lx := &lexer{src: src, line: 1}
+func Lex(src string) ([]Token, error) { return LexAt(src, 0, 1) }
+
+// LexAt lexes a fragment that sits at byte offset base of a larger
+// file, starting at the given line. Interpolation segments are lexed
+// this way so their tokens carry offsets into the *file*, not into the
+// segment — otherwise every diagnostic inside "{x + 1}" would point at
+// the wrong place.
+func LexAt(src string, base, line int) ([]Token, error) {
+	lx := &lexer{src: src, base: base, line: line}
 	if err := lx.run(); err != nil {
 		return nil, err
 	}
 	return lx.toks, nil
 }
 
+// span covers [from, lx.i) in file coordinates.
+func (lx *lexer) span(from int) source.Span {
+	return source.Span{Pos: lx.base + from, End: lx.base + lx.i}
+}
+
 func (lx *lexer) errf(format string, args ...any) error {
-	return fmt.Errorf("line %d:%d: %s", lx.line, lx.col(lx.i), fmt.Sprintf(format, args...))
+	return source.Diagnostic{
+		Span: source.At(lx.base + lx.i),
+		Msg:  fmt.Sprintf(format, args...),
+	}
 }
 
 // col reports the 1-based column of byte offset pos on its line.
@@ -178,7 +199,10 @@ func (lx *lexer) col(pos int) int {
 }
 
 func (lx *lexer) emit(k Kind, text string) {
-	lx.toks = append(lx.toks, Token{Kind: k, Text: text, Line: lx.line})
+	lx.toks = append(lx.toks, Token{
+		Span: lx.span(lx.start),
+		Kind: k, Text: text, Line: lx.line,
+	})
 }
 
 func (lx *lexer) prev() *Token {
@@ -196,6 +220,10 @@ func isIdentCont(c byte) bool { return isIdentStart(c) || isDigit(c) }
 
 func (lx *lexer) run() error {
 	for lx.i < len(lx.src) {
+		// Every emit() in this iteration spans from here. Whitespace
+		// and comment branches emit nothing, so a stale start is
+		// never observable.
+		lx.start = lx.i
 		c := lx.src[lx.i]
 		switch {
 		case c == '\n':
@@ -232,6 +260,9 @@ func (lx *lexer) run() error {
 			}
 		}
 	}
+	// The trailing implicit semicolon and EOF are zero-width at the
+	// end of input.
+	lx.start = lx.i
 	if p := lx.prev(); p != nil && endsExpr[p.Kind] {
 		lx.emit(Semi, "newline")
 	}
@@ -269,10 +300,10 @@ func (lx *lexer) lexNumber() {
 	text := strings.ReplaceAll(lx.src[start:lx.i], "_", "")
 	if isFloat {
 		f, _ := strconv.ParseFloat(text, 64)
-		lx.toks = append(lx.toks, Token{Kind: Float, Text: text, Float: f, Line: lx.line})
+		lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Float, Text: text, Float: f, Line: lx.line})
 	} else {
 		n, _ := strconv.ParseInt(text, 10, 64)
-		lx.toks = append(lx.toks, Token{Kind: Int, Text: text, Int: n, Line: lx.line})
+		lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Int, Text: text, Int: n, Line: lx.line})
 	}
 }
 
@@ -346,7 +377,7 @@ func (lx *lexer) lexRune() error {
 		return lx.errf("a rune literal holds exactly one rune ('a'); for text use a string")
 	}
 	lx.i++
-	lx.toks = append(lx.toks, Token{Kind: Rune, Int: int64(r), Text: string(r), Line: lx.line})
+	lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Rune, Int: int64(r), Text: string(r), Line: lx.line})
 	return nil
 }
 
@@ -368,6 +399,7 @@ func (lx *lexer) lexRaw() error {
 	content := lx.src[start:lx.i]
 	lx.i++
 	lx.toks = append(lx.toks, Token{
+		Span:  lx.span(lx.start),
 		Kind:  String,
 		Parts: []StrPart{{S: content}},
 		Line:  startLine,
@@ -424,6 +456,12 @@ func (lx *lexer) lexOp() error {
 		lx.i++
 		return nil
 	}
+	// Decode the whole rune: c is one *byte*, and reporting the first
+	// byte of a multi-byte character prints mojibake ("Ã" for "ö").
+	r, _ := utf8.DecodeRuneInString(lx.src[lx.i:])
+	if r >= utf8.RuneSelf {
+		return lx.errf("unexpected character %q (identifiers are ASCII)", r)
+	}
 	return lx.errf("unexpected character %q", string(c))
 }
 
@@ -448,7 +486,7 @@ func (lx *lexer) lexString() error {
 		case '"':
 			lx.i++
 			flush()
-			lx.toks = append(lx.toks, Token{Kind: String, Parts: parts, Line: startLine})
+			lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: String, Parts: parts, Line: startLine})
 			return nil
 		case '\\':
 			if lx.i+1 >= len(lx.src) {
@@ -525,11 +563,19 @@ func (lx *lexer) lexString() error {
 				spec = lx.src[specAt+1 : exprEnd]
 				exprEnd = specAt
 			}
-			expr := strings.TrimSpace(lx.src[exprStart:exprEnd])
+			raw := lx.src[exprStart:exprEnd]
+			expr := strings.TrimSpace(raw)
 			if expr == "" {
 				return lx.errf("empty interpolation")
 			}
-			parts = append(parts, StrPart{IsExpr: true, S: expr, Spec: spec, Line: startLine})
+			// TrimSpace moved the start; the offset has to move with
+			// it or every diagnostic inside "{ x + 1 }" lands one
+			// character early.
+			lead := len(raw) - len(strings.TrimLeft(raw, " \t"))
+			parts = append(parts, StrPart{
+				IsExpr: true, S: expr, Spec: spec, Line: startLine,
+				Pos: lx.base + exprStart + lead,
+			})
 			lx.i++ // '}'
 		default:
 			lit.WriteByte(c)

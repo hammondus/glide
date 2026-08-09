@@ -6,13 +6,17 @@ book (`docs/book/`) teaches; this file reminds.
 
 **Status markers** — the language is ahead of its implementation:
 
-- ✓ — runs in the current interpreter (M2)
+- ✓ — runs in the current interpreter (M3)
 - ○ — designed (recorded in `DESIGN.md`), not yet implemented; using
   it today is a parse or runtime error
 
-Nothing is *type-checked* yet at any tier: annotations are parsed and
-ignored until the stage-2 checker. Rules marked ✓ are enforced
-dynamically (mut, shadowing, let-else divergence, tail values).
+Nothing is *type-checked* yet: annotations are parsed and ignored.
+Rules marked ✓ are enforced dynamically (mut, shadowing, let-else
+divergence, tail values), so programs cannot cheat — they just find
+out late. **M4 is the checker**, in progress; as each rule becomes
+static its row here changes with it. The checker is mandatory in
+every tier and there is no way to skip it (`glide check` exists;
+`--no-check` never will).
 
 ## Source files
 
@@ -123,7 +127,7 @@ Type annotations are written but unchecked in M2.
 | `Float` | f64 | ✓ |
 | `Bool`, `String`, `()` | | ✓ |
 | `List<T>`, `Map<K, V>` | Map preserves insertion order | ✓ |
-| `(A, B)` tuples | fields `.0`, `.1` | ✓ |
+| `(A, B)` tuples | fields `.0`, `.1`. Two members minimum: `(T)` is a parse error, since a 1-tuple has no constructor and parenthesising a type buys nothing | ✓ |
 | `T?` = `Option<T>` | unboxed in M2: `Some` is identity, so `Option<Option<T>>` is unrepresentable until the checker era | ✓ |
 | `Result<T, E>` | `Ok(v)` / `Err(e)` | ✓ |
 | `Range` | value of `lo..hi` | ✓ |
@@ -211,6 +215,36 @@ path). Discard is explicit: `_ = expr` ✓.
 - Module-level: functions and types only, order-independent ✓;
   `const` ✓ (pure initializers, load-time); no `init()`, no life before `main` — permanent.
 
+## Generics
+
+Angle brackets, never square. **No turbofish, ever.**
+
+- Declaration sites bind parameters: `fn max<T: Ord>(a: T, b: T) -> T`,
+  `type Pair<A, B> = struct { … }`, `trait Container<T> { … }`.
+  Parsed into the AST ✓ (M4a); **not yet checked** ○.
+- Bounds are inline colon lists only: `<T: Ord + Hash>`. Unconstrained
+  is bare `<T>` — no `[T any]` ceremony. **No `where` clause** in v0:
+  two ways to write bounds violates house rules ✓ (parsed).
+- Parameter names are capitalised, like all type names ✓.
+- `impl` headers take type *arguments*, not a separate binder:
+  `impl Tree<T>`, `impl Iterable<T> for Tree<T>` ✓. Rust's
+  `impl<T> Tree<T>` double-mention is deliberately absent. Whether a
+  concrete `impl Stack<Int>` is legal is undecided — it parses; the
+  checker will rule.
+- **Bounds are checked at the declaration**, not the use site: a
+  generic body is verified once against its bounds, so callers get
+  "your `T` does not implement `Ord`" at the call ○.
+- Monomorphised in the compiled tier; the interpreter runs generics
+  **type-erased**, which is why it needs no specialisation to enforce
+  every rule ○.
+- Const generics (`Matrix<T, const N>`) deferred ○.
+- Use-site type arguments in *expressions* (`parse<Config>(s)`) are ○.
+  They need the C#/TypeScript tentative-parse disambiguation; nothing
+  needs it yet because declarations are never ambiguous — `<` always
+  follows the declared name. Likewise the C++11 `>>` split is not yet
+  required: Glide has no shift operators, so `List<List<Int>>` already
+  lexes as two `>` ✓. **Both become necessary the day `<<`/`>>` land.**
+
 ## Statements & expressions
 
 - Expression-oriented: `if`/`else`, `match`, and blocks yield
@@ -272,6 +306,10 @@ patterns in function signatures, ref/binding modes.
 - `test "name" { … }` ✓ — run with `glide test file.gld`.
 - Property form: `test "name" (xs: List<Int>) { … }` — 100 generated
   cases, fixed seed, greedy shrinking; case 0 is the simplest value ✓.
+  Generatable parameter types: `Int`, `Bool`, `String`, and `List<T>`
+  for any generatable `T` (so `List<List<Bool>>` works) ✓. Anything
+  else is an error naming the type; user types wait on `derive
+  Arbitrary` ○.
 - `expect(cond)` — compiler-known: failure reports both sides
   (`left: 2, right: 3`) and continues ✓. `require` (stop on failure)
   ○. Benchmarks `bench "name" { … }` parse and skip ✓.

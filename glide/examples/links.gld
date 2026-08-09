@@ -1,0 +1,178 @@
+// links.gld — a URL shortener.
+import http
+import json
+import sql
+import time
+
+type Code = distinct String
+type LinkId = distinct Int
+
+type Link = struct {
+    pub id: LinkId
+    pub code: Code
+    pub url: String
+    pub hits: Int
+}
+
+type StoreError = Backend{ cause: Error } | Duplicate{ code: Code }
+type ApiError =
+    BadInput{ msg: String }
+    | NotFound{ code: Code }
+    | Store{ cause: StoreError }
+
+impl StoreError { fn from(e: Error) -> StoreError { Backend{ cause: e } } }
+impl ApiError { fn from(e: StoreError) -> ApiError { Store{ cause: e } } }
+
+impl Code {
+    pub fn parse(raw: String) -> Code? {
+        let s = raw.trim().to_lower()
+        if s == "" || s.len() > 16 || s.contains("/") { return None }
+        Some(Code(s))
+    }
+}
+
+fn schema(db: Db) -> Result<(), StoreError> {
+    _ = db.exec(`create table links (
+        id integer primary key,
+        code text not null unique,
+        url text not null,
+        hits integer not null default 0
+    )`)?
+    Ok(())
+}
+
+fn insert(db: Db, code: Code, url: String) -> Result<LinkId, StoreError> {
+    _ = db.exec("insert into links (code, url) values (:code, :url)",
+                ["code": code, "url": url])?
+    let row = db.query_one("select id from links where code = :code", ["code": code])?
+    match row {
+        Some(r) => Ok(LinkId(r["id"] ?? 0))
+        None => Err(.Duplicate{ code: code })
+    }
+}
+
+fn lookup(db: Db, code: Code) -> Result<Link?, StoreError> {
+    let found = db.query_one(
+        "select id, code, url, hits from links where code = :code",
+        ["code": code])?
+    match found {
+        None => Ok(None)
+        Some(r) => Ok(Some(Link{
+            id: LinkId(r["id"] ?? 0),
+            code: Code(r["code"] ?? ""),
+            url: r["url"] ?? "",
+            hits: r["hits"] ?? 0,
+        }))
+    }
+}
+
+fn bump(db: Db, code: Code) -> Result<(), StoreError> {
+    _ = db.exec("update links set hits = hits + 1 where code = :code",
+                ["code": code])?
+    Ok(())
+}
+
+fn create(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Ok(v) = json.decode(req.body()) else {
+        return Err(.BadInput{ msg: "invalid JSON" })
+    }
+    let Some(code) = Code.parse(v["code"] ?? "") else {
+        return Err(.BadInput{ msg: "code must be 1-16 chars, no slashes" })
+    }
+    let url = v["url"] ?? ""
+    if !url.starts_with("http") {
+        return Err(.BadInput{ msg: "url must be absolute" })
+    }
+    // Check first: a UNIQUE-violation Err cannot be caught at this tier
+    // (Chapter 33's recorded interpreter bug), so we avoid provoking one.
+    if lookup(db, code)? != None {
+        return Err(.Store{ cause: .Duplicate{ code: code } })
+    }
+    _ = insert(db, code, url)?
+    Ok(http.created())
+}
+
+fn resolve(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Some(code) = Code.parse(req.path_param("code") ?? "") else {
+        return Err(.BadInput{ msg: "bad code" })
+    }
+    let Some(link) = lookup(db, code)? else {
+        return Err(.NotFound{ code: code })
+    }
+    bump(db, code)?
+    Ok(http.json(link))
+}
+
+fn to_response(r: Result<Response, ApiError>) -> Response {
+    match r {
+        Ok(resp) => resp
+        Err(BadInput{ msg }) => http.bad_request(msg)
+        Err(NotFound{ code }) => http.not_found()
+        Err(Store{ cause }) => {
+            match cause {
+                Duplicate{ code } => http.bad_request("code already taken")
+                Backend{ .. }     => http.text("internal error")
+            }
+        }
+    }
+}
+
+test "Code.parse rejects junk" {
+    expect(Code.parse("") == None)
+    expect(Code.parse("a/b") == None)
+    expect(Code.parse("  Hi  ") == Some(Code("hi")))
+}
+
+test "Code.parse is idempotent" (s: String) {
+    match Code.parse(s) {
+        None => expect(true)
+        Some(c) => expect(Code.parse(c.value()) == Some(c))
+    }
+}
+
+fn run() -> Result<String, Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    schema(db)?
+
+    let mut r = http.router()
+    r.post(`/links`, |req| to_response(create(db, req)))
+    r.get(`/links/{code}`, |req| to_response(resolve(db, req)))
+    let r = r
+
+    scope s {
+        _ = s.spawn(|| http.serve("127.0.0.1:17699", r))
+        time.sleep(80.ms)
+
+        let mut out = []
+        out.push(post(`{"code": "gl", "url": "https://example.com"}`))
+        out.push(post(`{"code": "gl", "url": "https://dupe.com"}`))
+        out.push(post(`{"code": "", "url": "https://x.com"}`))
+        out.push(post(`{"code": "ok", "url": "notaurl"}`))
+        out.push(get("gl"))
+        out.push(get("gl"))
+        out.push(get("nope"))
+        return Ok(out.join("\n"))
+    }
+}
+
+fn post(body: String) -> String {
+    match http.post("http://127.0.0.1:17699/links", body) {
+        Ok(resp) => "POST -> {resp.status()} {resp.body().trim()}"
+        Err(e) => "POST failed: {e}"
+    }
+}
+
+fn get(code: String) -> String {
+    match http.get("http://127.0.0.1:17699/links/" + code) {
+        Ok(resp) => "GET {code:5} -> {resp.status()} {resp.body().trim()}"
+        Err(e) => "GET failed: {e}"
+    }
+}
+
+fn main() {
+    match run() {
+        Ok(report) => println(report)
+        Err(e) => eprintln("failed: {e}")
+    }
+}

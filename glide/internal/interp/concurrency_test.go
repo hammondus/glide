@@ -308,7 +308,7 @@ func TestScopeParseErrors(t *testing.T) {
 		{`fn main() { select { } }`, "at least one arm"},
 	}
 	for _, c := range cases {
-		_, err := parser.ParseFile(c.src)
+		_, err := parser.ParseFile("test.gld", c.src)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("src %q: got %v, want %q", c.src, err, c.want)
 		}
@@ -743,7 +743,7 @@ else => 2 } }`, "two else"},
 		{`fn main() { select { x = rx.frob() => 1 } }`, "not \"frob\""},
 	}
 	for _, c := range cases {
-		_, err := parser.ParseFile(c.src)
+		_, err := parser.ParseFile("test.gld", c.src)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("src %q: got %v, want %q", c.src, err, c.want)
 		}

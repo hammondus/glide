@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"glide/internal/ast"
+	"glide/internal/source"
 )
 
 // Values. Collections are pointer types: Glide has reference
@@ -75,7 +76,7 @@ type (
 	}
 	BuiltinV struct {
 		Name string
-		Fn   func(in *Interp, args []Value, line int) Value
+		Fn   func(in *Interp, args []Value, at source.Span) Value
 	}
 	ModuleV string
 
@@ -115,12 +116,12 @@ type (
 
 func newMap() *MapV { return &MapV{m: map[Value]Value{}} }
 
-func hashable(k Value, line int) Value {
+func hashable(k Value, at source.Span) Value {
 	switch k.(type) {
 	case IntV, StrV, BoolV, RuneV:
 		return k
 	}
-	panic(rtErr{line, fmt.Sprintf("%s cannot be a map key", typeName(k))})
+	panic(rtErr{at, fmt.Sprintf("%s cannot be a map key", typeName(k))})
 }
 
 func (m *MapV) get(k Value) (Value, bool) {
@@ -316,8 +317,8 @@ func render(v Value, quoted bool) string {
 }
 
 // eq is deep structural equality; functions and iterators are not
-// comparable (runtime error at the call site's line).
-func eq(a, b Value, line int) bool {
+// comparable (runtime error at the call site's at).
+func eq(a, b Value, at source.Span) bool {
 	switch x := a.(type) {
 	case IntV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV, DurationV:
 		return a == b
@@ -326,14 +327,14 @@ func eq(a, b Value, line int) bool {
 		return ok && x.T.Equal(y.T) // Go's ==-on-time.Time trap, dodged
 	case *DistinctV:
 		y, ok := b.(*DistinctV)
-		return ok && x.Type == y.Type && eq(x.V, y.V, line)
+		return ok && x.Type == y.Type && eq(x.V, y.V, at)
 	case TupleV:
 		y, ok := b.(TupleV)
 		if !ok || len(x) != len(y) {
 			return false
 		}
 		for i := range x {
-			if !eq(x[i], y[i], line) {
+			if !eq(x[i], y[i], at) {
 				return false
 			}
 		}
@@ -344,7 +345,7 @@ func eq(a, b Value, line int) bool {
 			return false
 		}
 		for i := range x.Elems {
-			if !eq(x.Elems[i], y.Elems[i], line) {
+			if !eq(x.Elems[i], y.Elems[i], at) {
 				return false
 			}
 		}
@@ -355,7 +356,7 @@ func eq(a, b Value, line int) bool {
 			return false
 		}
 		for i := range x.Args {
-			if !eq(x.Args[i], y.Args[i], line) {
+			if !eq(x.Args[i], y.Args[i], at) {
 				return false
 			}
 		}
@@ -366,13 +367,13 @@ func eq(a, b Value, line int) bool {
 			return false
 		}
 		for f, v := range x.Fields {
-			if !eq(v, y.Fields[f], line) {
+			if !eq(v, y.Fields[f], at) {
 				return false
 			}
 		}
 		return true
 	}
-	panic(rtErr{line, fmt.Sprintf("%s values are not comparable with ==", typeName(a))})
+	panic(rtErr{at, fmt.Sprintf("%s values are not comparable with ==", typeName(a))})
 }
 
 // Environments
@@ -432,18 +433,18 @@ func (e *Env) lookup(name string) *binding {
 // same scope is idiomatic; shadowing a live name from an enclosing
 // block within the same function is an error. Function boundaries
 // reset the rule (a closure may reuse outer names for its own locals).
-func (e *Env) declare(name string, v Value, mut bool, line int) {
+func (e *Env) declare(name string, v Value, mut bool, at source.Span) {
 	// The free builtins are reserved outright: the set is tiny and
 	// fixed, and no program legitimately needs a local named println.
 	// (Imports are deliberately not reserved — that conflict is the
 	// checker era's two-live-meanings rule; see DESIGN.md Shadowing.)
 	if _, isBuiltin := builtins[name]; isBuiltin {
-		panic(rtErr{line, fmt.Sprintf("%q is a builtin and cannot be used as a binding name", name)})
+		panic(rtErr{at, fmt.Sprintf("%q is a builtin and cannot be used as a binding name", name)})
 	}
 	if !e.fnBoundary {
 		for p := e.parent; p != nil; p = p.parent {
 			if _, ok := p.vars[name]; ok {
-				panic(rtErr{line, fmt.Sprintf(
+				panic(rtErr{at, fmt.Sprintf(
 					"cannot shadow %q from an enclosing block (redeclaring in the same scope is fine; nested shadowing is not)", name)})
 			}
 			if p.fnBoundary {
@@ -454,13 +455,13 @@ func (e *Env) declare(name string, v Value, mut bool, line int) {
 	e.vars[name] = &binding{v: v, mut: mut}
 }
 
-func (e *Env) assign(name string, v Value, line int) {
+func (e *Env) assign(name string, v Value, at source.Span) {
 	b := e.lookup(name)
 	if b == nil {
-		panic(rtErr{line, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", name)})
+		panic(rtErr{at, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", name)})
 	}
 	if !b.mut {
-		panic(rtErr{line, fmt.Sprintf("cannot assign to immutable binding %q (declare it with `let mut`)", name)})
+		panic(rtErr{at, fmt.Sprintf("cannot assign to immutable binding %q (declare it with `let mut`)", name)})
 	}
 	b.v = v
 }

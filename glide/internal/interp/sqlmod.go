@@ -7,6 +7,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go: no CGO, cross-compilation stays trivial
+
+	"glide/internal/source"
 )
 
 // sql host shim (M2), shaped by DESIGN.md's SQL doctrine:
@@ -20,12 +22,12 @@ import (
 
 type DbV struct{ db *sql.DB }
 
-func (in *Interp) sqlCall(name string, args []Value, line int) Value {
+func (in *Interp) sqlCall(name string, args []Value, at source.Span) Value {
 	switch name {
 	case "open":
-		dsn, ok := one("sql.open", args, line).(StrV)
+		dsn, ok := one("sql.open", args, at).(StrV)
 		if !ok {
-			panic(rtErr{line, "sql.open takes a DSN String (e.g. \"sqlite:notes.db\")"})
+			panic(rtErr{at, "sql.open takes a DSN String (e.g. \"sqlite:notes.db\")"})
 		}
 		path, found := strings.CutPrefix(string(dsn), "sqlite:")
 		if !found {
@@ -44,15 +46,15 @@ func (in *Interp) sqlCall(name string, args []Value, line int) Value {
 		}
 		return &ResultV{Ok: true, V: &DbV{db: db}}
 	}
-	panic(rtErr{line, fmt.Sprintf("module sql has no function %q", name)})
+	panic(rtErr{at, fmt.Sprintf("module sql has no function %q", name)})
 }
 
 // sqlMethod: exec / query / query_one / close on a Db value.
-func (in *Interp) sqlMethod(d *DbV, name string, args []Value, line int) Value {
+func (in *Interp) sqlMethod(d *DbV, name string, args []Value, at source.Span) Value {
 	switch name {
 	case "close":
 		if len(args) != 0 {
-			panic(rtErr{line, "close takes no arguments"})
+			panic(rtErr{at, "close takes no arguments"})
 		}
 		if err := d.db.Close(); err != nil {
 			return &ResultV{Ok: false, V: &ErrV{Msg: err.Error()}}
@@ -60,23 +62,23 @@ func (in *Interp) sqlMethod(d *DbV, name string, args []Value, line int) Value {
 		return &ResultV{Ok: true, V: UnitV{}}
 	case "exec", "query", "query_one":
 	default:
-		panic(rtErr{line, fmt.Sprintf("Db has no method %q", name)})
+		panic(rtErr{at, fmt.Sprintf("Db has no method %q", name)})
 	}
 	if len(args) < 1 || len(args) > 2 {
-		panic(rtErr{line, fmt.Sprintf("%s takes (query) or (query, params)", name)})
+		panic(rtErr{at, fmt.Sprintf("%s takes (query) or (query, params)", name)})
 	}
 	q, ok := args[0].(StrV)
 	if !ok {
-		panic(rtErr{line, fmt.Sprintf("%s: the query is a String, got %s", name, typeName(args[0]))})
+		panic(rtErr{at, fmt.Sprintf("%s: the query is a String, got %s", name, typeName(args[0]))})
 	}
 	var params *MapV
 	if len(args) == 2 {
 		params, ok = args[1].(*MapV)
 		if !ok {
-			panic(rtErr{line, fmt.Sprintf("%s: params are a Map (\"name\": value), got %s", name, typeName(args[1]))})
+			panic(rtErr{at, fmt.Sprintf("%s: params are a Map (\"name\": value), got %s", name, typeName(args[1]))})
 		}
 	}
-	query, bound, err := bindNamed(string(q), params, line)
+	query, bound, err := bindNamed(string(q), params, at)
 	if err != "" {
 		return &ResultV{Ok: false, V: &ErrV{Msg: err}}
 	}
@@ -134,7 +136,7 @@ func (in *Interp) sqlMethod(d *DbV, name string, args []Value, line int) Value {
 // bindNamed rewrites :name placeholders to ? and binds values from
 // the params map — the dynamic stand-in for the comptime check.
 // Every placeholder must be supplied; every param must be used.
-func bindNamed(query string, params *MapV, line int) (string, []any, string) {
+func bindNamed(query string, params *MapV, at source.Span) (string, []any, string) {
 	var b strings.Builder
 	var bound []any
 	used := map[string]bool{}
@@ -169,7 +171,7 @@ func bindNamed(query string, params *MapV, line int) (string, []any, string) {
 			}
 			used[pname] = true
 			b.WriteByte('?')
-			bound = append(bound, toDriver(v, line))
+			bound = append(bound, toDriver(v, at))
 		default:
 			b.WriteByte(c)
 		}
@@ -190,7 +192,7 @@ func isNameByte(c byte) bool {
 
 // toDriver: NULL is None; distinct unwraps (the codec is the
 // explicit conversion boundary); Instants store as RFC 3339.
-func toDriver(v Value, line int) any {
+func toDriver(v Value, at source.Span) any {
 	switch x := v.(type) {
 	case NoneV:
 		return nil
@@ -205,9 +207,9 @@ func toDriver(v Value, line int) any {
 	case InstantV:
 		return x.T.Format(time.RFC3339Nano)
 	case *DistinctV:
-		return toDriver(x.V, line)
+		return toDriver(x.V, at)
 	}
-	panic(rtErr{line, fmt.Sprintf("cannot bind %s as a SQL parameter", typeName(v))})
+	panic(rtErr{at, fmt.Sprintf("cannot bind %s as a SQL parameter", typeName(v))})
 }
 
 func scanRows(rows *sql.Rows) (*ListV, error) {

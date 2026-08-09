@@ -12,7 +12,7 @@ import (
 // runProg parses and runs src, returning stdout and the Run error.
 func runProg(t *testing.T, src string, args ...string) (string, error) {
 	t.Helper()
-	f, err := parser.ParseFile(src)
+	f, err := parser.ParseFile("test.gld", src)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestWordfreqGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := parser.ParseFile(string(src))
+	f, err := parser.ParseFile("test.gld", string(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestWordfreqGolden(t *testing.T) {
 
 func TestWordfreqUsageExit(t *testing.T) {
 	src, _ := os.ReadFile("../../examples/wordfreq.gld")
-	f, _ := parser.ParseFile(string(src))
+	f, _ := parser.ParseFile("test.gld", string(src))
 	in := New()
 	in.Stdout = &strings.Builder{}
 	in.Stderr = &strings.Builder{}
@@ -64,7 +64,7 @@ func TestWordfreqUsageExit(t *testing.T) {
 
 func TestTryPropagatesWithContext(t *testing.T) {
 	src, _ := os.ReadFile("../../examples/wordfreq.gld")
-	f, _ := parser.ParseFile(string(src))
+	f, _ := parser.ParseFile("test.gld", string(src))
 	in := New()
 	in.Stdout = &strings.Builder{}
 	in.Stderr = &strings.Builder{}
@@ -76,7 +76,7 @@ func TestTryPropagatesWithContext(t *testing.T) {
 }
 
 func TestPrintFamilyNewlines(t *testing.T) {
-	f, err := parser.ParseFile(`
+	f, err := parser.ParseFile("test.gld", `
 fn main() {
     print("a")
     print("b")
@@ -163,14 +163,21 @@ func TestBuiltinsReserved(t *testing.T) {
 func TestErrorLinesPointAtSource(t *testing.T) {
 	// A bad format spec blames the string's line...
 	_, err := runProg(t, "fn main() {\n let n = 5\n println(\"{n: 6}\")\n}")
-	if err == nil || !strings.Contains(err.Error(), "line 3") {
+	if err == nil || !strings.Contains(err.Error(), "test.gld:3:") {
 		t.Fatalf("format spec error should blame line 3, got %v", err)
 	}
 	// ...and so does a runtime error inside an interpolated expression,
-	// whose tokens were lexed from a standalone snippet.
+	// whose tokens were lexed from a standalone snippet. The column is
+	// the real test: the snippet is lexed at its offset in the file, so
+	// the caret has to land inside the string rather than at its start.
 	_, err = runProg(t, "fn main() {\n let t = (1, 2)\n println(\"{t.5}\")\n}")
-	if err == nil || !strings.Contains(err.Error(), "line 3") {
-		t.Fatalf("interpolated expr error should blame line 3, got %v", err)
+	if err == nil {
+		t.Fatal("indexing past a tuple should fail")
+	}
+	// Column 13 is the '.' of ".5" inside the string, not the start of
+	// the line or of the literal.
+	if !strings.Contains(err.Error(), "test.gld:3:13:") {
+		t.Fatalf("interpolated expr error should blame line 3 column 13, got %v", err)
 	}
 }
 
@@ -399,7 +406,7 @@ func TestTreeProgramProperty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := parser.ParseFile(string(src))
+	f, err := parser.ParseFile("test.gld", string(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +535,7 @@ fn main() {
 }
 
 func TestShrinkFindsMinimalCase(t *testing.T) {
-	f, err := parser.ParseFile(`
+	f, err := parser.ParseFile("test.gld", `
 test "short lists" (xs: List<Int>) {
     expect(xs.len() <= 4)
 }`)
@@ -1093,7 +1100,7 @@ func TestDeferRestrictions(t *testing.T) {
 		t.Fatalf("return in defer should fail, got %v", err)
 	}
 	// break cannot target a loop from inside a defer body.
-	if _, perr := parser.ParseFile("fn main() {\n for {\n  defer { break }\n }\n}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "fn main() {\n for {\n  defer { break }\n }\n}"); perr == nil {
 		t.Fatal("break in defer should be a parse error")
 	}
 	// os.exit skips defers (Go's rule).
@@ -1158,7 +1165,7 @@ func TestStructPatternRules(t *testing.T) {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 	// Duplicate field: parse error.
-	if _, perr := parser.ParseFile("fn main() {\n let P{ x, x } = p\n}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "fn main() {\n let P{ x, x } = p\n}"); perr == nil {
 		t.Fatal("duplicate field should not parse")
 	}
 }
@@ -1318,7 +1325,7 @@ fn main() {
 	}
 
 	// 'ab' is a lex error, not a short string.
-	if _, perr := parser.ParseFile("fn main() {\n let x = 'ab'\n}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "fn main() {\n let x = 'ab'\n}"); perr == nil {
 		t.Fatal("'ab' should not lex")
 	}
 }
@@ -1333,7 +1340,7 @@ func TestRawStrings(t *testing.T) {
 		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
 	}
 	// Unclosed raw string errors with the opening line.
-	if _, perr := parser.ParseFile("fn main() {\n let s = `never closed\n}\n"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "fn main() {\n let s = `never closed\n}\n"); perr == nil {
 		t.Fatal("unclosed raw string should not lex")
 	}
 }
@@ -1479,10 +1486,10 @@ func TestNamedArgErrors(t *testing.T) {
 		}
 	}
 	// Parse-time rules.
-	if _, perr := parser.ParseFile("fn main() {\n _ = f(a: 1, 2)\n}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "fn main() {\n _ = f(a: 1, 2)\n}"); perr == nil {
 		t.Error("positional after named should not parse")
 	}
-	if _, perr := parser.ParseFile("fn main() {\n _ = f(a: 1, a: 2)\n}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "fn main() {\n _ = f(a: 1, a: 2)\n}"); perr == nil {
 		t.Error("same name twice should not parse")
 	}
 }
@@ -1532,19 +1539,19 @@ fn main() {
 
 func TestLabelRules(t *testing.T) {
 	// Unknown label.
-	if _, err := parser.ParseFile("fn main() {\n x: for {\n  break y\n }\n}"); err == nil || !strings.Contains(err.Error(), `labeled "y"`) {
+	if _, err := parser.ParseFile("test.gld", "fn main() {\n x: for {\n  break y\n }\n}"); err == nil || !strings.Contains(err.Error(), `labeled "y"`) {
 		t.Fatalf("unknown label should not parse, got %v", err)
 	}
 	// A label from outside a closure is out of reach.
-	if _, err := parser.ParseFile("fn main() {\n x: for {\n  spawn(|| { for { break x } })\n }\n}"); err == nil {
+	if _, err := parser.ParseFile("test.gld", "fn main() {\n x: for {\n  spawn(|| { for { break x } })\n }\n}"); err == nil {
 		t.Fatal("label through closure boundary should not parse")
 	}
 	// Duplicate active label.
-	if _, err := parser.ParseFile("fn main() {\n x: for {\n  x: for {\n   break\n  }\n }\n}"); err == nil || !strings.Contains(err.Error(), "already names") {
+	if _, err := parser.ParseFile("test.gld", "fn main() {\n x: for {\n  x: for {\n   break\n  }\n }\n}"); err == nil || !strings.Contains(err.Error(), "already names") {
 		t.Fatalf("duplicate label should not parse, got %v", err)
 	}
 	// Labels attach to loops only.
-	if _, err := parser.ParseFile("fn main() {\n x: println(1)\n}"); err == nil {
+	if _, err := parser.ParseFile("test.gld", "fn main() {\n x: println(1)\n}"); err == nil {
 		t.Fatal("label on a non-loop should not parse")
 	}
 }
@@ -1613,7 +1620,7 @@ fn main() {
 	}
 
 	// Trait methods need a self receiver.
-	if _, perr := parser.ParseFile("trait A {\n fn free() -> Int { 1 }\n}\nfn main() {}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "trait A {\n fn free() -> Int { 1 }\n}\nfn main() {}"); perr == nil {
 		t.Fatal("selfless trait method should not parse")
 	}
 }
@@ -1772,7 +1779,7 @@ func TestConstRules(t *testing.T) {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 	// Capitalised const names are a parse error.
-	if _, perr := parser.ParseFile("const Pi = 3.14\nfn main() {}"); perr == nil {
+	if _, perr := parser.ParseFile("test.gld", "const Pi = 3.14\nfn main() {}"); perr == nil {
 		t.Fatal("capitalised const should not parse")
 	}
 }

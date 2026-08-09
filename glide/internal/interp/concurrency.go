@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"glide/internal/ast"
+	"glide/internal/source"
 )
 
 // Structured concurrency (M3). Spawned tasks run on goroutines, but
@@ -116,7 +117,7 @@ func (in *Interp) exitRoot() { in.gil.Unlock() }
 //  4. A child panic cancels siblings immediately; the scope re-panics.
 func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 	if in.constEval {
-		panic(rtErr{ex.Line, "a const initializer cannot open a scope (pure expressions only)"})
+		panic(rtErr{ex.Span, "a const initializer cannot open a scope (pure expressions only)"})
 	}
 	st := &scopeState{cancelled: make(chan struct{}), done: make(chan struct{})}
 	outer := in.cur
@@ -139,7 +140,7 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 		}
 		d, ok := v.(DurationV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("scope timeout must be a Duration (e.g. 5.s), got %s", typeName(v))})
+			panic(rtErr{ex.Span, fmt.Sprintf("scope timeout must be a Duration (e.g. 5.s), got %s", typeName(v))})
 		}
 		arm(time.Now().Add(time.Duration(d)))
 	}
@@ -150,7 +151,7 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 		}
 		at, ok := v.(InstantV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("scope deadline must be an Instant, got %s", typeName(v))})
+			panic(rtErr{ex.Span, fmt.Sprintf("scope deadline must be an Instant, got %s", typeName(v))})
 		}
 		arm(at.T)
 	}
@@ -182,7 +183,7 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 	in.cur = &taskCtx{cancel: st.cancelled, deadline: st.deadline}
 	scopeEnv := newEnv(env, false)
 	if ex.Handle != "" {
-		scopeEnv.declare(ex.Handle, &ScopeV{st: st}, false, ex.Line)
+		scopeEnv.declare(ex.Handle, &ScopeV{st: st}, false, ex.Span)
 	}
 
 	var val Value
@@ -250,7 +251,7 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 			continue
 		}
 		if r, isRes := t.result.(*ResultV); isRes && !r.Ok {
-			return UnitV{}, in.propagateErr(r, env, ex.Line)
+			return UnitV{}, in.propagateErr(r, env, ex.Span)
 		}
 	}
 	if timed {
@@ -269,10 +270,10 @@ func timeoutValue() Value {
 // propagateErr builds the return signal `?` would: converting the
 // error via E.from when the enclosing fn declares a different
 // Result error type.
-func (in *Interp) propagateErr(r *ResultV, env *Env, line int) *sig {
+func (in *Interp) propagateErr(r *ResultV, env *Env, at source.Span) *sig {
 	if target := env.fnRetErr(); target != "" && typeName(r.V) != target {
-		if m := in.methods[target]["from"]; m != nil && m.Self == ast.NoSelf {
-			conv := in.callFuncNamed(m, nil, []Value{r.V}, nil, line)
+		if m := in.prog.Methods[target]["from"]; m != nil && m.Self == ast.NoSelf {
+			conv := in.callFuncNamed(m, nil, []Value{r.V}, nil, at)
 			return &sig{val: &ResultV{Ok: false, V: conv}}
 		}
 	}
@@ -280,16 +281,16 @@ func (in *Interp) propagateErr(r *ResultV, env *Env, line int) *sig {
 }
 
 // spawnTask starts f() on its own goroutine as a child of the scope.
-func (in *Interp) spawnTask(s *ScopeV, f Value, line int) Value {
+func (in *Interp) spawnTask(s *ScopeV, f Value, at source.Span) Value {
 	switch f.(type) {
 	case *ClosureV, *FuncV:
 	default:
-		panic(rtErr{line, fmt.Sprintf("spawn takes a function or closure, got %s", typeName(f))})
+		panic(rtErr{at, fmt.Sprintf("spawn takes a function or closure, got %s", typeName(f))})
 	}
 	st := s.st
 	select {
 	case <-st.done:
-		panic(rtErr{line, "spawn on a scope that has already ended"})
+		panic(rtErr{at, "spawn on a scope that has already ended"})
 	default:
 	}
 	t := &TaskV{done: make(chan struct{})}
@@ -314,7 +315,7 @@ func (in *Interp) spawnTask(s *ScopeV, f Value, line int) Value {
 			close(t.done)
 			in.gil.Unlock()
 		}()
-		t.result = in.callValue(f, nil, line)
+		t.result = in.callValue(f, nil, at)
 	}()
 	return t
 }
@@ -322,7 +323,7 @@ func (in *Interp) spawnTask(s *ScopeV, f Value, line int) Value {
 // Channels. The Go channel provides the entire engine: mpmc,
 // buffered/rendezvous, and closed-and-drained recv semantics match
 // the ratified design one-for-one. Send-on-closed is Go's runtime
-// panic, recovered into a Glide panic with a line number — it IS a
+// panic, recovered into a Glide panic with a position — it IS a
 // bug in the ratified semantics, just a diagnosable one.
 type chanState struct {
 	ch        chan Value
@@ -336,7 +337,7 @@ func newChannel(cap int) (Value, Value) {
 
 // chanSend blocks until delivered; a cancellation unwinds, a close
 // (before or during) panics — a sender coordination bug.
-func (in *Interp) chanSend(s *SenderV, v Value, line int) {
+func (in *Interp) chanSend(s *SenderV, v Value, at source.Span) {
 	cancel := in.cur.cancel
 	var cancelled, wasClosed bool
 	in.unblock(func() {
@@ -355,7 +356,7 @@ func (in *Interp) chanSend(s *SenderV, v Value, line int) {
 		panic(cancelUnwind{})
 	}
 	if wasClosed {
-		panic(rtErr{line, "send on a closed channel (only senders close — coordinate them)"})
+		panic(rtErr{at, "send on a closed channel (only senders close — coordinate them)"})
 	}
 }
 
@@ -409,7 +410,7 @@ func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
 			}
 			gb, isBool := g.(BoolV)
 			if !isBool {
-				panic(rtErr{arm.Line, fmt.Sprintf("select arm guard must be Bool, got %s", typeName(g))})
+				panic(rtErr{arm.Span, fmt.Sprintf("select arm guard must be Bool, got %s", typeName(g))})
 			}
 			if !bool(gb) {
 				continue // disabled: out of the ready set entirely
@@ -424,13 +425,13 @@ func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
 		if isRecv {
 			rx, ok := ch.(*ReceiverV)
 			if !ok {
-				panic(rtErr{arm.Line, fmt.Sprintf("recv arm needs a Receiver, got %s", typeName(ch))})
+				panic(rtErr{arm.Span, fmt.Sprintf("recv arm needs a Receiver, got %s", typeName(ch))})
 			}
 			st = rx.st
 		} else {
 			tx, ok := ch.(*SenderV)
 			if !ok {
-				panic(rtErr{arm.Line, fmt.Sprintf("send arm needs a Sender, got %s", typeName(ch))})
+				panic(rtErr{arm.Span, fmt.Sprintf("send arm needs a Sender, got %s", typeName(ch))})
 			}
 			st = tx.st
 		}
@@ -463,7 +464,7 @@ func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
 		if elseArm >= 0 {
 			return in.eval(ex.Arms[elseArm].Body, newEnv(env, false))
 		}
-		panic(rtErr{ex.Line, "select has no enabled arms and no else — it would block forever"})
+		panic(rtErr{ex.Span, "select has no enabled arms and no else — it would block forever"})
 	}
 
 	cases := make([]reflect.SelectCase, 0, len(groups)+2)
@@ -495,7 +496,7 @@ func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
 		chosen, recvVal, recvOK = reflect.Select(cases)
 	})
 	if wasClosed {
-		panic(rtErr{ex.Line, "send on a closed channel in select (only senders close — coordinate them)"})
+		panic(rtErr{ex.Span, "send on a closed channel in select (only senders close — coordinate them)"})
 	}
 	if cancelIdx >= 0 && chosen == cancelIdx {
 		panic(cancelUnwind{})
@@ -521,18 +522,18 @@ func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
 		}
 		armEnv := newEnv(env, false)
 		for _, b := range binds {
-			armEnv.declare(b.name, b.val, b.mut, arm.Line)
+			armEnv.declare(b.name, b.val, b.mut, arm.Span)
 		}
 		return in.eval(arm.Body, armEnv)
 	}
-	panic(rtErr{ex.Line, fmt.Sprintf("select received %s but no arm pattern matches it (the value is consumed — cover the closed case with `None = rx.recv()`)", render(v, true))})
+	panic(rtErr{ex.Span, fmt.Sprintf("select received %s but no arm pattern matches it (the value is consumed — cover the closed case with `None = rx.recv()`)", render(v, true))})
 }
 
 // joinTask blocks until the child finishes and returns exactly what
 // its closure returned. A cancellation arriving first unwinds the
 // joiner; a panicked child unwinds it too (the scope is already
 // going down and will re-panic the real bug at exit).
-func (in *Interp) joinTask(t *TaskV, line int) Value {
+func (in *Interp) joinTask(t *TaskV, at source.Span) Value {
 	cancel := in.cur.cancel
 	cancelled := false
 	in.unblock(func() {

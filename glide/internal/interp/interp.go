@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"glide/internal/ast"
+	"glide/internal/program"
+	"glide/internal/source"
 )
 
 type Interp struct {
@@ -24,18 +26,21 @@ type Interp struct {
 	Stderr io.Writer
 	Args   []string // what os.args() returns
 
-	fns      map[string]*ast.FuncDecl
-	imports  map[string]bool
-	types    map[string]*ast.TypeDecl
-	methods  map[string]map[string]*ast.FuncDecl // type -> method -> decl
-	variants map[string]variantInfo              // variant name -> owning type
+	// src is the file every Span indexes into, so a runtime error can
+	// render itself with the same file:line:col and caret a compile
+	// error gets. Set by load().
+	src *source.File
+
+	// prog is the declaration table, built by the same code the checker
+	// uses (internal/program) so the two tiers cannot disagree about
+	// what a name means.
+	prog *program.Table
+
 	genCache map[*ast.FuncDecl]bool
 	global   *Env
 	exiting  bool // os.exit in flight: skip defers (Go's rule)
 
-	traits     map[string]*ast.TraitDecl
-	typeTraits map[string][]string // type -> traits it declares impls for
-	constEval  bool                // inside a const initializer: pure exprs only
+	constEval bool // inside a const initializer: pure exprs only
 
 	// The runtime lock: exactly one goroutine interprets at a time;
 	// blocking operations release it (concurrency.go). cur is the
@@ -44,16 +49,10 @@ type Interp struct {
 	cur *taskCtx
 }
 
-type variantInfo struct {
-	typeName string
-	arity    int
-	fields   []string // named-field form; nil for positional/bare
-}
-
 // testFail aborts a test case; the runner reports it.
 type testFail struct {
-	line int
-	msg  string
+	at  source.Span
+	msg string
 }
 
 // sig carries Glide control flow up the evaluator: an early return —
@@ -76,10 +75,15 @@ const (
 	sigContinue
 )
 
-// rtErr is a runtime error; exitPanic is os.exit in flight.
+// rtErr is a runtime error carrying the span of the construct that
+// raised it; exitPanic is os.exit in flight. rtErr holds a span
+// rather than a line number so a runtime error renders exactly like a
+// compile error — same file:line:col, same caret — and so a checker
+// diagnostic and a runtime one can never disagree about where
+// something is.
 type rtErr struct {
-	line int
-	msg  string
+	at  source.Span
+	msg string
 }
 type exitPanic struct{ code int }
 
@@ -98,91 +102,59 @@ func New() *Interp {
 	return &Interp{
 		Stdout:   os.Stdout,
 		Stderr:   os.Stderr,
-		fns:      map[string]*ast.FuncDecl{},
-		imports:  map[string]bool{},
-		types:    map[string]*ast.TypeDecl{},
-		methods:  map[string]map[string]*ast.FuncDecl{},
-		variants: map[string]variantInfo{},
 		genCache: map[*ast.FuncDecl]bool{},
-
-		traits:     map[string]*ast.TraitDecl{},
-		typeTraits: map[string][]string{},
 	}
 }
 
-// load registers a file's declarations. Shared by Run and RunTests.
+// errAt reports at a span, rendered against the loaded source file so
+// runtime and compile diagnostics look identical.
+func (in *Interp) errAt(at source.Span, format string, args ...any) error {
+	d := source.Diagnostic{Span: at, Msg: fmt.Sprintf(format, args...)}
+	if in.src == nil {
+		return d
+	}
+	return &source.Error{File: in.src, Diags: []source.Diagnostic{d}}
+}
+
+// hostKnows is what a program may import and may not redeclare. The
+// checker is handed the same value, so a name that collides in one
+// tier collides in both.
+func hostKnows() program.Known {
+	bs := make(map[string]bool, len(builtins))
+	for name := range builtins {
+		bs[name] = true
+	}
+	return program.Known{Builtins: bs, Modules: knownModules}
+}
+
+// load indexes a file's declarations and evaluates its consts. Shared
+// by Run and RunTests.
+//
+// The indexing half lives in internal/program because the checker
+// needs exactly the same answers; only const *evaluation* is the
+// interpreter's own business, and it stays here.
 func (in *Interp) load(f *ast.File) error {
-	for _, im := range f.Imports {
-		if !knownModules[im] {
-			return fmt.Errorf("unknown module %q (this interpreter ships fs and os)", im)
-		}
-		in.imports[im] = true
+	in.src = f.Source
+	prog, err := program.Load(f, hostKnows())
+	if err != nil {
+		return err
 	}
-	for _, fn := range f.Funcs {
-		if _, dup := in.fns[fn.Name]; dup {
-			return fmt.Errorf("line %d: function %q declared twice", fn.Line, fn.Name)
-		}
-		if _, isBuiltin := builtins[fn.Name]; isBuiltin {
-			return fmt.Errorf("line %d: %q is a builtin and cannot be redeclared", fn.Line, fn.Name)
-		}
-		in.fns[fn.Name] = fn
-	}
-	for _, td := range f.Types {
-		if _, dup := in.types[td.Name]; dup {
-			return fmt.Errorf("line %d: type %q declared twice", td.Line, td.Name)
-		}
-		in.types[td.Name] = td
-		for _, v := range td.Variants {
-			if prev, dup := in.variants[v.Name]; dup {
-				return fmt.Errorf("line %d: variant %q already declared by type %s", td.Line, v.Name, prev.typeName)
-			}
-			vi := variantInfo{typeName: td.Name, arity: v.Arity}
-			for _, fd := range v.Fields {
-				vi.fields = append(vi.fields, fd.Name)
-			}
-			in.variants[v.Name] = vi
-		}
-	}
-	for _, tr := range f.Traits {
-		if _, dup := in.traits[tr.Name]; dup {
-			return fmt.Errorf("line %d: trait %q declared twice", tr.Line, tr.Name)
-		}
-		in.traits[tr.Name] = tr
-	}
-	for _, im := range f.Impls {
-		if _, known := in.types[im.Target]; !known {
-			return fmt.Errorf("line %d: impl for unknown type %q", im.Line, im.Target)
-		}
-		if im.Trait != "" {
-			in.typeTraits[im.Target] = append(in.typeTraits[im.Target], im.Trait)
-		}
-		ms := in.methods[im.Target]
-		if ms == nil {
-			ms = map[string]*ast.FuncDecl{}
-			in.methods[im.Target] = ms
-		}
-		for _, fn := range im.Fns {
-			if _, dup := ms[fn.Name]; dup {
-				return fmt.Errorf("line %d: method %s.%s declared twice", fn.Line, im.Target, fn.Name)
-			}
-			ms[fn.Name] = fn
-		}
-	}
+	in.prog = prog
+
 	in.global = newEnv(nil, true)
 	// Consts: the only module-level state — evaluated once, in
 	// declaration order, restricted to pure expressions (M2's
 	// conservative comptime shim: it can loosen later, not tighten).
+	// Iterating f.Consts rather than the table's map keeps the order
+	// the program wrote; duplicates were already rejected above.
 	for _, c := range f.Consts {
-		if _, dup := in.global.vars[c.Name]; dup {
-			return fmt.Errorf("line %d: const %q declared twice", c.Line, c.Name)
-		}
 		in.constEval = true
 		v, sg := in.eval(c.E, in.global)
 		in.constEval = false
 		if sg != nil {
-			return fmt.Errorf("line %d: a const initializer cannot return or propagate", c.Line)
+			return in.errAt(c.Span, "a const initializer cannot return or propagate")
 		}
-		in.global.declare(c.Name, v, false, c.Line)
+		in.global.declare(c.Name, v, false, c.Span)
 	}
 	return nil
 }
@@ -192,9 +164,9 @@ func (in *Interp) Run(f *ast.File) (err error) {
 		switch p := recover().(type) {
 		case nil:
 		case rtErr:
-			err = fmt.Errorf("line %d: %s", p.line, p.msg)
+			err = in.errAt(p.at, "%s", p.msg)
 		case testFail:
-			err = fmt.Errorf("line %d: %s", p.line, p.msg)
+			err = in.errAt(p.at, "%s", p.msg)
 		case exitPanic:
 			err = &ExitError{Code: p.code}
 		default:
@@ -204,12 +176,12 @@ func (in *Interp) Run(f *ast.File) (err error) {
 	if err := in.load(f); err != nil {
 		return err
 	}
-	mainFn, ok := in.fns["main"]
+	mainFn, ok := in.prog.Fns["main"]
 	if !ok {
 		return fmt.Errorf("no main function")
 	}
 	if len(mainFn.Params) != 0 {
-		return fmt.Errorf("line %d: main takes no parameters (use os.args())", mainFn.Line)
+		return in.errAt(mainFn.Span, "main takes no parameters (use os.args())")
 	}
 	in.enterRoot()
 	defer in.exitRoot()
@@ -229,26 +201,26 @@ func (in *Interp) callFunc(decl *ast.FuncDecl, args []Value) Value {
 // callFuncSelf runs a function or method; self is non-nil for
 // methods (already declared mut/immutable by the caller's check).
 func (in *Interp) callFuncSelf(decl *ast.FuncDecl, self Value, args []Value) Value {
-	return in.callFuncNamed(decl, self, args, nil, decl.Line)
+	return in.callFuncNamed(decl, self, args, nil, decl.Span)
 }
 
 // callFuncNamed binds a direct call site: positional prefix, then
 // named arguments, then defaults for whatever is unfilled. Defaults
 // evaluate per call, left to right, with earlier params in scope.
-func (in *Interp) callFuncNamed(decl *ast.FuncDecl, self Value, args []Value, names []string, line int) Value {
-	return in.callFuncNamedIn(in.global, decl, self, args, names, line)
+func (in *Interp) callFuncNamed(decl *ast.FuncDecl, self Value, args []Value, names []string, at source.Span) Value {
+	return in.callFuncNamedIn(in.global, decl, self, args, names, at)
 }
 
 // callFuncNamedIn: base is the env the body resolves against — the
 // global env, or a nested fn's private items env (never enclosing
 // locals: nested fns do not capture).
-func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, args []Value, names []string, line int) Value {
+func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, args []Value, names []string, at source.Span) Value {
 	if in.constEval {
-		panic(rtErr{line, fmt.Sprintf("a const initializer cannot call %s — pure expressions only (comptime fn evaluation arrives later)", decl.Name)})
+		panic(rtErr{at, fmt.Sprintf("a const initializer cannot call %s — pure expressions only (comptime fn evaluation arrives later)", decl.Name)})
 	}
 	n := len(decl.Params)
 	if len(args) > n {
-		panic(rtErr{line, fmt.Sprintf("%s takes %d argument(s), got %d",
+		panic(rtErr{at, fmt.Sprintf("%s takes %d argument(s), got %d",
 			decl.Name, n, len(args))})
 	}
 	slots := make([]Value, n)
@@ -266,34 +238,34 @@ func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, arg
 			}
 		}
 		if idx < 0 {
-			panic(rtErr{line, fmt.Sprintf("%s has no parameter %q", decl.Name, names[i])})
+			panic(rtErr{at, fmt.Sprintf("%s has no parameter %q", decl.Name, names[i])})
 		}
 		if filled[idx] {
-			panic(rtErr{line, fmt.Sprintf("%s: parameter %q given twice (positionally and by name)", decl.Name, names[i])})
+			panic(rtErr{at, fmt.Sprintf("%s: parameter %q given twice (positionally and by name)", decl.Name, names[i])})
 		}
 		slots[idx], filled[idx] = a, true
 	}
 	env := newEnv(base, true)
 	env.retErr = resultErrType(decl.RetType)
 	if self != nil {
-		env.declare("self", self, decl.Self == ast.MutSelf, decl.Line)
+		env.declare("self", self, decl.Self == ast.MutSelf, decl.Span)
 	}
 	for i, prm := range decl.Params {
 		v := slots[i]
 		if !filled[i] {
 			if prm.Default == nil {
-				panic(rtErr{line, fmt.Sprintf("%s is missing its %q argument", decl.Name, prm.Name)})
+				panic(rtErr{at, fmt.Sprintf("%s is missing its %q argument", decl.Name, prm.Name)})
 			}
 			dv, sg := in.eval(prm.Default, env)
 			if sg != nil {
-				panic(rtErr{line, fmt.Sprintf("the default for %q cannot return or propagate an error", prm.Name)})
+				panic(rtErr{at, fmt.Sprintf("the default for %q cannot return or propagate an error", prm.Name)})
 			}
 			v = dv
 		}
-		env.declare(prm.Name, v, false, decl.Line)
+		env.declare(prm.Name, v, false, decl.Span)
 	}
 	if in.isGenerator(decl) {
-		return in.runGenerator(decl.Body, env, decl.Line)
+		return in.runGenerator(decl.Body, env, decl.Span)
 	}
 	v, sg := in.evalBlock(decl.Body, env)
 	if sg != nil {
@@ -302,9 +274,9 @@ func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, arg
 	// The tail-value rule (DESIGN.md, Syntax): no declared return
 	// type means a meaningful tail value is an error, not a silent
 	// discard.
-	if decl.RetType == "" {
+	if decl.RetType == nil {
 		if _, isUnit := v.(UnitV); !isUnit {
-			panic(rtErr{decl.Line, fmt.Sprintf(
+			panic(rtErr{decl.Span, fmt.Sprintf(
 				"%s declares no return value but its body ends with a %s; discard it with `_ = …` or declare `-> %s`",
 				decl.Name, typeName(v), typeName(v))})
 		}
@@ -312,40 +284,41 @@ func (in *Interp) callFuncNamedIn(base *Env, decl *ast.FuncDecl, self Value, arg
 	return v
 }
 
-func (in *Interp) callValue(fnv Value, args []Value, line int) Value {
+func (in *Interp) callValue(fnv Value, args []Value, at source.Span) Value {
 	if in.constEval {
 		if b, isB := fnv.(*BuiltinV); !isB || (b.Name != "Ok" && b.Name != "Err" && b.Name != "Some") {
-			panic(rtErr{line, "a const initializer may only call pure constructors (Ok/Err/Some) and value methods — comptime fn evaluation arrives later"})
+			panic(rtErr{at, "a const initializer may only call pure constructors (Ok/Err/Some) and value methods — comptime fn evaluation arrives later"})
 		}
 	}
 	switch f := fnv.(type) {
 	case TypeV:
 		// A distinct type's name is its constructor: NoteId(7).
 		// Explicit construction is the entire point of distinct.
-		td := in.types[string(f)]
-		if td != nil && td.Distinct != "" {
-			v := one(string(f), args, line)
-			if got := typeName(v); got != td.Distinct {
-				panic(rtErr{line, fmt.Sprintf("%s wraps %s, got %s (no implicit conversion)", f, td.Distinct, got)})
+		td := in.prog.Types[string(f)]
+		if td != nil && td.Distinct != nil {
+			v := one(string(f), args, at)
+			base := td.Distinct.String()
+			if got := typeName(v); got != base {
+				panic(rtErr{at, fmt.Sprintf("%s wraps %s, got %s (no implicit conversion)", f, base, got)})
 			}
 			return &DistinctV{Type: string(f), V: v}
 		}
-		panic(rtErr{line, fmt.Sprintf("%s is not callable (structs use braces: %s{ … })", f, f)})
+		panic(rtErr{at, fmt.Sprintf("%s is not callable (structs use braces: %s{ … })", f, f)})
 	case *FuncV:
 		base := in.global
 		if f.Items != nil {
 			base = f.Items
 		}
-		return in.callFuncNamedIn(base, f.Decl, nil, args, nil, f.Decl.Line)
+		return in.callFuncNamedIn(base, f.Decl, nil, args, nil, f.Decl.Span)
 	case *BuiltinV:
-		return f.Fn(in, args, line)
+		return f.Fn(in, args, at)
 	case *ClosureV:
 		if len(args) != len(f.Params) {
-			panic(rtErr{line, fmt.Sprintf("closure takes %d argument(s), got %d", len(f.Params), len(args))})
+			panic(rtErr{at, fmt.Sprintf("closure takes %d argument(s), got %d", len(f.Params), len(args))})
 		}
 		env := newEnv(f.Env, true)
 		for i, p := range f.Params {
-			env.declare(p, args[i], false, line)
+			env.declare(p, args[i], false, at)
 		}
 		if f.BodyExpr != nil {
 			v, sg := in.eval(f.BodyExpr, env)
@@ -360,28 +333,28 @@ func (in *Interp) callValue(fnv Value, args []Value, line int) Value {
 		}
 		return v
 	}
-	panic(rtErr{line, fmt.Sprintf("%s is not callable", typeName(fnv))})
+	panic(rtErr{at, fmt.Sprintf("%s is not callable", typeName(fnv))})
 }
 
 // findMethod resolves a self-method on a type: the type's own
 // (inherent or trait-impl) methods win; otherwise a default from a
 // trait the type declares. Two traits both providing an unoverridden
 // default is ambiguous — an error naming both.
-func (in *Interp) findMethod(typeName, method string, line int) *ast.FuncDecl {
-	if m := in.methods[typeName][method]; m != nil {
+func (in *Interp) findMethod(typeName, method string, at source.Span) *ast.FuncDecl {
+	if m := in.prog.Methods[typeName][method]; m != nil {
 		return m
 	}
 	var found *ast.FuncDecl
 	var from string
-	for _, trName := range in.typeTraits[typeName] {
-		tr := in.traits[trName]
+	for _, trName := range in.prog.TypeTraits[typeName] {
+		tr := in.prog.Traits[trName]
 		if tr == nil {
 			continue // conformance asserted to an undeclared trait
 		}
 		for _, fn := range tr.Fns {
 			if fn.Name == method && fn.Body != nil {
 				if found != nil {
-					panic(rtErr{line, fmt.Sprintf("%s.%s is ambiguous: both %s and %s provide a default (override it on %s)",
+					panic(rtErr{at, fmt.Sprintf("%s.%s is ambiguous: both %s and %s provide a default (override it on %s)",
 						typeName, method, from, trName, typeName)})
 				}
 				found, from = fn, trName
@@ -447,27 +420,23 @@ func (in *Interp) evalBlockDeferred(b *ast.Block, env *Env) (val Value, sg *sig)
 	return last, nil
 }
 
-// resultErrType extracts E from a declared "Result<T, E>" return
-// type; "" for any other shape (no conversion target).
-func resultErrType(ret string) string {
-	if !strings.HasPrefix(ret, "Result<") || !strings.HasSuffix(ret, ">") {
+// resultErrType names E from a declared `Result<T, E>` return type;
+// "" for any other shape (no conversion target).
+//
+// M1-M3 sliced this out of a display string, hand-counting angle
+// brackets to find the top-level comma. With a real TypeExpr it is an
+// index. Note it yields the *bare* name: `typeName()` and the method
+// table are both keyed by name, so `Result<_, Foo<T>>` must look up
+// "Foo" — the old string form produced "Foo<T>", which matched
+// nothing and silently skipped the conversion.
+func resultErrType(ret *ast.TypeExpr) string {
+	if ret == nil || ret.Optional || ret.Kind != ast.TypeName {
 		return ""
 	}
-	inner := ret[len("Result<") : len(ret)-1]
-	depth := 0
-	for i := 0; i < len(inner); i++ {
-		switch inner[i] {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				return strings.TrimSpace(inner[i+1:])
-			}
-		}
+	if ret.Name != "Result" || len(ret.Args) != 2 {
+		return ""
 	}
-	return ""
+	return ret.Args[1].Name
 }
 
 // loopSig decides what a loop does with a signal from its body.
@@ -503,7 +472,7 @@ func (in *Interp) runDefers(defers []*ast.DeferStmt, env *Env, errPath bool) {
 			continue
 		}
 		if _, sg := in.evalBlock(d.Body, newEnv(env, false)); sg != nil {
-			panic(rtErr{d.Line, "a defer block cannot return"})
+			panic(rtErr{d.Span, "a defer block cannot return"})
 		}
 	}
 }
@@ -517,8 +486,8 @@ func (in *Interp) hoistFns(b *ast.Block, env *Env) {
 	for _, s := range b.Stmts {
 		if fs, ok := s.(*ast.FnStmt); ok {
 			fv := &FuncV{Decl: fs.Decl, Items: items}
-			items.declare(fs.Decl.Name, fv, false, fs.Decl.Line)
-			env.declare(fs.Decl.Name, fv, false, fs.Decl.Line)
+			items.declare(fs.Decl.Name, fv, false, fs.Decl.Span)
+			env.declare(fs.Decl.Name, fv, false, fs.Decl.Span)
 		}
 	}
 }
@@ -538,16 +507,16 @@ func (in *Interp) evalStmt(s ast.Stmt, env *Env) (Value, *sig) {
 		binds, ok := match(st.Pat, v)
 		if !ok {
 			if st.Else == nil {
-				panic(rtErr{st.Line, fmt.Sprintf("let pattern does not match %s", render(v, true))})
+				panic(rtErr{st.Span, fmt.Sprintf("let pattern does not match %s", render(v, true))})
 			}
 			_, esg := in.evalBlock(st.Else, newEnv(env, false))
 			if esg != nil {
 				return UnitV{}, esg
 			}
-			panic(rtErr{st.Line, "the else block of `let … else` must diverge (return or exit), but it ran off the end"})
+			panic(rtErr{st.Span, "the else block of `let … else` must diverge (return or exit), but it ran off the end"})
 		}
 		for _, b := range binds {
-			env.declare(b.name, b.val, b.mut, st.Line)
+			env.declare(b.name, b.val, b.mut, st.Span)
 		}
 		return UnitV{}, nil
 
@@ -579,7 +548,7 @@ func (in *Interp) evalStmt(s ast.Stmt, env *Env) (Value, *sig) {
 	case *ast.ContinueStmt:
 		return UnitV{}, &sig{kind: sigContinue, val: UnitV{}, label: st.Label}
 	}
-	panic(rtErr{0, fmt.Sprintf("unhandled statement %T", s)})
+	panic(rtErr{source.Span{}, fmt.Sprintf("unhandled statement %T", s)})
 }
 
 func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
@@ -588,7 +557,7 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 		_, sg := in.eval(st.Value, env)
 		return sg
 	}
-	in.requireMutRoot(st.Target, env, st.Line)
+	in.requireMutRoot(st.Target, env, st.Span)
 
 	rhs, sg := in.eval(st.Value, env)
 	if sg != nil {
@@ -600,11 +569,11 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 		if st.Op != "=" {
 			b := env.lookup(t.Name)
 			if b == nil {
-				panic(rtErr{st.Line, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", t.Name)})
+				panic(rtErr{st.Span, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", t.Name)})
 			}
-			rhs = binop(strings.TrimSuffix(st.Op, "="), b.v, rhs, st.Line)
+			rhs = binop(strings.TrimSuffix(st.Op, "="), b.v, rhs, st.Span)
 		}
-		env.assign(t.Name, rhs, st.Line)
+		env.assign(t.Name, rhs, st.Span)
 		return nil
 	case *ast.Index:
 		obj, sg := in.eval(t.X, env)
@@ -617,31 +586,31 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 		}
 		switch o := obj.(type) {
 		case *MapV:
-			k := hashable(idx, st.Line)
+			k := hashable(idx, st.Span)
 			if st.Op != "=" {
 				cur, ok := o.get(k)
 				if !ok {
-					panic(rtErr{st.Line, fmt.Sprintf("%s on a key that is not present; read with ?? or insert with = first", st.Op)})
+					panic(rtErr{st.Span, fmt.Sprintf("%s on a key that is not present; read with ?? or insert with = first", st.Op)})
 				}
-				rhs = binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Line)
+				rhs = binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Span)
 			}
 			o.set(k, rhs)
 			return nil
 		case *ListV:
 			i, ok := idx.(IntV)
 			if !ok {
-				panic(rtErr{st.Line, "list index must be an Int"})
+				panic(rtErr{st.Span, "list index must be an Int"})
 			}
 			if i < 0 || int(i) >= len(o.Elems) {
-				panic(rtErr{st.Line, fmt.Sprintf("list index %d out of range (len %d)", i, len(o.Elems))})
+				panic(rtErr{st.Span, fmt.Sprintf("list index %d out of range (len %d)", i, len(o.Elems))})
 			}
 			if st.Op != "=" {
-				rhs = binop(strings.TrimSuffix(st.Op, "="), o.Elems[i], rhs, st.Line)
+				rhs = binop(strings.TrimSuffix(st.Op, "="), o.Elems[i], rhs, st.Span)
 			}
 			o.Elems[i] = rhs
 			return nil
 		}
-		panic(rtErr{st.Line, fmt.Sprintf("cannot index-assign into %s", typeName(obj))})
+		panic(rtErr{st.Span, fmt.Sprintf("cannot index-assign into %s", typeName(obj))})
 	case *ast.Field:
 		obj, sg := in.eval(t.X, env)
 		if sg != nil {
@@ -649,34 +618,34 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 		}
 		sv, ok := obj.(*StructV)
 		if !ok {
-			panic(rtErr{st.Line, fmt.Sprintf("cannot assign a field on %s", typeName(obj))})
+			panic(rtErr{st.Span, fmt.Sprintf("cannot assign a field on %s", typeName(obj))})
 		}
 		cur, ok := sv.Fields[t.Name]
 		if !ok {
-			panic(rtErr{st.Line, fmt.Sprintf("%s has no field %q", sv.Type, t.Name)})
+			panic(rtErr{st.Span, fmt.Sprintf("%s has no field %q", sv.Type, t.Name)})
 		}
 		if st.Op != "=" {
-			rhs = binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Line)
+			rhs = binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Span)
 		}
 		sv.Fields[t.Name] = rhs
 		return nil
 	}
-	panic(rtErr{st.Line, "invalid assignment target"})
+	panic(rtErr{st.Span, "invalid assignment target"})
 }
 
 // requireMutRoot walks an assignment target to its root name and
 // requires a mut binding — mutability is transitive through paths.
-func (in *Interp) requireMutRoot(target ast.Expr, env *Env, line int) {
+func (in *Interp) requireMutRoot(target ast.Expr, env *Env, at source.Span) {
 	e := target
 	for {
 		switch t := e.(type) {
 		case *ast.IdentExpr:
 			b := env.lookup(t.Name)
 			if b == nil {
-				panic(rtErr{line, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", t.Name)})
+				panic(rtErr{at, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", t.Name)})
 			}
 			if !b.mut {
-				panic(rtErr{line, fmt.Sprintf("cannot mutate through immutable binding %q (declare it with `let mut`)", t.Name)})
+				panic(rtErr{at, fmt.Sprintf("cannot mutate through immutable binding %q (declare it with `let mut`)", t.Name)})
 			}
 			return
 		case *ast.Index:
@@ -688,7 +657,7 @@ func (in *Interp) requireMutRoot(target ast.Expr, env *Env, line int) {
 		default:
 			// Covers assignment targets and mut-method receivers alike:
 			// a temporary is not a path, so it has no mut path.
-			panic(rtErr{line, "cannot mutate a temporary value (bind it with `let mut` first)"})
+			panic(rtErr{at, "cannot mutate a temporary value (bind it with `let mut` first)"})
 		}
 	}
 }
@@ -700,7 +669,7 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 		if sg != nil {
 			return sg
 		}
-		next := in.iterate(it, st.Line)
+		next := in.iterate(it, st.Span)
 		for {
 			v, ok := next()
 			if !ok {
@@ -711,10 +680,10 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 			iterEnv := newEnv(env, false)
 			binds, ok2 := match(st.Pat, v)
 			if !ok2 {
-				panic(rtErr{st.Line, fmt.Sprintf("for pattern does not match %s", render(v, true))})
+				panic(rtErr{st.Span, fmt.Sprintf("for pattern does not match %s", render(v, true))})
 			}
 			for _, b := range binds {
-				iterEnv.declare(b.name, b.val, b.mut, st.Line)
+				iterEnv.declare(b.name, b.val, b.mut, st.Span)
 			}
 			if _, sg := in.evalBlock(st.Body, iterEnv); sg != nil {
 				if done, out := loopSig(sg, st.Label); done {
@@ -730,7 +699,7 @@ func (in *Interp) evalFor(st *ast.ForStmt, env *Env) *sig {
 			}
 			b, ok := c.(BoolV)
 			if !ok {
-				panic(rtErr{st.Line, fmt.Sprintf("loop condition must be Bool, got %s", typeName(c))})
+				panic(rtErr{st.Span, fmt.Sprintf("loop condition must be Bool, got %s", typeName(c))})
 			}
 			if !b {
 				return nil
@@ -809,7 +778,7 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 				return nil, false
 			}
 			if !pt.Rest && len(pt.Fields) != len(vv.FieldNames) {
-				panic(rtErr{pt.Line, fmt.Sprintf(
+				panic(rtErr{pt.Span, fmt.Sprintf(
 					"variant pattern %s{…} names %d of %d fields; mention them all, or end with `..` for a deliberate partial match",
 					pt.Type, len(pt.Fields), len(vv.FieldNames))})
 			}
@@ -823,7 +792,7 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 					}
 				}
 				if idx < 0 {
-					panic(rtErr{pt.Line, fmt.Sprintf("%s has no field %q", pt.Type, f.Name)})
+					panic(rtErr{pt.Span, fmt.Sprintf("%s has no field %q", pt.Type, f.Name)})
 				}
 				bs, ok := match(f.Pat, vv.Args[idx])
 				if !ok {
@@ -840,7 +809,7 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 		// Partial matches must say so: without `..` every field is
 		// mentioned, so new fields break match sites (the point).
 		if !pt.Rest && len(pt.Fields) != len(sv.Fields) {
-			panic(rtErr{pt.Line, fmt.Sprintf(
+			panic(rtErr{pt.Span, fmt.Sprintf(
 				"struct pattern %s{…} names %d of %d fields; mention them all, or end with `..` for a deliberate partial match",
 				pt.Type, len(pt.Fields), len(sv.Fields))})
 		}
@@ -848,7 +817,7 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 		for _, f := range pt.Fields {
 			fv, ok := sv.Fields[f.Name]
 			if !ok {
-				panic(rtErr{pt.Line, fmt.Sprintf("%s has no field %q", pt.Type, f.Name)})
+				panic(rtErr{pt.Span, fmt.Sprintf("%s has no field %q", pt.Type, f.Name)})
 			}
 			bs, ok2 := match(f.Pat, fv)
 			if !ok2 {
@@ -985,7 +954,7 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 				if sg != nil {
 					return UnitV{}, sg
 				}
-				next := in.iterate(v, sp.Line)
+				next := in.iterate(v, sp.Span)
 				for {
 					e, ok := next()
 					if !ok {
@@ -1013,7 +982,7 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 			if sg != nil {
 				return UnitV{}, sg
 			}
-			mv.set(hashable(k, 0), v)
+			mv.set(hashable(k, source.Span{}), v)
 		}
 		return mv, nil
 	case *ast.RangeExpr:
@@ -1028,13 +997,13 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		l, ok1 := lo.(IntV)
 		h, ok2 := hi.(IntV)
 		if !ok1 || !ok2 {
-			panic(rtErr{ex.Line, "range bounds must be Int"})
+			panic(rtErr{ex.Span, "range bounds must be Int"})
 		}
 		end := int64(h)
 		if ex.Incl {
 			// ..= desugars to the half-open range one past hi.
 			if end == math.MaxInt64 {
-				panic(rtErr{ex.Line, "..= cannot include the maximum Int"})
+				panic(rtErr{ex.Span, "..= cannot include the maximum Int"})
 			}
 			end++
 		}
@@ -1049,17 +1018,17 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 			switch n := v.(type) {
 			case IntV:
 				if n == math.MinInt64 {
-					panic(rtErr{ex.Line, "Int overflow: negating the minimum Int (dev builds trap; release wraps)"})
+					panic(rtErr{ex.Span, "Int overflow: negating the minimum Int (dev builds trap; release wraps)"})
 				}
 				return -n, nil
 			case FloatV:
 				return -n, nil
 			}
-			panic(rtErr{ex.Line, fmt.Sprintf("cannot negate %s", typeName(v))})
+			panic(rtErr{ex.Span, fmt.Sprintf("cannot negate %s", typeName(v))})
 		case "!":
 			b, ok := v.(BoolV)
 			if !ok {
-				panic(rtErr{ex.Line, fmt.Sprintf("! requires Bool, got %s", typeName(v))})
+				panic(rtErr{ex.Span, fmt.Sprintf("! requires Bool, got %s", typeName(v))})
 			}
 			return !b, nil
 		}
@@ -1087,7 +1056,7 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 		r, ok := v.(*ResultV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("? requires a Result, got %s", typeName(v))})
+			panic(rtErr{ex.Span, fmt.Sprintf("? requires a Result, got %s", typeName(v))})
 		}
 		if r.Ok {
 			return r.V, nil
@@ -1097,8 +1066,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		// already an E, E.from converts it — Rust's From, in the
 		// trait-less associated-fn form until the checker era.
 		if target := env.fnRetErr(); target != "" && typeName(r.V) != target {
-			if m := in.methods[target]["from"]; m != nil && m.Self == ast.NoSelf {
-				conv := in.callFuncNamed(m, nil, []Value{r.V}, nil, ex.Line)
+			if m := in.prog.Methods[target]["from"]; m != nil && m.Self == ast.NoSelf {
+				conv := in.callFuncNamed(m, nil, []Value{r.V}, nil, ex.Span)
 				return UnitV{}, &sig{val: &ResultV{Ok: false, V: conv}}
 			}
 		}
@@ -1110,10 +1079,10 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 		tv, ok := v.(TupleV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf(".%d requires a tuple, got %s", ex.N, typeName(v))})
+			panic(rtErr{ex.Span, fmt.Sprintf(".%d requires a tuple, got %s", ex.N, typeName(v))})
 		}
 		if ex.N >= len(tv) {
-			panic(rtErr{ex.Line, fmt.Sprintf("tuple has no field .%d (size %d)", ex.N, len(tv))})
+			panic(rtErr{ex.Span, fmt.Sprintf("tuple has no field .%d (size %d)", ex.N, len(tv))})
 		}
 		return tv[ex.N], nil
 	case *ast.Index:
@@ -1135,10 +1104,10 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 		if tv, isType := v.(TypeV); isType {
 			// Namespaced variant: Color.Red, Shape.Circle (ctor).
-			if vi, ok := in.variants[ex.Name]; ok && vi.typeName == string(tv) {
-				return in.variantValue(ex.Name, vi, ex.Line), nil
+			if vi, ok := in.prog.Variants[ex.Name]; ok && vi.Type == string(tv) {
+				return in.variantValue(ex.Name, vi, ex.Span), nil
 			}
-			panic(rtErr{ex.Line, fmt.Sprintf("%s has no variant %q", tv, ex.Name)})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s has no variant %q", tv, ex.Name)})
 		}
 		if vv, isVar := v.(*VariantV); isVar {
 			for i, fn := range vv.FieldNames {
@@ -1146,25 +1115,25 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 					return vv.Args[i], nil
 				}
 			}
-			panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q", vv.Name, ex.Name)})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s has no field %q", vv.Name, ex.Name)})
 		}
 		st, ok := v.(*StructV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q (methods need call parens)", typeName(v), ex.Name)})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s has no field %q (methods need call parens)", typeName(v), ex.Name)})
 		}
 		fv, ok := st.Fields[ex.Name]
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q", st.Type, ex.Name)})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s has no field %q", st.Type, ex.Name)})
 		}
 		return fv, nil
 	case *ast.StructLit:
 		return in.evalStructLit(ex, env)
 	case *ast.DotName:
-		vi, ok := in.variants[ex.Name]
+		vi, ok := in.prog.Variants[ex.Name]
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf(".%s: no type declares a variant %q", ex.Name, ex.Name)})
+			panic(rtErr{ex.Span, fmt.Sprintf(".%s: no type declares a variant %q", ex.Name, ex.Name)})
 		}
-		return in.variantValue(ex.Name, vi, ex.Line), nil
+		return in.variantValue(ex.Name, vi, ex.Span), nil
 	case *ast.Match:
 		return in.evalMatch(ex, env)
 	case *ast.CondMatch:
@@ -1174,46 +1143,46 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 	case *ast.Call:
 		return in.evalCall(ex, env)
 	}
-	panic(rtErr{0, fmt.Sprintf("unhandled expression %T", e)})
+	panic(rtErr{source.Span{}, fmt.Sprintf("unhandled expression %T", e)})
 }
 
 func (in *Interp) evalIdent(ex *ast.IdentExpr, env *Env) (Value, *sig) {
 	if ex.Name == "_" {
-		panic(rtErr{ex.Line, "_ discards; it cannot be read"})
+		panic(rtErr{ex.Span, "_ discards; it cannot be read"})
 	}
 	if b := env.lookup(ex.Name); b != nil {
 		return b.v, nil
 	}
-	if fn, ok := in.fns[ex.Name]; ok {
+	if fn, ok := in.prog.Fns[ex.Name]; ok {
 		return &FuncV{Decl: fn}, nil
 	}
-	if in.imports[ex.Name] {
+	if in.prog.Imports[ex.Name] {
 		return ModuleV(ex.Name), nil
 	}
 	if ex.Name == "None" {
 		return NoneV{}, nil
 	}
-	if _, ok := in.types[ex.Name]; ok {
+	if _, ok := in.prog.Types[ex.Name]; ok {
 		return TypeV(ex.Name), nil
 	}
-	if vi, ok := in.variants[ex.Name]; ok {
-		panic(rtErr{ex.Line, fmt.Sprintf(
+	if vi, ok := in.prog.Variants[ex.Name]; ok {
+		panic(rtErr{ex.Span, fmt.Sprintf(
 			"variants are namespaced: write .%s or %s.%s (bare variant names are pattern-only)",
-			ex.Name, vi.typeName, ex.Name)})
+			ex.Name, vi.Type, ex.Name)})
 	}
 	if b, ok := builtins[ex.Name]; ok {
 		return b, nil
 	}
-	panic(rtErr{ex.Line, fmt.Sprintf("undefined name %q", ex.Name)})
+	panic(rtErr{ex.Span, fmt.Sprintf("undefined name %q", ex.Name)})
 }
 
 func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
-	td, ok := in.types[ex.Type]
+	td, ok := in.prog.Types[ex.Type]
 	if !ok || td.Fields == nil {
-		if vi, isVar := in.variants[ex.Type]; isVar && vi.fields != nil {
+		if vi, isVar := in.prog.Variants[ex.Type]; isVar && vi.Fields != nil {
 			return in.evalVariantLit(ex, vi, env)
 		}
-		panic(rtErr{ex.Line, fmt.Sprintf("%q is not a struct type", ex.Type)})
+		panic(rtErr{ex.Span, fmt.Sprintf("%q is not a struct type", ex.Type)})
 	}
 	sv := &StructV{Type: ex.Type, Fields: map[string]Value{}}
 	for _, fd := range td.Fields {
@@ -1226,7 +1195,7 @@ func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
 		}
 		bs, ok := base.(*StructV)
 		if !ok || bs.Type != ex.Type {
-			panic(rtErr{ex.Line, fmt.Sprintf("..base must be a %s, got %s", ex.Type, typeName(base))})
+			panic(rtErr{ex.Span, fmt.Sprintf("..base must be a %s, got %s", ex.Type, typeName(base))})
 		}
 		for f, v := range bs.Fields {
 			sv.Fields[f] = v // copy-with-changes; base object untouched
@@ -1241,7 +1210,7 @@ func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
 			}
 		}
 		if !found {
-			panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q", ex.Type, name)})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s has no field %q", ex.Type, name)})
 		}
 		v, sg := in.eval(ex.Vals[i], env)
 		if sg != nil {
@@ -1253,7 +1222,7 @@ func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
 	// literal or by ..base.
 	for _, fd := range td.Fields {
 		if _, ok := sv.Fields[fd.Name]; !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("missing field %q in %s literal (no zero values)", fd.Name, ex.Type)})
+			panic(rtErr{ex.Span, fmt.Sprintf("missing field %q in %s literal (no zero values)", fd.Name, ex.Type)})
 		}
 	}
 	return sv, nil
@@ -1261,9 +1230,9 @@ func (in *Interp) evalStructLit(ex *ast.StructLit, env *Env) (Value, *sig) {
 
 // evalVariantLit constructs a named-field variant: NotFound{ id: 7 }.
 // Every declared field, exactly once; ..base is a struct affair.
-func (in *Interp) evalVariantLit(ex *ast.StructLit, vi variantInfo, env *Env) (Value, *sig) {
+func (in *Interp) evalVariantLit(ex *ast.StructLit, vi program.Variant, env *Env) (Value, *sig) {
 	if ex.Base != nil {
-		panic(rtErr{ex.Line, fmt.Sprintf("..base is for structs; %s is a variant of %s", ex.Type, vi.typeName)})
+		panic(rtErr{ex.Span, fmt.Sprintf("..base is for structs; %s is a variant of %s", ex.Type, vi.Type)})
 	}
 	given := map[string]Value{}
 	for i, name := range ex.Names {
@@ -1273,17 +1242,17 @@ func (in *Interp) evalVariantLit(ex *ast.StructLit, vi variantInfo, env *Env) (V
 		}
 		given[name] = v
 	}
-	vv := &VariantV{Type: vi.typeName, Name: ex.Type, FieldNames: vi.fields}
-	for _, f := range vi.fields {
+	vv := &VariantV{Type: vi.Type, Name: ex.Type, FieldNames: vi.Fields}
+	for _, f := range vi.Fields {
 		v, ok := given[f]
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("%s is missing field %q (no zero values — every field is named)", ex.Type, f)})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s is missing field %q (no zero values — every field is named)", ex.Type, f)})
 		}
 		vv.Args = append(vv.Args, v)
 		delete(given, f)
 	}
 	for name := range given {
-		panic(rtErr{ex.Line, fmt.Sprintf("%s has no field %q", ex.Type, name)})
+		panic(rtErr{ex.Span, fmt.Sprintf("%s has no field %q", ex.Type, name)})
 	}
 	return vv, nil
 }
@@ -1291,18 +1260,18 @@ func (in *Interp) evalVariantLit(ex *ast.StructLit, vi variantInfo, env *Env) (V
 // variantValue resolves a variant reference: an arity-0 variant is
 // its value; a positional-payload variant is its constructor; a
 // named-field variant needs braces.
-func (in *Interp) variantValue(name string, vi variantInfo, line int) Value {
-	if vi.fields != nil {
-		panic(rtErr{line, fmt.Sprintf("%s has named fields; construct it with %s{ … }", name, name)})
+func (in *Interp) variantValue(name string, vi program.Variant, at source.Span) Value {
+	if vi.Fields != nil {
+		panic(rtErr{at, fmt.Sprintf("%s has named fields; construct it with %s{ … }", name, name)})
 	}
-	if vi.arity == 0 {
-		return &VariantV{Type: vi.typeName, Name: name}
+	if vi.Arity == 0 {
+		return &VariantV{Type: vi.Type, Name: name}
 	}
-	return &BuiltinV{Name: name, Fn: func(_ *Interp, args []Value, l int) Value {
-		if len(args) != vi.arity {
-			panic(rtErr{l, fmt.Sprintf("%s takes %d argument(s), got %d", name, vi.arity, len(args))})
+	return &BuiltinV{Name: name, Fn: func(_ *Interp, args []Value, l source.Span) Value {
+		if len(args) != vi.Arity {
+			panic(rtErr{l, fmt.Sprintf("%s takes %d argument(s), got %d", name, vi.Arity, len(args))})
 		}
-		return &VariantV{Type: vi.typeName, Name: name, Args: args}
+		return &VariantV{Type: vi.Type, Name: name, Args: args}
 	}}
 }
 
@@ -1326,7 +1295,7 @@ func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
 		}
 		armEnv := newEnv(env, false)
 		for _, b := range binds {
-			armEnv.declare(b.name, b.val, b.mut, arm.Line)
+			armEnv.declare(b.name, b.val, b.mut, arm.Span)
 		}
 		if arm.Guard != nil {
 			g, sg := in.eval(arm.Guard, armEnv)
@@ -1335,7 +1304,7 @@ func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
 			}
 			gb, isBool := g.(BoolV)
 			if !isBool {
-				panic(rtErr{arm.Line, fmt.Sprintf("match guard must be Bool, got %s", typeName(g))})
+				panic(rtErr{arm.Span, fmt.Sprintf("match guard must be Bool, got %s", typeName(g))})
 			}
 			if !gb {
 				continue
@@ -1343,7 +1312,7 @@ func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
 		}
 		return in.eval(arm.Body, armEnv)
 	}
-	panic(rtErr{ex.Line, fmt.Sprintf("no match arm matched %s (exhaustiveness checking arrives with the compiler)", render(x, true))})
+	panic(rtErr{ex.Span, fmt.Sprintf("no match arm matched %s (exhaustiveness checking arrives with the compiler)", render(x, true))})
 }
 
 func (in *Interp) evalCondMatch(ex *ast.CondMatch, env *Env) (Value, *sig) {
@@ -1356,7 +1325,7 @@ func (in *Interp) evalCondMatch(ex *ast.CondMatch, env *Env) (Value, *sig) {
 			}
 			cb, isBool := c.(BoolV)
 			if !isBool {
-				panic(rtErr{arm.Line, fmt.Sprintf("subjectless match arm must be Bool, got %s", typeName(c))})
+				panic(rtErr{arm.Span, fmt.Sprintf("subjectless match arm must be Bool, got %s", typeName(c))})
 			}
 			if !cb {
 				continue
@@ -1364,7 +1333,7 @@ func (in *Interp) evalCondMatch(ex *ast.CondMatch, env *Env) (Value, *sig) {
 		}
 		return in.eval(arm.Body, newEnv(env, false))
 	}
-	panic(rtErr{ex.Line, "no match arm was true (add a `_ =>` arm)"})
+	panic(rtErr{ex.Span, "no match arm was true (add a `_ =>` arm)"})
 }
 
 func (in *Interp) evalIfLet(ex *ast.IfLet, env *Env) (Value, *sig) {
@@ -1383,11 +1352,11 @@ func (in *Interp) evalIfLet(ex *ast.IfLet, env *Env) (Value, *sig) {
 	}
 	binds, ok := match(ex.Pat, x)
 	if !ok {
-		panic(rtErr{ex.Line, fmt.Sprintf("if let pattern does not match %s", render(x, true))})
+		panic(rtErr{ex.Span, fmt.Sprintf("if let pattern does not match %s", render(x, true))})
 	}
 	thenEnv := newEnv(env, false)
 	for _, b := range binds {
-		thenEnv.declare(b.name, b.val, b.mut, ex.Line)
+		thenEnv.declare(b.name, b.val, b.mut, ex.Span)
 	}
 	return in.evalBlock(ex.Then, thenEnv)
 }
@@ -1405,7 +1374,7 @@ func (in *Interp) evalStr(ex *ast.StrLit, env *Env) (Value, *sig) {
 		}
 		s := display(v)
 		if part.Spec != "" {
-			s = formatSpec(v, part.Spec, ex.Line)
+			s = formatSpec(v, part.Spec, part.Span)
 		}
 		sb.WriteString(s)
 	}
@@ -1418,9 +1387,9 @@ func (in *Interp) evalStr(ex *ast.StrLit, env *Env) (Value, *sig) {
 // [`.`prec] — right-aligned width, `-` left-aligns, leading `0`
 // zero-pads, `,` groups thousands, `.prec` fixes decimal places.
 // A spec that doesn't fit the value's type is an error, never noise.
-func formatSpec(v Value, spec string, line int) string {
+func formatSpec(v Value, spec string, at source.Span) string {
 	bad := func(msg string) string {
-		panic(rtErr{line, fmt.Sprintf("format spec %q: %s", spec, msg)})
+		panic(rtErr{at, fmt.Sprintf("format spec %q: %s", spec, msg)})
 	}
 	switch spec {
 	case "?":
@@ -1559,7 +1528,7 @@ func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {
 	case "&&", "||":
 		lb, ok := l.(BoolV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("%s requires Bool, got %s", ex.Op, typeName(l))})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s requires Bool, got %s", ex.Op, typeName(l))})
 		}
 		if (ex.Op == "&&" && !lb) || (ex.Op == "||" && lb) {
 			return lb, nil
@@ -1570,7 +1539,7 @@ func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {
 		}
 		rb, ok := r.(BoolV)
 		if !ok {
-			panic(rtErr{ex.Line, fmt.Sprintf("%s requires Bool, got %s", ex.Op, typeName(r))})
+			panic(rtErr{ex.Span, fmt.Sprintf("%s requires Bool, got %s", ex.Op, typeName(r))})
 		}
 		return rb, nil
 	}
@@ -1578,17 +1547,17 @@ func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {
 	if sg != nil {
 		return UnitV{}, sg
 	}
-	return binop(ex.Op, l, r, ex.Line), nil
+	return binop(ex.Op, l, r, ex.Span), nil
 }
 
-func binop(op string, l, r Value, line int) Value {
+func binop(op string, l, r Value, at source.Span) Value {
 	// Equality is structural for every comparable type; ordered
 	// comparisons stay per-type below.
 	switch op {
 	case "==":
-		return BoolV(eq(l, r, line))
+		return BoolV(eq(l, r, at))
 	case "!=":
-		return BoolV(!eq(l, r, line))
+		return BoolV(!eq(l, r, at))
 	}
 	if li, ok := l.(IntV); ok {
 		if ri, ok := r.(IntV); ok {
@@ -1598,32 +1567,32 @@ func binop(op string, l, r Value, line int) Value {
 			case "+":
 				c := li + ri
 				if (c > li) != (ri > 0) {
-					panic(rtErr{line, fmt.Sprintf("Int overflow: %d + %d (dev builds trap; release wraps)", li, ri)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d + %d (dev builds trap; release wraps)", li, ri)})
 				}
 				return c
 			case "-":
 				c := li - ri
 				if (c < li) != (ri > 0) {
-					panic(rtErr{line, fmt.Sprintf("Int overflow: %d - %d (dev builds trap; release wraps)", li, ri)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d - %d (dev builds trap; release wraps)", li, ri)})
 				}
 				return c
 			case "*":
 				c := li * ri
 				if li != 0 && (c/li != ri || (li == -1 && ri == math.MinInt64)) {
-					panic(rtErr{line, fmt.Sprintf("Int overflow: %d * %d (dev builds trap; release wraps)", li, ri)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d * %d (dev builds trap; release wraps)", li, ri)})
 				}
 				return c
 			case "/":
 				if ri == 0 {
-					panic(rtErr{line, "division by zero"})
+					panic(rtErr{at, "division by zero"})
 				}
 				if li == math.MinInt64 && ri == -1 {
-					panic(rtErr{line, fmt.Sprintf("Int overflow: %d / -1 (dev builds trap; release wraps)", li)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d / -1 (dev builds trap; release wraps)", li)})
 				}
 				return li / ri
 			case "%":
 				if ri == 0 {
-					panic(rtErr{line, "division by zero"})
+					panic(rtErr{at, "division by zero"})
 				}
 				if li == math.MinInt64 && ri == -1 {
 					return IntV(0)
@@ -1683,7 +1652,7 @@ func binop(op string, l, r Value, line int) Value {
 				return ld * DurationV(rv)
 			case "/":
 				if rv == 0 {
-					panic(rtErr{line, "division by zero"})
+					panic(rtErr{at, "division by zero"})
 				}
 				return ld / DurationV(rv)
 			}
@@ -1774,7 +1743,7 @@ func binop(op string, l, r Value, line int) Value {
 			}
 		}
 	}
-	panic(rtErr{line, fmt.Sprintf("operator %s not defined for %s and %s", op, typeName(l), typeName(r))})
+	panic(rtErr{at, fmt.Sprintf("operator %s not defined for %s and %s", op, typeName(l), typeName(r))})
 }
 
 func (in *Interp) evalIf(ex *ast.If, env *Env) (Value, *sig) {
@@ -1784,7 +1753,7 @@ func (in *Interp) evalIf(ex *ast.If, env *Env) (Value, *sig) {
 	}
 	b, ok := c.(BoolV)
 	if !ok {
-		panic(rtErr{ex.Line, fmt.Sprintf("if condition must be Bool, got %s", typeName(c))})
+		panic(rtErr{ex.Span, fmt.Sprintf("if condition must be Bool, got %s", typeName(c))})
 	}
 	if b {
 		return in.evalBlock(ex.Then, newEnv(env, false))
@@ -1811,7 +1780,7 @@ func (in *Interp) evalIndex(ex *ast.Index, env *Env) (Value, *sig) {
 	case *MapV:
 		// A map read is honest about absence: it returns an Option
 		// (unboxed: the value, or None).
-		v, ok := o.get(hashable(idx, ex.Line))
+		v, ok := o.get(hashable(idx, ex.Span))
 		if !ok {
 			return NoneV{}, nil
 		}
@@ -1819,14 +1788,14 @@ func (in *Interp) evalIndex(ex *ast.Index, env *Env) (Value, *sig) {
 	case *ListV:
 		i, ok := idx.(IntV)
 		if !ok {
-			panic(rtErr{ex.Line, "list index must be an Int"})
+			panic(rtErr{ex.Span, "list index must be an Int"})
 		}
 		if i < 0 || int(i) >= len(o.Elems) {
-			panic(rtErr{ex.Line, fmt.Sprintf("list index %d out of range (len %d)", i, len(o.Elems))})
+			panic(rtErr{ex.Span, fmt.Sprintf("list index %d out of range (len %d)", i, len(o.Elems))})
 		}
 		return o.Elems[i], nil
 	}
-	panic(rtErr{ex.Line, fmt.Sprintf("cannot index %s", typeName(obj))})
+	panic(rtErr{ex.Span, fmt.Sprintf("cannot index %s", typeName(obj))})
 }
 
 func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
@@ -1839,9 +1808,9 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 	// name is validated here and the call proceeds positionally.
 	if id, ok := ex.Fn.(*ast.IdentExpr); ok && id.Name == "channel" && ex.Names != nil {
 		if len(ex.Names) != 1 || ex.Names[0] != "cap" {
-			panic(rtErr{ex.Line, "channel takes no arguments or (cap: n)"})
+			panic(rtErr{ex.Span, "channel takes no arguments or (cap: n)"})
 		}
-		ex = &ast.Call{Fn: ex.Fn, Args: ex.Args, Line: ex.Line}
+		ex = &ast.Call{Fn: ex.Fn, Args: ex.Args, Span: ex.Span}
 	}
 	// Method / module calls: f.X.name(args)
 	if f, ok := ex.Fn.(*ast.Field); ok {
@@ -1855,55 +1824,55 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 		}
 		if mod, isMod := recv.(ModuleV); isMod {
 			rejectNamed(ex, "module functions")
-			return in.moduleCall(string(mod), f.Name, args, ex.Line), nil
+			return in.moduleCall(string(mod), f.Name, args, ex.Span), nil
 		}
 		// Associated functions: Tree.new()
 		if tv, isType := recv.(TypeV); isType {
 			// Namespaced variant constructor: Shape.Circle(2).
-			if vi, ok := in.variants[f.Name]; ok && vi.typeName == string(tv) {
+			if vi, ok := in.prog.Variants[f.Name]; ok && vi.Type == string(tv) {
 				rejectNamed(ex, "variant constructors")
-				return in.callValue(in.variantValue(f.Name, vi, ex.Line), args, ex.Line), nil
+				return in.callValue(in.variantValue(f.Name, vi, ex.Span), args, ex.Span), nil
 			}
-			m := in.methods[string(tv)][f.Name]
+			m := in.prog.Methods[string(tv)][f.Name]
 			if m == nil {
-				panic(rtErr{ex.Line, fmt.Sprintf("type %s has no associated function %q", tv, f.Name)})
+				panic(rtErr{ex.Span, fmt.Sprintf("type %s has no associated function %q", tv, f.Name)})
 			}
 			if m.Self != ast.NoSelf {
-				panic(rtErr{ex.Line, fmt.Sprintf("%s.%s is a method; call it on a value", tv, f.Name)})
+				panic(rtErr{ex.Span, fmt.Sprintf("%s.%s is a method; call it on a value", tv, f.Name)})
 			}
-			return in.callFuncNamed(m, nil, args, ex.Names, ex.Line), nil
+			return in.callFuncNamed(m, nil, args, ex.Names, ex.Span), nil
 		}
 		// value() unwraps a distinct type — the one built-in escape
 		// hatch (explicit, so the conversion is visible at the site).
 		if dv, isDist := recv.(*DistinctV); isDist && f.Name == "value" {
 			if len(args) != 0 {
-				panic(rtErr{ex.Line, "value takes no arguments"})
+				panic(rtErr{ex.Span, "value takes no arguments"})
 			}
 			return dv.V, nil
 		}
 		// User-defined methods on structs and variants; a trait
 		// default fills in when the type doesn't override.
 		if tn := userTypeName(recv); tn != "" {
-			m := in.findMethod(tn, f.Name, ex.Line)
+			m := in.findMethod(tn, f.Name, ex.Span)
 			if m == nil {
-				panic(rtErr{ex.Line, fmt.Sprintf("%s has no method %q", tn, f.Name)})
+				panic(rtErr{ex.Span, fmt.Sprintf("%s has no method %q", tn, f.Name)})
 			}
 			if m.Self == ast.NoSelf {
-				panic(rtErr{ex.Line, fmt.Sprintf("%s.%s is an associated function; call it as %s.%s(…)", tn, f.Name, tn, f.Name)})
+				panic(rtErr{ex.Span, fmt.Sprintf("%s.%s is an associated function; call it as %s.%s(…)", tn, f.Name, tn, f.Name)})
 			}
 			// A `mut self` method is callable only through a mut
 			// path — receiver marking happens at the declaration,
 			// not the call site, but the path rule still holds.
 			if m.Self == ast.MutSelf {
-				in.requireMutRoot(f.X, env, ex.Line)
+				in.requireMutRoot(f.X, env, ex.Span)
 			}
-			return in.callFuncNamed(m, recv, args, ex.Names, ex.Line), nil
+			return in.callFuncNamed(m, recv, args, ex.Names, ex.Span), nil
 		}
 		if builtinMutMethods[typeName(recv)+"."+f.Name] {
-			in.requireMutRoot(f.X, env, ex.Line)
+			in.requireMutRoot(f.X, env, ex.Span)
 		}
 		rejectNamed(ex, "builtin methods")
-		return in.methodCall(recv, f.Name, args, ex.Line), nil
+		return in.methodCall(recv, f.Name, args, ex.Span), nil
 	}
 	// Direct call of a declared function by name: the one place
 	// defaults and named arguments apply (function *values* keep
@@ -1920,14 +1889,14 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 				if fv.Items != nil {
 					base = fv.Items
 				}
-				return in.callFuncNamedIn(base, fv.Decl, nil, args, ex.Names, ex.Line), nil
+				return in.callFuncNamedIn(base, fv.Decl, nil, args, ex.Names, ex.Span), nil
 			}
-		} else if fn, isFn := in.fns[id.Name]; isFn {
+		} else if fn, isFn := in.prog.Fns[id.Name]; isFn {
 			args, sg := in.evalArgs(ex.Args, env)
 			if sg != nil {
 				return UnitV{}, sg
 			}
-			return in.callFuncNamed(fn, nil, args, ex.Names, ex.Line), nil
+			return in.callFuncNamed(fn, nil, args, ex.Names, ex.Span), nil
 		}
 	}
 	fnv, sg := in.eval(ex.Fn, env)
@@ -1939,14 +1908,14 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 		return UnitV{}, sg
 	}
 	rejectNamed(ex, "closures, builtins, and function values")
-	return in.callValue(fnv, args, ex.Line), nil
+	return in.callValue(fnv, args, ex.Span), nil
 }
 
 // rejectNamed guards call paths where named arguments cannot bind:
 // only a declared function's signature carries parameter names.
 func rejectNamed(ex *ast.Call, what string) {
 	if ex.Names != nil {
-		panic(rtErr{ex.Line, fmt.Sprintf("named arguments work on declared functions and methods, not %s", what)})
+		panic(rtErr{ex.Span, fmt.Sprintf("named arguments work on declared functions and methods, not %s", what)})
 	}
 }
 
@@ -1966,7 +1935,7 @@ func userTypeName(v Value) string {
 // other Bool expression reports generically.
 func (in *Interp) evalExpect(ex *ast.Call, env *Env) (Value, *sig) {
 	if len(ex.Args) != 1 {
-		panic(rtErr{ex.Line, "expect takes exactly one expression"})
+		panic(rtErr{ex.Span, "expect takes exactly one expression"})
 	}
 	if b, ok := ex.Args[0].(*ast.Binary); ok {
 		switch b.Op {
@@ -1979,11 +1948,11 @@ func (in *Interp) evalExpect(ex *ast.Call, env *Env) (Value, *sig) {
 			if sg != nil {
 				return UnitV{}, sg
 			}
-			res := binop(b.Op, l, r, b.Line)
+			res := binop(b.Op, l, r, b.Span)
 			if res == BoolV(true) {
 				return UnitV{}, nil
 			}
-			panic(testFail{ex.Line, fmt.Sprintf("expect failed: left %s right\n  left:  %s\n  right: %s",
+			panic(testFail{ex.Span, fmt.Sprintf("expect failed: left %s right\n  left:  %s\n  right: %s",
 				b.Op, render(l, true), render(r, true))})
 		}
 	}
@@ -1994,7 +1963,7 @@ func (in *Interp) evalExpect(ex *ast.Call, env *Env) (Value, *sig) {
 	if v == BoolV(true) {
 		return UnitV{}, nil
 	}
-	panic(testFail{ex.Line, fmt.Sprintf("expect failed (value: %s)", render(v, true))})
+	panic(testFail{ex.Span, fmt.Sprintf("expect failed (value: %s)", render(v, true))})
 }
 
 func (in *Interp) evalArgs(exprs []ast.Expr, env *Env) ([]Value, *sig) {

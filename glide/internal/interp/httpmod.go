@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"glide/internal/source"
 )
 
 // http host shim (M2), shaped by DESIGN.md's HTTP specifics:
@@ -35,76 +37,76 @@ type (
 	}
 )
 
-func (in *Interp) httpCall(name string, args []Value, line int) Value {
+func (in *Interp) httpCall(name string, args []Value, at source.Span) Value {
 	switch name {
 	case "router":
 		if len(args) != 0 {
-			panic(rtErr{line, "http.router takes no arguments"})
+			panic(rtErr{at, "http.router takes no arguments"})
 		}
 		return &RouterV{}
 	case "serve":
 		if len(args) != 2 {
-			panic(rtErr{line, "http.serve takes (addr, router)"})
+			panic(rtErr{at, "http.serve takes (addr, router)"})
 		}
 		addr, ok := args[0].(StrV)
 		rt, ok2 := args[1].(*RouterV)
 		if !ok || !ok2 {
-			panic(rtErr{line, "http.serve takes (addr: String, router: Router)"})
+			panic(rtErr{at, "http.serve takes (addr: String, router: Router)"})
 		}
-		return in.httpServe(string(addr), rt, line)
+		return in.httpServe(string(addr), rt, at)
 	case "get":
-		url, ok := one("http.get", args, line).(StrV)
+		url, ok := one("http.get", args, at).(StrV)
 		if !ok {
-			panic(rtErr{line, "http.get takes a URL String"})
+			panic(rtErr{at, "http.get takes a URL String"})
 		}
 		return in.httpDo(http.MethodGet, string(url), "")
 	case "post":
 		if len(args) != 2 {
-			panic(rtErr{line, "http.post takes (url, body) — the body is sent as JSON"})
+			panic(rtErr{at, "http.post takes (url, body) — the body is sent as JSON"})
 		}
 		url, ok := args[0].(StrV)
 		body, ok2 := args[1].(StrV)
 		if !ok || !ok2 {
-			panic(rtErr{line, "http.post takes (url: String, body: String)"})
+			panic(rtErr{at, "http.post takes (url: String, body: String)"})
 		}
 		return in.httpDo(http.MethodPost, string(url), string(body))
 	// Response constructors: tiny, closed set — enough to dogfood.
 	case "text":
-		s, ok := one("http.text", args, line).(StrV)
+		s, ok := one("http.text", args, at).(StrV)
 		if !ok {
-			panic(rtErr{line, "http.text takes a String"})
+			panic(rtErr{at, "http.text takes a String"})
 		}
 		return &ResponseV{status: 200, contentType: "text/plain; charset=utf-8", body: string(s)}
 	case "json":
-		v := one("http.json", args, line)
+		v := one("http.json", args, at)
 		var b strings.Builder
-		encodeJSON(&b, v, line)
+		encodeJSON(&b, v, at)
 		return &ResponseV{status: 200, contentType: "application/json", body: b.String()}
 	case "created":
 		if len(args) != 0 {
-			panic(rtErr{line, "http.created takes no arguments"})
+			panic(rtErr{at, "http.created takes no arguments"})
 		}
 		return &ResponseV{status: 201, contentType: "text/plain; charset=utf-8", body: "created"}
 	case "bad_request":
-		s, ok := one("http.bad_request", args, line).(StrV)
+		s, ok := one("http.bad_request", args, at).(StrV)
 		if !ok {
-			panic(rtErr{line, "http.bad_request takes a message String"})
+			panic(rtErr{at, "http.bad_request takes a message String"})
 		}
 		return &ResponseV{status: 400, contentType: "text/plain; charset=utf-8", body: string(s)}
 	case "not_found":
 		if len(args) != 0 {
-			panic(rtErr{line, "http.not_found takes no arguments"})
+			panic(rtErr{at, "http.not_found takes no arguments"})
 		}
 		return &ResponseV{status: 404, contentType: "text/plain; charset=utf-8", body: "not found"}
 	}
-	panic(rtErr{line, fmt.Sprintf("module http has no function %q", name)})
+	panic(rtErr{at, fmt.Sprintf("module http has no function %q", name)})
 }
 
 // httpServe blocks until the listener fails (Err) or the enclosing
 // scope cancels (unwind, after a graceful shutdown). Each request
 // runs the Glide handler on its own goroutine under the GIL, with
 // the serving task's cancellation context.
-func (in *Interp) httpServe(addr string, router *RouterV, line int) Value {
+func (in *Interp) httpServe(addr string, router *RouterV, at source.Span) Value {
 	cancel := in.cur.cancel
 	deadline := in.cur.deadline
 	mux := http.NewServeMux()
@@ -126,12 +128,12 @@ func (in *Interp) httpServe(addr string, router *RouterV, line int) Value {
 					switch p := recover().(type) {
 					case nil, cancelUnwind:
 					case rtErr:
-						handlerErr = fmt.Sprintf("line %d: %s", p.line, p.msg)
+						handlerErr = in.errAt(p.at, "%s", p.msg).Error()
 					default:
 						handlerErr = fmt.Sprintf("%v", p)
 					}
 				}()
-				res = in.callValue(handler, []Value{req}, line)
+				res = in.callValue(handler, []Value{req}, at)
 			}()
 			in.gil.Unlock()
 			if handlerErr != "" {
