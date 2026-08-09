@@ -517,6 +517,23 @@ or it is a bug.
   to end instead — every numeric primitive is *run* as a conversion,
   and `Bool`/`String` are asserted not to be.
 
+- **`ast.TypeFunc` reuses `Elems` for parameters.** A written function
+  type needed somewhere to put them, and `Elems` already meant "a list
+  of types with no names" for tuples. A third slice would have been a
+  field that is nil in every case but one. `Ret` is its own field and
+  nil means unit, matching an `fn` declaration with no arrow.
+
+- **A wrong closure body reports at the body, not at the call.** The
+  closure checker already had the better message — "this closure must
+  return Int, got String", pointing inside — but then returned the
+  *actual* signature, so the caller's own assertion fired too and
+  produced "expected fn(Int) -> Int, found fn(x: Int) -> String" as
+  well. It now returns the expectation once it has reported, the same
+  rule `checkExpr` uses. Two cascades of this exact shape were fixed
+  in one sitting (the other being a conflicting parameter
+  annotation), which suggests the rule is worth applying wherever a
+  specific diagnostic sits inside a general one.
+
 - **Closure parameters carry an `ast.Param`, not a bare name.** The
   node held `Params []string`, so there was nowhere for an annotation
   to live. Reusing `Param` rather than a parallel `[]*TypeExpr` keeps
@@ -746,14 +763,6 @@ order they are worth doing:
    inference for *nullary* associated functions (`Box.new()` erases
    its parameter, so a later `add(1)` then `add("s")` passes;
    `Box.new(1)` already infers).
-
-**A function type cannot be written.** `fn(A) -> B` exists inside the
-checker — a closure passed to `sort_by` is checked against the
-parameter's signature — but `parseType` has no case for it, so
-`fn apply(f: fn(Int) -> Int, x: Int)` is a parse error. The reference
-claimed ✓ until M4c and now says ○; `docs/book/chapter-08.md` has
-always described it accurately. Same defect class as the closure
-annotations that just landed: documented, and unparseable.
 
 **Two lexer gaps found while testing the conversions**, both small
 and both out of scope for the commit that found them: there are no

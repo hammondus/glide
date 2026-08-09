@@ -54,6 +54,7 @@ const (
 	TypeName  TypeKind = iota // Int, List<Int>, Result<T, E>
 	TypeTuple                 // (A, B)
 	TypeUnit                  // ()
+	TypeFunc                  // fn(A, B) -> C
 )
 
 // TypeParam is one entry in a *declaration-site* `<...>` list:
@@ -86,7 +87,8 @@ type TypeExpr struct {
 	Kind     TypeKind
 	Name     string      // TypeName only
 	Args     []*TypeExpr // TypeName only: List<Int> -> [Int]
-	Elems    []*TypeExpr // TypeTuple only, always >= 2
+	Elems    []*TypeExpr // TypeTuple only, always >= 2; TypeFunc: parameters
+	Ret      *TypeExpr   // TypeFunc only; nil means `-> ()`
 	Optional bool        // trailing `?`, any kind
 	source.Span
 }
@@ -105,6 +107,15 @@ func (t *TypeExpr) String() string {
 			parts[i] = e.String()
 		}
 		s = "(" + strings.Join(parts, ", ") + ")"
+	case TypeFunc:
+		parts := make([]string, len(t.Elems))
+		for i, e := range t.Elems {
+			parts[i] = e.String()
+		}
+		s = "fn(" + strings.Join(parts, ", ") + ")"
+		if t.Ret != nil {
+			s += " -> " + t.Ret.String()
+		}
 	default:
 		s = t.Name
 		if len(t.Args) > 0 {

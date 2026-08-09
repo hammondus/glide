@@ -690,6 +690,44 @@ func (p *parser) parseTypeCore() (*ast.TypeExpr, error) {
 			}
 		}
 		return t, nil
+	case lexer.KwFn:
+		// A written function type: `fn(Int) -> Int`, `fn(T, T) -> Int`,
+		// `fn()`. The type has existed inside the checker since M4b —
+		// a closure passed to sort_by is checked against the
+		// parameter's signature — but there was no way to *write* it,
+		// so `fn apply(f: fn(Int) -> Int, …)` was a parse error while
+		// the reference claimed otherwise.
+		p.next()
+		t := &ast.TypeExpr{Kind: ast.TypeFunc, Span: at}
+		if _, err := p.expect(lexer.LParen, "function type"); err != nil {
+			return nil, err
+		}
+		for p.cur().Kind != lexer.RParen {
+			prm, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			t.Elems = append(t.Elems, prm)
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+		end, err := p.expect(lexer.RParen, "function type")
+		if err != nil {
+			return nil, err
+		}
+		t.Span = at.To(end.Span)
+		// `-> R` is optional; without it the function returns unit,
+		// matching a `fn` declaration with no arrow.
+		if p.accept(lexer.Arrow) {
+			ret, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			t.Ret = ret
+			t.Span = at.To(ret.Span)
+		}
+		return t, nil
 	case lexer.LParen:
 		p.next()
 		if p.accept(lexer.RParen) {

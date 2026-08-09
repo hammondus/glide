@@ -325,3 +325,48 @@ func TestClosureDiagnosticsHaveAPosition(t *testing.T) {
 		t.Errorf("a closure diagnostic needs a position: %q", got)
 	}
 }
+
+// A function type can be written as of M4c: `fn(A, B) -> C`. The type
+// existed inside the checker since M4b — a closure passed to sort_by
+// is checked against the parameter's signature — but parseType had no
+// case for it, so the reference's ✓ was a claim the parser refused.
+func TestWrittenFunctionTypes(t *testing.T) {
+	const decl = "fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\n"
+	for _, tc := range []struct{ name, src string }{
+		{"closure argument", decl + "fn main() { println(apply(|x| x + 1, 41)) }"},
+		{"named function argument", decl + "fn d(n: Int) -> Int { n * 2 }\nfn main() { println(apply(d, 21)) }"},
+		{"no arrow means unit", "fn each(xs: List<Int>, s: fn(Int)) { for x in xs { s(x) } }\nfn main() { each([1], |v| println(v)) }"},
+		{"nested", "fn hof(g: fn(fn(Int) -> Int) -> Int) -> Int { g(|x| x) }\nfn main() { println(hof(|f| f(1))) }"},
+		{"inside a List", "fn d(n: Int) -> Int { n }\nfn pick(fs: List<fn(Int) -> Int>, x: Int) -> Int { fs[0](x) }\nfn main() { println(pick([d], 1)) }"},
+		{"returns an Option", "fn m(f: fn(Int) -> Int?) -> Int { 1 }\nfn main() { println(m(|x| Some(x))) }"},
+	} {
+		if got := frontendErr(t, tc.src); got != "" {
+			t.Errorf("%s: %s", tc.name, got)
+		}
+	}
+	for _, tc := range []struct{ name, src, want string }{
+		{"wrong return", decl + `fn main() { println(apply(|x| "no", 3)) }`, "this closure must return Int, got String"},
+		{"wrong arity", decl + "fn main() { println(apply(|a, b| 1, 3)) }", "expected fn(Int) -> Int"},
+		{"not a function", decl + "fn main() { println(apply(5, 3)) }", "expected fn(Int) -> Int, found Int"},
+		{"wrong named function", decl + "fn s(v: String) -> Int { 1 }\nfn main() { println(apply(s, 3)) }", "expected fn(Int) -> Int"},
+		// The declared type is what gives the closure body its types.
+		{"body checked from the type", decl + "fn main() { println(apply(|x| x.nope(), 3)) }", `Int has no method "nope"`},
+	} {
+		if got := frontendErr(t, tc.src); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: want %q, got %q", tc.name, tc.want, got)
+		}
+	}
+}
+
+// One mistake, the most specific diagnostic available. A wrong closure
+// body is reported at the body rather than as a signature mismatch at
+// the call — and not as both.
+func TestClosureReturnMismatchReportsOnce(t *testing.T) {
+	got := frontendErr(t, "fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\nfn main() { println(apply(|x| \"no\", 3)) }")
+	if !strings.Contains(got, "this closure must return Int") {
+		t.Fatalf("want the body diagnostic: %q", got)
+	}
+	if strings.Contains(got, "expected fn(") {
+		t.Errorf("the signature mismatch should not also fire: %q", got)
+	}
+}

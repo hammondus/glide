@@ -30,6 +30,15 @@ func (c *checker) resolve(te *ast.TypeExpr) types.Type {
 			elems[i] = c.resolve(e)
 		}
 		t = &types.Tuple{Elems: elems}
+	case ast.TypeFunc:
+		f := &types.Func{Ret: types.Unit}
+		for _, e := range te.Elems {
+			f.Params = append(f.Params, types.Param{Type: c.resolve(e)})
+		}
+		if te.Ret != nil {
+			f.Ret = c.resolve(te.Ret)
+		}
+		t = f
 	default:
 		t = c.resolveName(te)
 	}

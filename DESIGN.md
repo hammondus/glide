@@ -388,6 +388,22 @@ Mechanics:
   Consequence: every primitive type name is reserved, since `u8` now
   means something in expression position. A local `let u8 = 5` still
   shadows it, as in Go, and the conversion is then simply gone.
+- **A function type is writable: `fn(A, B) -> C`.** The type existed
+  inside the checker from M4b — a closure handed to `sort_by` is
+  checked against the parameter's signature — but `parseType` had no
+  case for it, so `fn apply(f: fn(Int) -> Int, …)` was a parse error
+  while `docs/reference/` marked the feature ✓. One function type
+  covers named functions and closures alike, which is the property
+  that makes promoting a grown closure to a named function
+  cut-and-paste; it was just unsayable.
+
+  No arrow means `-> ()`, matching an `fn` declaration. `?` after the
+  arrow binds to the *return*, so `fn(Int) -> Int?` returns an
+  optional. Since `(T)` is deliberately not a grouping in the type
+  grammar — a one-element tuple is meaningless — an *optional
+  function* has no spelling yet; recorded rather than fixed, because
+  changing what `(T)` means is a separate decision about tuple syntax.
+
 - **Closure parameters may be annotated: `|x: Int| …`.** *Resolves an
   M4 open question* that had the book and the parser disagreeing —
   the book said annotations existed and were rarely needed, and no

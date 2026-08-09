@@ -66,7 +66,7 @@ A closure can read and write bindings from the scope where it was
 created — and it keeps them alive after that scope has gone:
 
 ```glide
-fn make_counter() -> Counter {
+fn make_counter() -> fn() -> Int {
     let mut n = 0
     || {
         n += 1
@@ -99,9 +99,6 @@ references, and they travel with it.
 Note also that each call to `make_counter` produces a *separate* `n`.
 `c` and `c2` do not share state. This is the mechanism behind almost
 every "object with one method" you will ever need.
-
-(The return type is written as a placeholder name above because the
-function-type spelling is ○ — see Under the Hood.)
 
 #### Passing closures to functions
 
@@ -291,26 +288,29 @@ In the designed compiler, a closure is a function pointer plus a
 capture record, heap-allocated only if the closure escapes the frame
 that made it. Escape analysis decides. This is Go's model exactly.
 
-#### The function type ○
+#### The function type
 
-The type is spelled `fn(Int) -> Int`, and today the parser does not
-accept it in a type position:
+The type is spelled `fn(Int) -> Int`, and as of M4c the parser accepts
+it in any type position:
 
 ```glide
 fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+
+fn main() {
+    println(apply(|x| x + 1, 41))     // 42
+    println(apply(double, 21))        // 42 — a named fn has the same type
+}
 ```
 
-```
-error: line 1: expected a type, found 'fn'
-```
+The closure needs no annotation there: the declared parameter type is
+what gives `x` its type, and the body is checked against it. Types
+nest (`fn(fn(Int) -> Int) -> Int`) and compose (`List<fn(Int) -> Int>`);
+no arrow means `-> ()`.
 
-There is still no *written* spelling for a function type: the parser
-takes a type name, and `fn(Int) -> Int` does not parse. The checker
-has the type internally — a closure passed to `filter` or `sort_by` is
-checked against the parameter's signature, and a wrong return type is
-a compile error — but you cannot yet write one down, which is why the
-examples above use a placeholder name. The spelling is designed; only
-the grammar is missing.
+One wrinkle to know: `?` after the arrow binds to the *return type*, so
+`fn(Int) -> Int?` is a function returning an `Int?`. Since `(T)` is not
+a grouping in Glide's type grammar, an *optional function* has no
+spelling yet (○).
 
 The important part is not the spelling; it is that there is exactly
 **one** function type. No distinction between "closure that captures by

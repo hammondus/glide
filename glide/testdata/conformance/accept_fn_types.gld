@@ -1,0 +1,37 @@
+// A function type can be *written*: `fn(A, B) -> C`. The type has
+// existed inside the checker since M4b — a closure passed to `sort_by`
+// is checked against the parameter's signature — but `parseType` had
+// no case for it, so this file's first line was a parse error while
+// `docs/reference/` claimed the feature ✓.
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+
+fn twice(f: fn(Int) -> Int, x: Int) -> Int { f(f(x)) }
+
+// No arrow means unit, exactly as it does on an `fn` declaration.
+fn each(xs: List<Int>, sink: fn(Int)) {
+    for x in xs { sink(x) }
+}
+
+// Function types nest, and compose with the rest of the type grammar.
+fn pick(fs: List<fn(Int) -> Int>, i: Int, x: Int) -> Int {
+    fs[i](x)
+}
+
+fn hof(g: fn(fn(Int) -> Int) -> Int) -> Int { g(|x| x + 1) }
+
+fn double(n: Int) -> Int { n * 2 }
+
+fn main() {
+    // A closure, unannotated: it takes its parameter type from the
+    // declared function type, and its body is checked against it.
+    println(apply(|x| x + 1, 41))
+    println(twice(|x| x * 2, 5))
+
+    // A named function has the same type as a closure — one function
+    // type covers both, so promoting a closure is cut-and-paste.
+    println(apply(double, 21))
+
+    each([1, 2], |v| println(v))
+    println(pick([double, |x| x + 100], 1, 1))
+    println(hof(|f| f(41)))
+}

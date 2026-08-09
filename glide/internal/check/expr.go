@@ -987,6 +987,11 @@ func (c *checker) closure(x *ast.Closure, want types.Type) types.Type {
 	if retWant != nil && !hasVar(retWant) && !types.AssignableTo(ret, retWant) &&
 		!types.IsOpaque(ret) && !types.IsOpaque(retWant) {
 		c.errf(closureBodySpan(x), "this closure must return %s, got %s", retWant, types.Default(ret))
+		// Reported precisely, at the body. Returning the expectation
+		// keeps the caller's own assertion quiet, so a wrong closure
+		// body is one diagnostic rather than that plus a generic
+		// "expected fn(Int) -> Int, found fn(x: Int) -> String".
+		ret = retWant
 	}
 	c.ret = savedRet
 	return &types.Func{Params: params, Ret: types.Default(ret)}

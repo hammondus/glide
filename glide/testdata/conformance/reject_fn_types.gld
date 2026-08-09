@@ -1,0 +1,16 @@
+// A written function type is checked like any other: the closure or
+// named function supplied has to match it. Note each mistake produces
+// exactly one diagnostic, and the most specific one available — a
+// wrong closure *body* is reported at the body, not as a signature
+// mismatch at the call.
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+
+fn wants_str(s: String) -> Int { 1 }
+
+fn main() {
+    println(apply(|x| "no", 3))     // error: this closure must return Int, got String
+    println(apply(|a, b| 1, 3))     // error: expected fn(Int) -> Int
+    println(apply(5, 3))            // error: expected fn(Int) -> Int, found Int
+    println(apply(wants_str, 3))    // error: expected fn(Int) -> Int
+    println(apply(|x| x.nope(), 3)) // error: Int has no method "nope"
+}
