@@ -3,7 +3,6 @@ package interp
 import (
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,24 +93,14 @@ func (in *Interp) moduleCall(mod, name string, args []Value, at source.Span) Val
 		return in.httpCall(name, args, at)
 	case "sql":
 		return in.sqlCall(name, args, at)
+	case "fs":
+		return in.fsCall(name, args, at)
+	case "os":
+		return in.osCall(name, args, at)
+	case "process":
+		return in.processCall(name, args, at)
 	}
 	switch mod + "." + name {
-	case "os.args":
-		if len(args) != 0 {
-			panic(rtErr{at, "os.args takes no arguments"})
-		}
-		l := &ListV{}
-		for _, a := range in.Args {
-			l.Elems = append(l.Elems, StrV(a))
-		}
-		return l
-	case "os.exit":
-		code, ok := one("os.exit", args, at).(IntV)
-		if !ok {
-			panic(rtErr{at, "os.exit takes an Int"})
-		}
-		in.exiting = true
-		panic(exitPanic{code: int(code)})
 	case "time.now":
 		if len(args) != 0 {
 			panic(rtErr{at, "time.now takes no arguments"})
@@ -152,16 +141,6 @@ func (in *Interp) moduleCall(mod, name string, args []Value, at source.Span) Val
 			st.closeOnce.Do(func() { close(st.ch) })
 		}()
 		return rx
-	case "fs.read_string":
-		path, ok := one("fs.read_string", args, at).(StrV)
-		if !ok {
-			panic(rtErr{at, "fs.read_string takes a String path"})
-		}
-		data, err := os.ReadFile(string(path))
-		if err != nil {
-			return &ResultV{Ok: false, V: &ErrV{Msg: err.Error()}}
-		}
-		return &ResultV{Ok: true, V: StrV(string(data))}
 	}
 	panic(rtErr{at, fmt.Sprintf("module %s has no function %q", mod, name)})
 }
@@ -181,10 +160,43 @@ var durationUnits = map[string]time.Duration{
 var builtinMutMethods = map[string]bool{
 	"List.push":     true,
 	"List.sort_by":  true,
+	"List.pop":      true,
+	"List.insert":   true,
+	"List.remove":   true,
+	"List.extend":   true,
+	"Map.remove":    true,
 	"Router.get":    true,
 	"Router.post":   true,
 	"Router.put":    true,
 	"Router.delete": true,
+}
+
+// indexOf is `contains` and `index_of` sharing one scan, so the two can
+// never disagree about what membership means. Equality is the language's
+// structural `==`, which is why an uncomparable element (a function)
+// reports at the call rather than quietly answering false.
+func indexOf(l *ListV, v Value, at source.Span) int {
+	for i, e := range l.Elems {
+		if eq(e, v, at) {
+			return i
+		}
+	}
+	return -1
+}
+
+// listIndex validates a positional argument against a bound. No
+// negative-index-from-the-end sugar: `xs[-1]` meaning "last" is a
+// Python convenience that silently turns an off-by-one into a read of
+// the wrong end, and `last()` says it plainly.
+func listIndex(fn string, v Value, bound int, at source.Span) int {
+	n, ok := v.(IntV)
+	if !ok {
+		panic(rtErr{at, fmt.Sprintf("%s takes an Int index, got %s", fn, typeName(v))})
+	}
+	if n < 0 || int(n) >= bound {
+		panic(rtErr{at, fmt.Sprintf("%s: index %d out of range (valid: 0..%d)", fn, n, bound-1)})
+	}
+	return int(n)
 }
 
 // Methods, dispatched on receiver type.
@@ -328,6 +340,86 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 		switch name {
 		case "len":
 			return IntV(len(r.Elems))
+		case "contains":
+			return BoolV(indexOf(r, one("contains", args, at), at) >= 0)
+		case "index_of":
+			if i := indexOf(r, one("index_of", args, at), at); i >= 0 {
+				return some(IntV(i))
+			}
+			return NoneV{}
+		case "first":
+			nilArgs("first", args, at)
+			if len(r.Elems) == 0 {
+				return NoneV{}
+			}
+			return some(r.Elems[0])
+		case "last":
+			nilArgs("last", args, at)
+			if len(r.Elems) == 0 {
+				return NoneV{}
+			}
+			return some(r.Elems[len(r.Elems)-1])
+		case "pop":
+			// Option, not a panic: popping an empty list is the loop
+			// condition of every worklist algorithm, so it is an
+			// answer rather than a bug. Indexing keeps the opposite
+			// rule — `xs[i]` out of bounds *is* a bug — because there
+			// the caller named a specific slot.
+			nilArgs("pop", args, at)
+			if len(r.Elems) == 0 {
+				return NoneV{}
+			}
+			last := r.Elems[len(r.Elems)-1]
+			r.Elems = r.Elems[:len(r.Elems)-1]
+			return some(last)
+		case "insert":
+			if len(args) != 2 {
+				panic(rtErr{at, "insert takes (i, v)"})
+			}
+			i := listIndex("insert", args[0], len(r.Elems)+1, at) // == len appends
+			r.Elems = append(r.Elems, nil)
+			copy(r.Elems[i+1:], r.Elems[i:])
+			r.Elems[i] = args[1]
+			return UnitV{}
+		case "remove":
+			i := listIndex("remove", one("remove", args, at), len(r.Elems), at)
+			v := r.Elems[i]
+			r.Elems = append(r.Elems[:i], r.Elems[i+1:]...)
+			return v
+		case "extend":
+			other, ok := one("extend", args, at).(*ListV)
+			if !ok {
+				panic(rtErr{at, fmt.Sprintf("extend takes a List, got %s", typeName(args[0]))})
+			}
+			// Copy the source first: xs.extend(xs) must double the
+			// list, not loop forever re-reading a slice it is growing.
+			r.Elems = append(r.Elems, append([]Value{}, other.Elems...)...)
+			return UnitV{}
+		case "reversed":
+			// A copy, named like `sorted()`. The pairing is deliberate:
+			// in this stdlib a past participle returns a new list and a
+			// verb mutates (`sort_by`, `push`), so the name says which
+			// one you got without looking it up.
+			nilArgs("reversed", args, at)
+			out := &ListV{Elems: make([]Value, len(r.Elems))}
+			for i, e := range r.Elems {
+				out.Elems[len(r.Elems)-1-i] = e
+			}
+			return out
+		case "slice":
+			if len(args) != 2 {
+				panic(rtErr{at, "slice takes (lo, hi)"})
+			}
+			lo := listIndex("slice", args[0], len(r.Elems)+1, at)
+			hi := listIndex("slice", args[1], len(r.Elems)+1, at)
+			if lo > hi {
+				panic(rtErr{at, fmt.Sprintf("slice(%d, %d): lo is past hi", lo, hi)})
+			}
+			// Half-open [lo, hi), and a *copy*: Glide has no slice
+			// aliasing anywhere else, and a view that shares storage
+			// with its parent would make `mut` a lie about a second
+			// binding the reader cannot see.
+			return &ListV{Elems: append([]Value{}, r.Elems[lo:hi]...)}
 		case "sorted":
 			if len(args) != 0 {
 				panic(rtErr{at, "sorted takes no arguments"})
@@ -441,6 +533,37 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 				l.Elems = append(l.Elems, TupleV{k, r.m[k]})
 			}
 			return l
+		case "keys":
+			nilArgs("keys", args, at)
+			return &ListV{Elems: append([]Value{}, r.keys...)}
+		case "values":
+			nilArgs("values", args, at)
+			l := &ListV{Elems: make([]Value, 0, len(r.keys))}
+			for _, k := range r.keys {
+				l.Elems = append(l.Elems, r.m[k])
+			}
+			return l
+		case "contains_key":
+			_, found := r.get(hashable(one("contains_key", args, at), at))
+			return BoolV(found)
+		case "remove":
+			// Returns what was there, so the common "take it out and
+			// use it" is one lookup. Deleting drops the key from the
+			// insertion order; re-inserting later appends at the end,
+			// which is the ordering rule M4c specified.
+			k := hashable(one("remove", args, at), at)
+			v, found := r.get(k)
+			if !found {
+				return NoneV{}
+			}
+			delete(r.m, k)
+			for i, existing := range r.keys {
+				if existing == k {
+					r.keys = append(r.keys[:i], r.keys[i+1:]...)
+					break
+				}
+			}
+			return some(v)
 		}
 	case *SenderV:
 		switch name {
@@ -521,6 +644,10 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 				panic(rtErr{at, "body takes no arguments"})
 			}
 			return StrV(r.body)
+		}
+	case *OutputV:
+		if v, handled := r.method(name, args, at); handled {
+			return v
 		}
 	case *DbV:
 		return in.sqlMethod(r, name, args, at)

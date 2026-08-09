@@ -1,0 +1,72 @@
+// Running another program, and the filesystem and environment around
+// it — the surface a shell script is rewritten against. Checked, not
+// run: the corpus type-checks its programs, so the IO here never
+// happens.
+import fs
+import os
+import process
+
+// The shape a script actually uses: run, and treat a non-zero exit as
+// an answer rather than an error. `Err` is reserved for "could not run
+// it at all", so this match is exhaustive over genuinely different
+// events and not over one event split in two.
+fn git(args: List<String>) -> String? {
+    match process.run("git", args) {
+        Ok(out) => {
+            if out.ok() { Some(out.stdout().trim()) } else { None }
+        }
+        Err(e) => {
+            eprintln("git is not installed: {e}")
+            None
+        }
+    }
+}
+
+fn main() {
+    // The argument list is optional.
+    let now: Result<Output, Error> = process.run("date")
+    let listed: Result<Output, Error> = process.run("ls", ["-la", "."])
+    println("{now} {listed}")
+
+    // Output's four accessors, each with its own type.
+    match listed {
+        Ok(o) => {
+            let code: Int = o.status()
+            let good: Bool = o.ok()
+            let text: String = o.stdout()
+            let diag: String = o.stderr()
+            println("{code} {good} {text.len()} {diag.len()}")
+        }
+        Err(e) => println("{e}")
+    }
+
+    println("{git(["rev-parse", "HEAD"]) ?? "not a repo"}")
+
+    // fs: everything fallible is a Result, and the two predicates are
+    // bare Bools because a Result you can only unwrap is noise.
+    let dir: String = fs.join([os.env("TMPDIR") ?? "/tmp", "demo"])
+    let made: Result<(), Error> = fs.mkdir_all(dir)
+    let path = fs.join([dir, "out.txt"])
+    let wrote: Result<(), Error> = fs.write_string(path, "hello\n")
+    let more: Result<(), Error> = fs.append_string(path, "again\n")
+    let there: Bool = fs.exists(path)
+    let folder: Bool = fs.is_dir(dir)
+    let body: Result<String, Error> = fs.read_string(path)
+    let names: Result<List<String>, Error> = fs.list_dir(dir)
+    let moved: Result<(), Error> = fs.rename(path, fs.join([dir, "kept.txt"]))
+    let dropped: Result<(), Error> = fs.remove(fs.join([dir, "kept.txt"]))
+    let swept: Result<(), Error> = fs.remove_all(dir)
+    println("{made} {wrote} {more} {there} {folder} {body} {names} {moved} {dropped} {swept}")
+
+    // os: env is an Option so that set-but-empty and unset stay
+    // distinguishable, and `??` supplies the default in one place.
+    let home: String? = os.env("HOME")
+    let shell: String = os.env("SHELL") ?? "/bin/sh"
+    let set: Result<(), Error> = os.set_env("GLIDE_DEMO", "1")
+    let here: Result<String, Error> = os.cwd()
+    let went: Result<(), Error> = os.chdir("/tmp")
+    println("{home} {shell} {set} {here} {went}")
+
+    let args: List<String> = os.args()
+    println("{args.len()}")
+}

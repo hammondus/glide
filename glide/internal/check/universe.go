@@ -70,6 +70,7 @@ var (
 	tRequest  = types.Apply(types.Request)
 	tResponse = types.Apply(types.Response)
 	tDb       = types.Apply(types.Db)
+	tOutput   = types.Apply(types.Output)
 	tStrList  = types.Apply(types.List, types.String)
 	// A row from sql.query: column name to a value whose type the
 	// database decides. Typed rows arrive with `derive Row`.
@@ -146,17 +147,37 @@ var durationSuffixes = map[string]bool{
 
 var ctorMethods = map[types.Ctor]map[string]*types.Func{
 	types.List: {
-		"len":     meth(types.Int),
-		"push":    methMut(types.Unit, p("v", tvT)),
-		"sorted":  meth(types.Apply(types.List, tvT)),
-		"sort_by": methMut(types.Unit, p("cmp", free(types.Int, p("a", tvT), p("b", tvT)))),
-		"repeat":  meth(types.Apply(types.List, tvT), p("k", types.Int)),
-		"join":    meth(types.String, p("sep", types.String)),
-		"iter":    meth(types.Apply(types.Iterator, tvT)),
+		"len":      meth(types.Int),
+		"push":     methMut(types.Unit, p("v", tvT)),
+		"sorted":   meth(types.Apply(types.List, tvT)),
+		"sort_by":  methMut(types.Unit, p("cmp", free(types.Int, p("a", tvT), p("b", tvT)))),
+		"repeat":   meth(types.Apply(types.List, tvT), p("k", types.Int)),
+		"join":     meth(types.String, p("sep", types.String)),
+		"iter":     meth(types.Apply(types.Iterator, tvT)),
+		"contains": meth(types.Bool, p("v", tvT)),
+		"index_of": meth(types.Opt(types.Int), p("v", tvT)),
+		"first":    meth(types.Opt(tvT)),
+		"last":     meth(types.Opt(tvT)),
+		"pop":      methMut(types.Opt(tvT)),
+		"insert":   methMut(types.Unit, p("i", types.Int), p("v", tvT)),
+		"remove":   methMut(tvT, p("i", types.Int)),
+		"extend":   methMut(types.Unit, p("other", types.Apply(types.List, tvT))),
+		"reversed": meth(types.Apply(types.List, tvT)),
+		"slice":    meth(types.Apply(types.List, tvT), p("lo", types.Int), p("hi", types.Int)),
 	},
 	types.Map: {
-		"len":     meth(types.Int),
-		"entries": meth(types.Apply(types.List, &types.Tuple{Elems: []types.Type{tvK, tvV}})),
+		"len":          meth(types.Int),
+		"entries":      meth(types.Apply(types.List, &types.Tuple{Elems: []types.Type{tvK, tvV}})),
+		"keys":         meth(types.Apply(types.List, tvK)),
+		"values":       meth(types.Apply(types.List, tvV)),
+		"contains_key": meth(types.Bool, p("k", tvK)),
+		"remove":       methMut(types.Opt(tvV), p("k", tvK)),
+	},
+	types.Output: {
+		"status": meth(types.Int),
+		"stdout": meth(types.String),
+		"stderr": meth(types.String),
+		"ok":     meth(types.Bool),
 	},
 	types.Iterator: {
 		"take":      meth(types.Apply(types.Iterator, tvT), p("n", types.Int)),
@@ -217,11 +238,33 @@ var ctorMethods = map[types.Ctor]map[string]*types.Func{
 // modules is the host surface reachable through an import.
 var modules = map[string]map[string]*types.Func{
 	"os": {
-		"args": free(tStrList),
-		"exit": free(types.Never, p("code", types.Int)),
+		"args":    free(tStrList),
+		"exit":    free(types.Never, p("code", types.Int)),
+		"env":     free(types.Opt(types.String), p("name", types.String)),
+		"set_env": free(result(types.Unit), p("name", types.String), p("value", types.String)),
+		"cwd":     free(result(types.String)),
+		"chdir":   free(result(types.Unit), p("path", types.String)),
 	},
 	"fs": {
-		"read_string": free(result(types.String), p("path", types.String)),
+		"read_string":   free(result(types.String), p("path", types.String)),
+		"write_string":  free(result(types.Unit), p("path", types.String), p("contents", types.String)),
+		"append_string": free(result(types.Unit), p("path", types.String), p("contents", types.String)),
+		"exists":        free(types.Bool, p("path", types.String)),
+		"is_dir":        free(types.Bool, p("path", types.String)),
+		"remove":        free(result(types.Unit), p("path", types.String)),
+		"remove_all":    free(result(types.Unit), p("path", types.String)),
+		"mkdir_all":     free(result(types.Unit), p("path", types.String)),
+		"rename":        free(result(types.Unit), p("from", types.String), p("to", types.String)),
+		"list_dir":      free(result(tStrList), p("path", types.String)),
+		// A List, not a variadic: the language has no variadics, and
+		// inventing one for a path helper would be the tail wagging the
+		// dog. Moves to `path` when that module lands (STDLIB-GOALS.md).
+		"join": free(types.String, p("segments", tStrList)),
+	},
+	"process": {
+		// The argument list is optional: `process.run("date")` should
+		// not have to write an empty one.
+		"run": free(result(tOutput), p("cmd", types.String), pd("args", tStrList)),
 	},
 	"json": {
 		"encode": free(types.String, p("v", types.Unknown)),

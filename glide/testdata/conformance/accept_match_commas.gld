@@ -1,0 +1,47 @@
+// A comma between match arms is optional. Arms have always been
+// newline-separated, which made a one-line match unwritable and gave a
+// trailing comma the baffling "expected a pattern, found ','" — and a
+// trailing comma is exactly what anyone arriving from Rust writes
+// first. Commas separate elements everywhere else in the language
+// (lists, maps, tuples, struct literals, arguments), so match arms
+// being the one place they were forbidden was the surprise.
+type Colour = Red | Green | Blue
+
+fn one_line(c: Colour) -> String {
+    match c { Red => "r", Green => "g", Blue => "b" }
+}
+
+fn trailing(c: Colour) -> String {
+    match c {
+        Red => "r",
+        Green => "g",
+        Blue => "b",
+    }
+}
+
+// Still valid without any: the separator is the newline, and the comma
+// is permission rather than requirement.
+fn bare(c: Colour) -> String {
+    match c {
+        Red => "r"
+        Green => "g"
+        Blue => "b"
+    }
+}
+
+// Multi-pattern arms already used commas *within* an arm, before the
+// `=>`. That is unambiguous — the arm separator can only appear after
+// a body — which is why both readings can coexist.
+fn warm(c: Colour) -> Bool {
+    match c { Red, Green => true, Blue => false }
+}
+
+// The subjectless form takes them too.
+fn size(n: Int) -> String {
+    match { n < 10 => "small", n < 100 => "medium", _ => "large" }
+}
+
+fn main() {
+    println("{one_line(.Red)}{trailing(.Green)}{bare(.Blue)}")
+    println("{warm(.Red)} {size(5)} {size(50)} {size(500)}")
+}

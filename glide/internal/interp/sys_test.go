@@ -1,0 +1,327 @@
+package interp
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// fs round-trips through a real temp directory. The point is not that
+// os.WriteFile works — it is that the Result shape is right at every
+// step, that a missing file is an Err rather than a trap, and that the
+// predicates answer without one.
+func TestFilesystemRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	out, err := runProg(t, `
+import fs
+
+fn main() -> Result<(), Error> {
+    let dir = "`+dir+`"
+    let sub = fs.join([dir, "a", "b"])
+    fs.mkdir_all(sub)?
+    println("made={fs.is_dir(sub)}")
+
+    let p = fs.join([sub, "note.txt"])
+    println("before={fs.exists(p)}")
+    fs.write_string(p, "one\n")?
+    fs.append_string(p, "two\n")?
+    println("after={fs.exists(p)} dir?={fs.is_dir(p)}")
+    println("body={fs.read_string(p)?.lines()}")
+
+    // write_string truncates, like the shell's >.
+    fs.write_string(p, "fresh\n")?
+    println("truncated={fs.read_string(p)?.trim()}")
+
+    let other = fs.join([sub, "moved.txt"])
+    fs.rename(p, other)?
+    println("moved={fs.exists(p) == false} to={fs.exists(other)}")
+    println("listing={fs.list_dir(sub)?}")
+
+    fs.remove(other)?
+    println("removed={fs.exists(other) == false}")
+
+    // remove refuses a non-empty tree; remove_all takes it.
+    match fs.remove(fs.join([dir, "a"])) {
+        Ok(_) => println("remove ate a non-empty directory")
+        Err(_) => println("remove refused the tree")
+    }
+    fs.remove_all(fs.join([dir, "a"]))?
+    println("swept={fs.exists(sub) == false}")
+
+    match fs.read_string(fs.join([dir, "nope.txt"])) {
+        Ok(_) => println("read a file that is not there")
+        Err(e) => println("missing file is Err")
+    }
+    Ok(())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"made=true",
+		"before=false",
+		"after=true dir?=false",
+		`body=["one", "two"]`,
+		"truncated=fresh",
+		"moved=true to=true",
+		`listing=["moved.txt"]`,
+		"removed=true",
+		"remove refused the tree",
+		"swept=true",
+		"missing file is Err",
+		"",
+	}, "\n")
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// os.env distinguishes unset from set-and-empty, which is the whole
+// reason it returns an Option instead of "".
+func TestOsEnvIsOptional(t *testing.T) {
+	t.Setenv("GLIDE_TEST_EMPTY", "")
+	os.Unsetenv("GLIDE_TEST_ABSENT")
+	out, err := runProg(t, `
+import os
+
+fn main() {
+    println("empty={os.env("GLIDE_TEST_EMPTY")}")
+    println("absent={os.env("GLIDE_TEST_ABSENT")}")
+    println("default={os.env("GLIDE_TEST_ABSENT") ?? "fallback"}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "empty=Some(\"\")\nabsent=None\ndefault=fallback\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+func TestOsCwdAndChdir(t *testing.T) {
+	dir := t.TempDir()
+	start, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(start) })
+	// macOS hands out /var/... symlinked to /private/var/..., and
+	// Getwd resolves it — so compare against the resolved form rather
+	// than the string t.TempDir handed back.
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runProg(t, `
+import os
+
+fn main() -> Result<(), Error> {
+    os.chdir("`+dir+`")?
+    println(os.cwd()?)
+    match os.chdir("`+filepath.Join(dir, "nowhere")+`") {
+        Ok(_) => println("chdir into a missing directory succeeded")
+        Err(_) => println("chdir to a missing directory is Err")
+    }
+    Ok(())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := real + "\nchdir to a missing directory is Err\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// The central process decision, asserted: exiting non-zero is an Ok
+// with a status, and only failing to *start* is an Err. If these two
+// ever collapse into one, `?` starts propagating grep's "no match".
+func TestProcessRunSplitsExitFromFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell")
+	}
+	out, err := runProg(t, `
+import process
+
+fn main() {
+    match process.run("sh", ["-c", "printf out; printf err >&2; exit 0"]) {
+        Ok(o) => println("ok status={o.status()} ok={o.ok()} out={o.stdout()} err={o.stderr()}")
+        Err(e) => println("unexpected Err {e}")
+    }
+    match process.run("sh", ["-c", "exit 7"]) {
+        Ok(o) => println("nonzero status={o.status()} ok={o.ok()}")
+        Err(e) => println("unexpected Err {e}")
+    }
+    match process.run("glide-no-such-binary-9f3a") {
+        Ok(o) => println("unexpected Ok {o.status()}")
+        Err(e) => println("missing binary is Err")
+    }
+    // Arguments are argv entries, never re-split: a single argument
+    // containing a space stays one argument, which is the whole point
+    // of not going through a shell.
+    match process.run("echo", ["a b", "c"]) {
+        Ok(o) => println("argv={o.stdout().trim()}")
+        Err(e) => println("unexpected Err {e}")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"ok status=0 ok=true out=out err=err",
+		"nonzero status=7 ok=false",
+		"missing binary is Err",
+		"argv=a b c",
+		"",
+	}, "\n")
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// A child must not outlive the scope that started it. Without the
+// bridged context the timeout would fire, the scope would return, and
+// `sleep 30` would still be running — which is exactly the leak
+// structured concurrency exists to prevent.
+func TestProcessDiesWithItsScope(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sleep(1)")
+	}
+	out, err := runProg(t, `
+import process
+import time
+
+fn main() {
+    let start = time.now()
+    scope(timeout: 200.ms) s {
+        let t = s.spawn(|| process.run("sleep", ["30"]))
+        println("never printed: {t.join()}")
+    }
+    println("scope ended early={time.now() - start < 5.s}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "scope ended early=true\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// The List and Map additions, at runtime. The checker has its own
+// corpus case; this asserts the values, including the two edges that
+// are easy to get wrong: extending a list with itself, and where a
+// re-inserted map key lands in the iteration order.
+func TestCollectionMethods(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let mut xs = [3, 1, 2]
+    println("{xs.contains(1)} {xs.contains(9)} {xs.index_of(2)} {xs.index_of(9)}")
+    println("{xs.first()} {xs.last()} {xs.reversed()} {xs.slice(1, 3)} {xs.slice(1, 1)}")
+
+    xs.insert(0, 0)
+    xs.insert(4, 4)
+    println("inserted={xs}")
+    println("removed={xs.remove(0)} left={xs}")
+    xs.extend([8, 9])
+    println("extended={xs}")
+    println("popped={xs.pop()} left={xs}")
+
+    let mut self_ext = [1, 2]
+    self_ext.extend(self_ext)
+    println("doubled={self_ext}")
+
+    let mut empty: List<Int> = []
+    println("{empty.first()} {empty.last()} {empty.pop()} {empty.contains(1)}")
+
+    // reversed and slice copy; the original is untouched.
+    let orig = [1, 2, 3]
+    let rev = orig.reversed()
+    println("copies={orig} {rev}")
+
+    let mut m = ["a": 1, "b": 2, "c": 3]
+    println("{m.keys()} {m.values()} {m.contains_key("b")} {m.contains_key("z")}")
+    println("removed={m.remove("b")} missing={m.remove("z")} now={m}")
+    m["b"] = 20
+    println("reinserted appends={m}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"true false Some(2) None",
+		"Some(3) Some(2) [2, 1, 3] [1, 2] []",
+		"inserted=[0, 3, 1, 2, 4]",
+		"removed=0 left=[3, 1, 2, 4]",
+		"extended=[3, 1, 2, 4, 8, 9]",
+		"popped=Some(9) left=[3, 1, 2, 4, 8]",
+		"doubled=[1, 2, 1, 2]",
+		"None None None false",
+		"copies=[1, 2, 3] [3, 2, 1]",
+		`["a", "b", "c"] [1, 2, 3] true false`,
+		`removed=Some(2) missing=None now=["a": 1, "c": 3]`,
+		`reinserted appends=["a": 1, "c": 3, "b": 20]`,
+		"",
+	}, "\n")
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// Out-of-range is a positioned trap, not a clamp — the caller named a
+// slot that is not there, and silently returning a shorter list is how
+// an off-by-one survives to production.
+func TestCollectionIndexTraps(t *testing.T) {
+	for _, tc := range []struct{ expr, want string }{
+		{"xs.remove(5)", "remove: index 5 out of range"},
+		{"xs.remove(0 - 1)", "remove: index -1 out of range"},
+		{"xs.insert(9, 1)", "insert: index 9 out of range"},
+		{"xs.slice(0, 9)", "slice: index 9 out of range"},
+		{"xs.slice(2, 1)", "slice(2, 1): lo is past hi"},
+	} {
+		_, err := runProg(t, "fn main() {\n    let mut xs = [1, 2, 3]\n    println("+tc.expr+")\n}")
+		if err == nil {
+			t.Errorf("%s: expected a trap", tc.expr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want %q", tc.expr, err, tc.want)
+		}
+	}
+}
+
+// Boxing Option in M4c dropped *SomeV from the structural-equality
+// switch, so `Some(1) == Some(1)` panicked with "Option values are
+// not comparable" — in a language whose equality is specified
+// universal and structural. Regression test, including through a
+// container and a nested Option, since the box has to be transparent
+// at every depth.
+func TestOptionEquality(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let a: Int? = Some(1)
+    let b: Int? = Some(1)
+    let c: Int? = Some(2)
+    let n: Int? = None
+    println("{a == b} {a == c} {a == n} {n == None} {a == Some(1)}")
+
+    // Through a container, and nested: Some(None) is not None, which
+    // is the property boxing existed to give in the first place.
+    println("{[a, n] == [b, None]} {[a, n] == [c, None]}")
+    println("{Some(a) == Some(b)} {Some(n) == Some(n)} {Some(n) == None}")
+
+    // Distinct payloads still compare by their own rule.
+    println("{Some("x") == Some("x")} {Some("x") == Some("y")}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "true false false true true\n" +
+		"true false\n" +
+		"true true false\n" +
+		"true false\n"
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}

@@ -108,7 +108,7 @@ type ExitError struct{ Code int }
 func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code) }
 
 var knownModules = map[string]bool{
-	"fs": true, "os": true, "time": true,
+	"fs": true, "os": true, "time": true, "process": true,
 	"json": true, "http": true, "sql": true,
 }
 

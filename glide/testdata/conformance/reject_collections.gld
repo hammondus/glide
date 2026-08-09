@@ -1,0 +1,27 @@
+// The collection methods are typed, not stringly: a wrong element
+// type, a wrong arity, or a mutation through an immutable binding are
+// all caught before the program runs.
+fn main() {
+    let mut xs = [1, 2, 3]
+    println(xs.contains("two"))    // error: expected Int, found String
+    println(xs.index_of(1.5))      // error: expected Int, found Float
+    println(xs.slice(0))           // error: missing its "hi" argument
+    println(xs.extend([1.0]))      // error: expected Int, found Float
+    println(xs.first(0))           // error: takes 0 argument(s), got 1
+
+    // first/last/pop yield T?, not T — the whole point of the Option
+    // is that the empty case has a value, so it cannot be forgotten.
+    let head: Int = xs.first()     // error: expected Int, found Int?
+
+    let mut m = ["a": 1]
+    println(m.contains_key(1))     // error: expected String, found Int
+    println(m.remove(2))           // error: expected String, found Int
+    let v: Int = m.remove("a")     // error: expected Int, found Int?
+    println(m.values(1))           // error: takes 0 argument(s), got 1
+
+    // A mutating method needs a mut path, exactly as push does.
+    let frozen = [1, 2]
+    frozen.pop()                   // error: cannot mutate through immutable binding "frozen"
+    println(head)
+    println(v)
+}

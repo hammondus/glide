@@ -844,6 +844,90 @@ anything today — `Rune(128512)` works where `Rune(0x1F600)` does
 not — but the first is conspicuous the moment anyone writes
 byte-level code, which is exactly what the sized types are for.
 
+## The scripting surface: fs, os, process, and the collections
+
+Written after M4 closed, before bootstrap step 3, because the honest
+answer to "what is deferred that we could pull forward" turned out not
+to be a *language* item at all. Every deferred language feature is a
+comptime-era one that genuinely cannot come earlier. The stdlib was
+the gap: `os` had two functions, `fs` had one, `Map` had two methods,
+and a program could not write a file, read an environment variable,
+delete a map key or ask whether a list contained something.
+
+Decisions worth recording:
+
+- **`fs.exists` and `fs.is_dir` return a bare `Bool`, not a Result.**
+  Everything else fallible returns Result. These two do not, because a
+  Result there is one the caller could only ever unwrap: the question
+  *is* the answer, and an IO error reading a directory entry is
+  indistinguishable to the caller from "no". Go's `os.Stat` returns
+  both and every caller writes `err == nil`.
+- **`os.env` returns `String?`.** Set-and-empty is a different state
+  from unset — some tools use exactly that distinction — and `??`
+  supplies a default in one place. Go's `Getenv`/`LookupEnv` split
+  exists for the same reason; Glide only needs the second, because it
+  has an Option type.
+- **`fs.list_dir` sorts.** Go's `ReadDir` sorts, and the reason
+  generalises: a program that iterates a directory must not have its
+  output depend on the filesystem's whim. Same reasoning that made
+  `Map`'s insertion order a *specified* language property.
+- **`os.chdir` ships despite being process-global**, which is a real
+  hazard under `spawn` — two tasks calling it interleave, and a third
+  resolving a relative path sees whichever won. It ships because
+  without it there is no way at all to control where `process.run`
+  runs, and a documented sharp edge beats no tool. The single-threaded
+  script this exists for cannot hit it.
+- **`fs.join` takes a `List<String>`, not a variadic.** The language
+  has no variadics, and inventing them for a path helper would be the
+  tail wagging the dog. It moves to `path` when that module lands.
+- **List's naming rule is now explicit**: a past participle returns a
+  new list (`sorted`, `reversed`), a verb mutates (`push`, `pop`,
+  `insert`, `remove`, `extend`, `sort_by`). The rule was implicit in
+  `sorted`/`sort_by` and is worth stating before the set grows.
+- **`pop`/`first`/`last` return `T?`; `remove(i)`/indexing trap.** The
+  split is about who named the slot. An empty list is the *loop
+  condition* of every worklist algorithm, so popping one is an answer.
+  `xs.remove(5)` on a three-element list named a slot that is not
+  there, which is a bug — and Glide already traps `xs[5]` for exactly
+  that reason. No negative indices anywhere: `xs[-1]` meaning "last"
+  turns an off-by-one into a silent read of the wrong end, and
+  `last()` says it plainly.
+- **`slice` copies.** Nothing in Glide aliases a list; a
+  shared-storage view would make `mut` a lie about a second binding
+  the reader cannot see.
+- **`extend` copies its source first**, so `xs.extend(xs)` doubles the
+  list instead of looping forever re-reading a slice it is growing.
+- **`Map.contains_key`, not `contains`.** On a Map, `contains` is
+  ambiguous about which half it means. On a List it is not.
+- **`process.run`**: the three rules are in `../DESIGN.md` (exit codes
+  are not errors, no shell, cancellation point) with their lineage in
+  `../LINEAGE.md`. The implementation note is that `Output` is a new
+  `types.Ctor`, which reserves the name `Output` program-wide — the
+  same cost `Response` and `Request` already pay, and the alternative
+  (a tuple, or a Map) throws away the typing that makes the checker
+  useful here.
+
+**Found by using it.** Two things surfaced within ten minutes of
+writing the first real script, which is the entire argument for
+writing one:
+
+- **A comma between match arms was a parse error**, and a baffling one
+  ("expected a pattern, found ','"). Arms were newline-separated only,
+  so `match x { A => 1, B => 2 }` could not be written on one line at
+  all, and the reflex trailing comma failed. Fixed — the comma is now
+  optional in both `match` and the subjectless form. Recorded in
+  `../DESIGN.md` under the newline rule.
+- **`Int??` does not lex** — the shorthand does not nest, because `??`
+  is an operator. `Option<Int?>` is the spelling, which the language
+  reference already said. Left alone: the workaround is a documented
+  spelling rather than a missing capability, and special-casing the
+  lexer here would be worth less than it costs.
+
+Also confirmed while writing it: `fn main() -> Result<(), Error>`
+works, and `?` in `main` prints the error and exits 1. That closes
+most of the gap where a script wants "this must succeed, crash
+otherwise", so no `unwrap`/`expect`-style builtin was added.
+
 ## Deliberately absent (after M4)
 
 `Mutex<T>` (stdlib-era; ownership-transfer culture first), `derive`
@@ -852,4 +936,9 @@ query rows (wait for derive), method values as closures (`x.method`
 unapplied), `or |e|` blocks (declined — see DESIGN.md), time
 formatting/parsing/calendars (the `time` module's own later design),
 error-to-status middleware for http (the one default mapping — Err →
-500 — until middleware is designed).
+500 — until middleware is designed), streaming a child process's
+output / per-call env and cwd / stdin (see DESIGN.md's *Running other
+programs* — streaming is not a triviality, since a subprocess writing
+to the real file descriptor bypasses the writer the interpreter's
+stdout actually is), and `math` (`abs`, `min`, `max`, `sqrt`,
+`floor` — no design questions, just unwritten).

@@ -1398,6 +1398,16 @@ Go's model, with its defects designed out:
   the dot) is the variant shorthand starting a new statement, not a
   continuation: the case rule (methods/fields lowercase, variants
   capitalised) keeps the two dot meanings from ever colliding.
+- **A comma between match arms is optional** (2026-08-09, found by
+  writing the first real script). Arms had been newline-separated
+  only, which made a one-line `match x { A => 1, B => 2 }` impossible
+  to write and gave a trailing comma the baffling "expected a pattern,
+  found ','". Commas separate elements everywhere else in the language
+  — lists, maps, tuples, struct literals, arguments, and multi-pattern
+  arms *within* an arm — so match arms being the one place they were
+  forbidden was the surprise, not the concession. The two readings
+  cannot collide: an arm separator can only appear after a body, and a
+  multi-pattern comma only before the `=>`.
   `else` sits on the same line as
   its `}` — the canonical formatter guarantees it, so the rule never
   bites. (Forced by the interpreter; ratified.)
@@ -1913,6 +1923,37 @@ Out-list discipline matters as much as the in-list.
   — `scope(timeout: 5.s) { http.get(url)? }` cancels the request when
   the scope dies. The ctx-replacement covers HTTP for free.
 - Green thread per request; HTTP/2 in; HTTP/3 when it earns entry.
+
+### Running other programs
+
+Script mode (below) is a stated target, and a script that cannot shell
+out is not a script. `process.run(cmd, args) -> Result<Output, Error>`
+lands with three rules, each chosen against the shell's:
+
+- **A non-zero exit is not an error.** `Err` means the program could
+  not be started — not on PATH, not executable, killed by the scope.
+  Exiting 1 is how `grep` says "no match", `diff` says "they differ"
+  and `test` says "false"; folding that into `Err` would make `?`
+  propagate an ordinary answer, and every caller would spend a match
+  arm putting it back. The status is a field of the `Ok` value:
+  `out.status()`, `out.ok()`, `out.stdout()`, `out.stderr()`.
+- **No shell, and no string command.** The executable and its arguments
+  are separate values, and an argument containing a space stays one
+  argument. Nothing is word-split, so there is no quoting to get wrong
+  and no injection to audit — which is most of what makes shell
+  scripts fragile in the first place. A shell is still reachable and
+  then it is *visible*: `process.run("sh", ["-c", …])`.
+- **It is a cancellation point**, so a child dies with its enclosing
+  scope. Same rule as `http.get` and `time.sleep`, and without it
+  `scope(timeout: 5.s)` would return on time and leave the process
+  running — the precise leak structured concurrency exists to prevent.
+
+Deferred, for want of a forcing case: streaming a child's output to
+the terminal rather than capturing it, a per-call environment or
+working directory, and stdin. Streaming is not a triviality — the
+interpreter's stdout is a writer a test can redirect, and a subprocess
+writing to the real file descriptor bypasses it, so the two tiers
+could disagree about where the output went.
 
 ## Build & CLI tooling
 

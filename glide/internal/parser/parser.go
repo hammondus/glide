@@ -2061,6 +2061,7 @@ func (p *parser) parseMatch() (ast.Expr, error) {
 				return nil, err
 			}
 			m.Arms = append(m.Arms, ast.MatchArm{Pats: pats, Guard: guard, Body: body, Span: armAt})
+			p.accept(lexer.Comma)
 		}
 	})
 }
@@ -2099,6 +2100,7 @@ func (p *parser) parseCondMatch(at source.Span) (ast.Expr, error) {
 				return nil, err
 			}
 			m.Arms = append(m.Arms, ast.CondArm{Cond: cond, Body: body, Span: armAt})
+			p.accept(lexer.Comma)
 		}
 	})
 }

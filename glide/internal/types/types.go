@@ -165,6 +165,7 @@ const (
 	Request              // Request
 	Response             // Response
 	Db                   // Db
+	Output               // Output — a finished child process
 )
 
 var ctors = [...]struct {
@@ -188,6 +189,7 @@ var ctors = [...]struct {
 	Request:  {"Request", 0},
 	Response: {"Response", 0},
 	Db:       {"Db", 0},
+	Output:   {"Output", 0},
 }
 
 // Builtins maps each reserved constructor spelling to its Ctor. The

@@ -1,0 +1,51 @@
+// The List and Map method sets. Every signature here binds the
+// receiver's element type — `xs.first()` on a List<String> is a
+// String?, never an Unknown — so these are as much a test of
+// `instantiate` as of the tables themselves.
+fn main() {
+    let mut xs = [3, 1, 2]
+
+    // Queries. contains and index_of take T, so a wrong element type
+    // is caught here rather than at the comparison.
+    let present: Bool = xs.contains(2)
+    let where: Int? = xs.index_of(2)
+    let head: Int? = xs.first()
+    let tail: Int? = xs.last()
+
+    // Copies, named as past participles: the name says a new list came
+    // back, the way `sorted()` does against `sort_by`.
+    let back: List<Int> = xs.reversed()
+    let some: List<Int> = xs.slice(0, 2)
+
+    // Mutations, every one requiring a `mut` path.
+    xs.push(4)
+    xs.insert(0, 9)
+    xs.extend([7, 8])
+    let dropped: Int = xs.remove(1)
+    let popped: Int? = xs.pop()
+
+    println("{present} {where} {head} {tail} {back} {some} {dropped} {popped}")
+
+    // Element type flows through on a List of something else.
+    let words = ["a", "b"]
+    let w: String? = words.first()
+    let i: Int? = words.index_of("b")
+    println("{w} {i}")
+
+    // Map: K and V are bound separately, so keys() and values() have
+    // different element types out of the same receiver.
+    let mut m = ["a": 1, "b": 2]
+    let ks: List<String> = m.keys()
+    let vs: List<Int> = m.values()
+    let has: Bool = m.contains_key("a")
+    let gone: Int? = m.remove("a")
+    println("{ks} {vs} {has} {gone}")
+
+    // A List<T?> is an ordinary List: pop gives an Option of an
+    // Option, which is only representable because Option is boxed.
+    // Spelled long-hand — `Int??` lexes as the `??` operator, so the
+    // shorthand does not nest.
+    let mut opts: List<Int?> = [Some(1), None]
+    let nested: Option<Int?> = opts.pop()
+    println("{nested}")
+}

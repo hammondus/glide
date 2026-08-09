@@ -6,7 +6,7 @@ book (`docs/book/`) teaches; this file reminds.
 
 **Status markers** — the language is ahead of its implementation:
 
-- ✓ — runs in the current interpreter (M4b)
+- ✓ — runs in the current interpreter (M4c)
 - ○ — designed (recorded in `DESIGN.md`), not yet implemented; using
   it today is a parse, check, or runtime error
 
@@ -130,7 +130,7 @@ Type annotations are written but unchecked in M2.
 | `Bool`, `String`, `()` | | ✓ |
 | `List<T>`, `Map<K, V>` | **Map iteration is insertion order, and that is specified** — not incidental, and the compiled tier must reproduce it. Deleting a key drops it from the order; re-inserting appends. `json.encode` emits object keys in this order | ✓ |
 | `(A, B)` tuples | fields `.0`, `.1`. Two members minimum: `(T)` is a parse error, since a 1-tuple has no constructor and parenthesising a type buys nothing | ✓ |
-| `T?` = `Option<T>` | **boxed**: every `T?` is `None` or `Some(v)`, never a bare `v`. `Option<Option<T>>` is representable and `Some(None)` differs from `None`; spell it long-form (`Option<Int?>`) since `T??` cannot lex. Implicit `T -> T?` still applies. `Some(x)` renders as `Some(x)`, matching `None` | ✓ |
+| `T?` = `Option<T>` | **boxed**: every `T?` is `None` or `Some(v)`, never a bare `v`. `Option<Option<T>>` is representable and `Some(None)` differs from `None`; spell it long-form (`Option<Int?>`) since `T??` cannot lex. Implicit `T -> T?` still applies. `Some(x)` renders as `Some(x)`, matching `None`. `==` reaches inside the box, so `Some(1) == Some(1)` and `Some(None) != None` | ✓ |
 | `Result<T, E>` | `Ok(v)` / `Err(e)` | ✓ |
 | `Range` | value of `lo..hi` | ✓ |
 | `fn(A) -> B` | one function type for named fns, closures, method values | ✓ — writable in any type position: `fn apply(f: fn(Int) -> Int, x: Int)`, `List<fn(Int) -> Int>`, nested. No arrow means `-> ()`. A named function and a closure have the same type, so promoting one to the other needs no signature surgery. `?` after the arrow binds to the *return* (`fn(Int) -> Int?` returns an `Int?`), and since `(T)` is not a grouping there is currently no spelling for an *optional* function type ○. Method values unapplied (`x.method`) ○ |
@@ -292,7 +292,10 @@ Angle brackets, never square. **No turbofish, ever.**
   unlabeled break/continue still target the nearest loop.
 - `match subject { pattern [if guard] => expr … }` ✓ — arms are
   single expressions (use a block expression for multi-statement
-  arms). **Exhaustiveness is checked statically** ✓: a sum type, an
+  arms). Arms are separated by a newline **or a comma** ✓ — the comma
+  is optional, including a trailing one, and it is what makes a
+  one-line `match x { A => 1, B => 2 }` writable at all.
+  **Exhaustiveness is checked statically** ✓: a sum type, an
   `Option`, a `Result` or a `Bool` with a case unhandled is a compile
   error naming it, and coverage recurses one constructor deep so
   `Err(A)` without `Err(B)` reports `Err(B) not handled`. A type with
@@ -305,7 +308,7 @@ Angle brackets, never square. **No turbofish, ever.**
   may bind a name (parse error). Literal / range / string patterns ✓
   (see Patterns). Subjectless `match { cond => … }` ✓ — arms are
   Bool conditions, first true wins, `_` is always-true; falls through
-  to a runtime error if no arm is true.
+  to a runtime error if no arm is true. Optional commas here too.
 - Closures: `|x| expr`, `|x| { … }`, `||` for no args ✓. Capture by
   reference, by *binding* (a redeclare doesn't retarget) ✓. Closures
   may reuse outer names (function boundary resets the shadow rule) ✓.

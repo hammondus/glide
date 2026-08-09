@@ -241,6 +241,50 @@ fn main() {
 // 3
 ```
 
+The naming rule holds across the whole set: a past participle hands
+back a new list, a verb changes this one. So `reversed` and `slice`
+copy, while `insert`, `remove` and `extend` need `mut`.
+```rust
+fn main() {
+    let mut xs = [1, 2, 3]
+    println(xs.reversed())
+    println(xs.slice(0, 2))
+
+    xs.insert(0, 0)
+    xs.extend([4, 5])
+    println(xs)
+    println(xs.remove(0))
+    println(xs)
+}
+// [3, 2, 1]
+// [1, 2]
+// [0, 1, 2, 3, 4, 5]
+// 0
+// [1, 2, 3, 4, 5]
+```
+
+Asking a list about itself gives Options where the empty case is a
+real answer, and traps where you named a slot that isn't there.
+`pop` on an empty list is the loop condition of every worklist
+algorithm; `xs[5]` on a three-element list is a bug.
+```rust
+fn main() {
+    let mut xs = [10, 20]
+    println(xs.contains(20))
+    println(xs.index_of(99))
+    println(xs.first())
+    println(xs.pop())
+    println(xs.pop())
+    println(xs.pop())
+}
+// true
+// None
+// Some(10)
+// Some(20)
+// Some(10)
+// None
+```
+
 ## Maps
 
 Map literals use square brackets. Reading a missing key isn't an
@@ -281,6 +325,30 @@ fn main() {
 }
 // tea costs 3
 // no coffee here
+```
+
+`keys` and `values` come back in insertion order and line up with each
+other. `remove` hands you what was there and drops the key from the
+order — so re-inserting it later puts it at the end, not back where it
+was.
+```rust
+fn main() {
+    let mut stock = ["apples": 4, "pears": 2, "plums": 10]
+    println(stock.keys())
+    println(stock.values())
+    println(stock.contains_key("pears"))
+
+    println(stock.remove("pears"))
+    println(stock.remove("pears"))
+    stock["pears"] = 99
+    println(stock)
+}
+// ["apples", "pears", "plums"]
+// [4, 2, 10]
+// true
+// Some(2)
+// None
+// ["apples": 4, "plums": 10, "pears": 99]
 ```
 
 ## Match
@@ -339,4 +407,112 @@ fn main() {
     println(grade)
 }
 // B
+```
+
+Arms are separated by a newline or a comma, whichever reads better. A
+comma lets the whole thing sit on one line.
+```rust
+fn main() {
+    let n = 2
+    println(match n { 1 => "one", 2 => "two", _ => "many" })
+}
+// two
+```
+
+## Running other programs
+
+`process.run` takes an executable and a list of arguments. There is no
+shell, so nothing is word-split and there is nothing to quote — an
+argument containing a space stays one argument.
+
+The important part is what counts as an error. `Err` means the program
+could not be started at all. A program that ran and exited non-zero
+returns `Ok`: exiting 1 is how `grep` says "no match" and `test` says
+"false", and if that were an `Err` then `?` would propagate an ordinary
+answer.
+```rust
+import process
+
+fn main() {
+    match process.run("echo", ["a b", "c"]) {
+        Ok(out) => println("[{out.status()}] {out.stdout().trim()}")
+        Err(e)  => println("could not run echo: {e}")
+    }
+
+    match process.run("sh", ["-c", "exit 3"]) {
+        Ok(out) => println("ran, exited {out.status()}, ok={out.ok()}")
+        Err(e)  => println("could not run sh: {e}")
+    }
+
+    match process.run("no-such-program-6a1f") {
+        Ok(out) => println("unexpected {out.status()}")
+        Err(e)  => println("that one really is an error")
+    }
+}
+// [0] a b c
+// ran, exited 3, ok=false
+// that one really is an error
+```
+
+A child is bound to its scope, like every other blocking operation. If
+the scope's timeout fires, the process is killed — not merely
+abandoned.
+```rust
+import process
+import time
+
+fn main() {
+    let start = time.now()
+    scope(timeout: 200.ms) s {
+        let t = s.spawn(|| process.run("sleep", ["30"]))
+        println("never reached: {t.join()}")
+    }
+    println("back in {time.now() - start < 5.s}")
+}
+// back in true
+```
+
+## Files and the environment
+
+Anything that can fail returns a `Result`, so `fn main() -> Result<(),
+Error>` plus `?` replaces `set -e`: a failed step prints one line and
+exits 1. The two predicates, `exists` and `is_dir`, return a plain
+`Bool` — a `Result` there would be one you could only ever unwrap.
+```rust
+import fs
+import os
+
+fn main() -> Result<(), Error> {
+    let dir = fs.join([os.env("TMPDIR") ?? "/tmp", "byexample"])
+    fs.mkdir_all(dir)?
+
+    let path = fs.join([dir, "notes.txt"])
+    fs.write_string(path, "first\n")?
+    fs.append_string(path, "second\n")?
+
+    println(fs.exists(path))
+    println(fs.read_string(path)?.lines())
+    println(fs.list_dir(dir)?)
+
+    fs.remove_all(dir)?
+    println(fs.exists(dir))
+    Ok(())
+}
+// true
+// ["first", "second"]
+// ["notes.txt"]
+// false
+```
+
+`os.env` gives an Option rather than an empty string, because a
+variable that is set to nothing is not the same as one that isn't set.
+```rust
+import os
+
+fn main() {
+    println(os.env("GLIDE_NOT_SET_1234") ?? "(unset)")
+    println((os.env("PATH") ?? "").len() > 0)
+}
+// (unset)
+// true
 ```

@@ -246,6 +246,8 @@ func typeName(v Value) string {
 		return "Response"
 	case *DbV:
 		return "Db"
+	case *OutputV:
+		return "Output"
 	}
 	return fmt.Sprintf("%T", v)
 }
@@ -368,6 +370,8 @@ func render(v Value, quoted bool) string {
 		return fmt.Sprintf("<response %d>", x.status)
 	case *DbV:
 		return "<db>"
+	case *OutputV:
+		return fmt.Sprintf("<output status %d>", x.status)
 	case DurationV:
 		return time.Duration(x).String()
 	case InstantV:
@@ -385,6 +389,16 @@ func eq(a, b Value, at source.Span) bool {
 	case InstantV:
 		y, ok := b.(InstantV)
 		return ok && x.T.Equal(y.T) // Go's ==-on-time.Time trap, dodged
+	case *SomeV:
+		// Boxing Option in M4c left this case out, and `Some(1) ==
+		// Some(1)` panicked with "Option values are not comparable" —
+		// a regression, since before boxing a Some *was* its payload
+		// and compared structurally like everything else. Equality is
+		// specified universal and structural, so it has to reach
+		// inside the box. (`None == None` never broke: NoneV is a
+		// comparable struct and fell through the scalar case.)
+		y, ok := b.(*SomeV)
+		return ok && eq(x.V, y.V, at)
 	case *DistinctV:
 		y, ok := b.(*DistinctV)
 		return ok && x.Type == y.Type && eq(x.V, y.V, at)

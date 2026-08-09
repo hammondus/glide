@@ -1,6 +1,6 @@
 # Glide Standard Library Reference
 
-What a running program can call **today**, in the M4b interpreter.
+What a running program can call **today**, in the M4c interpreter.
 The designed stdlib — what this grows into — lives in
 `STDLIB-GOALS.md` (aspirational inventory) and `DESIGN.md` (committed
 designs); this file only documents what executes. In the interpreter
@@ -79,12 +79,69 @@ Import at the top of the file; imports are inert (run nothing).
 |---|---|---|
 | `os.args()` | `() -> List<String>` | program name first, then arguments |
 | `os.exit(code)` | `(Int) -> !` | immediate exit with status |
+| `os.env(name)` | `(String) -> String?` | `None` when unset — which is a different thing from set-and-empty, hence the Option. Pair with `??` for a default |
+| `os.set_env(name, value)` | `(String, String) -> Result<(), Error>` | affects this process and its children |
+| `os.cwd()` | `() -> Result<String, Error>` | resolved, symlinks followed (Go's `Getwd`) |
+| `os.chdir(path)` | `(String) -> Result<(), Error>` | **process-global**: two tasks calling it under `spawn` interleave, and a third resolving a relative path sees whichever won. Fine in a single-threaded script, which is what it is for |
 
 ### `fs` ✓
+
+Paths are Strings. A typed `path` module is designed (○,
+`STDLIB-GOALS.md`); until it exists, a String is what a script has and
+converting at every boundary would buy no checking.
 
 | Function | Signature | Notes |
 |---|---|---|
 | `fs.read_string(path)` | `(String) -> Result<String, Error>` | whole file as a String |
+| `fs.write_string(path, s)` | `(String, String) -> Result<(), Error>` | creates or **truncates**, mode 0644 — the shell's `>` |
+| `fs.append_string(path, s)` | `(String, String) -> Result<(), Error>` | creates if absent — the shell's `>>` |
+| `fs.exists(path)` | `(String) -> Bool` | bare Bool, not Result: a Result here is one you could only ever unwrap |
+| `fs.is_dir(path)` | `(String) -> Bool` | `false` for a missing path too |
+| `fs.remove(path)` | `(String) -> Result<(), Error>` | one file, or one *empty* directory |
+| `fs.remove_all(path)` | `(String) -> Result<(), Error>` | the whole tree; named so it is never reached by accident |
+| `fs.mkdir_all(path)` | `(String) -> Result<(), Error>` | parents too, mode 0755; already-exists is `Ok` |
+| `fs.rename(from, to)` | `(String, String) -> Result<(), Error>` | same-filesystem move |
+| `fs.list_dir(path)` | `(String) -> Result<List<String>, Error>` | entry **names**, not paths; sorted, so a program's output never depends on the filesystem's whim |
+| `fs.join(segments)` | `(List<String>) -> String` | cleaned, platform separator. A List rather than a variadic because the language has no variadics; moves to `path` when that module lands |
+
+### `process` ✓
+
+| Surface | Signature | Notes |
+|---|---|---|
+| `process.run(cmd [, args])` | `(String, List<String>?) -> Result<Output, Error>` | runs to completion, capturing both streams. **Cancellation point** — the child dies with its enclosing scope |
+| `out.status()` | `() -> Int` | the exit code; `-1` if a signal killed it |
+| `out.ok()` | `() -> Bool` | `status() == 0` |
+| `out.stdout()` / `out.stderr()` | `-> String` | captured in full |
+
+Three things about this surface are deliberate and are the opposite of
+the shell:
+
+**A non-zero exit is not an error.** `Err` means the program could not
+be run *at all* — not on PATH, not executable, killed by the scope. A
+program that ran and exited 1 produced an answer: that is how `grep`
+says "no match", `diff` says "they differ" and `test` says "false".
+Folding it into `Err` would make `?` propagate an ordinary result, and
+every caller would have to un-propagate it. So the status is a field of
+the `Ok` value.
+
+**There is no shell.** The command and its arguments are separate, and
+an argument containing a space stays one argument. Nothing is
+word-split, so there is no quoting to get wrong and no injection to
+audit — which is most of what makes shell scripts fragile. A shell is
+still available and then it is visible at the call site:
+`` process.run("sh", ["-c", "a | b > c"]) ``.
+
+**It is a cancellation point**, like `http.get` and `time.sleep`.
+`scope(timeout: 5.s)` kills the child; without that the scope would
+return and leave the process running, which is the leak structured
+concurrency exists to prevent.
+
+Still ○: streaming a child's output to the terminal instead of
+capturing it (a long build), an environment or working directory per
+call, and stdin. The streaming one is not a triviality — the
+interpreter's stdout is an `io.Writer` a test can redirect, and a
+subprocess writing to the real file descriptor bypasses it, so the two
+tiers could disagree about where output went.
 
 ### `json` ✓ (M2 shim — `derive Json` is the real design)
 
@@ -127,9 +184,8 @@ NULL is `None` in both directions (`sql.NullString` never exists);
 distinct values bind by unwrapping; `Instant` stores as RFC 3339.
 
 Designed growth (○): the rest of the committed core set — `tls`,
-`crypto`, `process`, `flag`, `regex`, `log`, `template`, `rand`,
-compression, persistent collections, `Mutex<T>` — per
-`STDLIB-GOALS.md`.
+`crypto`, `flag`, `regex`, `log`, `template`, `rand`, compression,
+persistent collections, `Mutex<T>` — per `STDLIB-GOALS.md`.
 
 ## Concurrency (M3)
 
@@ -262,6 +318,21 @@ and the conversion is then simply gone.
 | `repeat(k)` | `(Int) -> List<T>` | new list, elements repeated k times (`[0].repeat(n)` is the fill constructor; Go 1.23's `slices.Repeat`). **Shallow**: repeats the value, so `[[]].repeat(2)` is two slots sharing one inner list — build fresh inner values with `(0..n).iter().map(\|_\| []).collect()` instead. k < 0 panics |
 | `join(sep)` | `(String) -> String` | elements must all be Strings (runtime error otherwise) |
 | `iter()` | `-> Iterator<T>` | |
+| `contains(v)` | `(T) -> Bool` | structural `==`, same as everywhere else |
+| `index_of(v)` | `(T) -> Int?` | first match; shares one scan with `contains`, so the two cannot disagree |
+| `first()` / `last()` | `-> T?` | `None` on an empty list |
+| `pop()` | `-> T?` | removes and returns the last; requires `mut`. `None` on empty is deliberate — an empty worklist is a loop condition, not a bug |
+| `insert(i, v)` | `(Int, T) -> ()` | shifts right; requires `mut`. `i == len()` appends; anything past that traps |
+| `remove(i)` | `(Int) -> T` | shifts left, returns what was there; requires `mut`; out of range traps |
+| `extend(other)` | `(List<T>) -> ()` | appends every element; requires `mut`. `xs.extend(xs)` doubles the list rather than looping |
+| `reversed()` | `-> List<T>` | a **copy**, like `sorted()` |
+| `slice(lo, hi)` | `(Int, Int) -> List<T>` | half-open `[lo, hi)`, and a **copy** — nothing in Glide aliases a list, and a shared-storage view would make `mut` a lie about a binding you cannot see. Out of range, or `lo > hi`, traps |
+
+Naming rule: a past participle returns a new list (`sorted`,
+`reversed`), a verb mutates (`push`, `pop`, `sort_by`, `insert`,
+`remove`, `extend`). No negative indices — `xs[-1]` meaning "last" is a
+convenience that turns an off-by-one into a silent read of the wrong
+end, and `last()` says it plainly.
 
 Indexing: `xs[i]` reads ✓; `xs[i] = v` and the compound forms (`+=`
 `-=` `*=` `/=` `%=`) assign in place (requires a `mut` path) ✓. Out
@@ -273,6 +344,10 @@ of bounds panics — bug territory.
 |---|---|---|
 | `len()` | `-> Int` | |
 | `entries()` | `-> List<(K, V)>` | insertion order |
+| `keys()` | `-> List<K>` | insertion order |
+| `values()` | `-> List<V>` | insertion order, parallel to `keys()` |
+| `contains_key(k)` | `(K) -> Bool` | spelled `_key` because `contains` on a Map is ambiguous about which half it means |
+| `remove(k)` | `(K) -> V?` | removes and returns; `None` if absent. Requires `mut`. Drops the key from the insertion order — re-inserting later appends at the end |
 
 Indexing: `m[k]` returns `V?` (absent key → `None`; pair with `??`)
 ✓. `m[k] = v` inserts or updates (requires `mut`) ✓. Iterating a map

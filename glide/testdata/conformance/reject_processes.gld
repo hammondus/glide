@@ -1,0 +1,33 @@
+// The host modules are typed like anything else. In particular
+// `process.run` is not a shell: the command and its arguments are
+// separate, and passing one string containing both is a type error
+// rather than something that silently looks for an executable with a
+// space in its name.
+import fs
+import os
+import process
+
+fn main() -> Result<(), Error> {
+    println(process.run("ls", "-la"))     // error: expected List<String>, found String
+    println(process.run(7))               // error: expected String, found Int
+    println(process.run())                // error: missing its "cmd" argument
+    println(process.spawn("ls"))          // error: module process has no function "spawn"
+
+    // A non-zero exit is not an error, so there is no Err arm to
+    // unwrap for it — status() lives on the Ok side.
+    let out = process.run("ls")?
+    let code: String = out.status()       // error: expected String, found Int
+    println(out.exit_code())              // error: Output has no method "exit_code"
+
+    println(fs.read_string(1))            // error: expected String, found Int
+    println(fs.write_string("only.txt"))  // error: missing its "contents" argument
+    println(fs.join("a", "b"))            // error: this call takes 1 argument(s), got 2
+    let ok: Result<(), Error> = fs.exists("x") // error: expected Result<(), Error>, found Bool
+    println(fs.slurp("x"))                // error: module fs has no function "slurp"
+
+    let home: String = os.env("HOME")     // error: expected String, found String?
+    println(os.getenv("HOME"))            // error: module os has no function "getenv"
+    println(code)
+    println(ok)
+    Ok(())
+}

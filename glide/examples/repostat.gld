@@ -1,0 +1,113 @@
+// repostat — the shape a shell script takes in Glide.
+//
+// Shells out to git, walks a directory, and writes a report. The
+// things worth looking at:
+//
+//   - `fn main() -> Result<(), Error>` plus `?`. A failed step prints
+//     one line and exits 1, with no `set -e` and no `|| exit`.
+//   - `process.run` takes an executable and a list. Nothing is
+//     word-split, so an argument containing a space is one argument
+//     and there is nothing to quote.
+//   - A non-zero exit is an ordinary value, not an error. `git
+//     rev-parse` exiting 128 means "not a repository", which this
+//     program handles rather than propagates.
+//   - The scope timeout binds the child: if git hangs, the process is
+//     killed, not merely abandoned.
+//
+// Run: glide run examples/repostat.gld [dir]
+import fs
+import os
+import process
+
+type Repo = struct {
+    pub head: String
+    pub branch: String
+    pub dirty: Int
+}
+
+// git runs a subcommand in `dir` and returns its trimmed stdout, or
+// None if git failed for any reason the caller does not care to
+// distinguish. Note the two failure kinds arriving separately: `Err`
+// is "git is not installed", `!out.ok()` is "git ran and said no".
+fn git(dir: String, args: List<String>) -> String? {
+    let mut full = ["-C", dir]
+    full.extend(args)
+    match process.run("git", full) {
+        Ok(out) => if out.ok() { Some(out.stdout().trim()) } else { None }
+        Err(e) => {
+            eprintln("git is not runnable: {e}")
+            None
+        }
+    }
+}
+
+fn describe(dir: String) -> Repo? {
+    // One scope around the whole git conversation: if any of these
+    // hang, all of them are killed together.
+    scope(timeout: 10.s) {
+        // let…else: not-a-repository leaves early, and the happy path
+        // stays unindented. `?` is not available here — it converts a
+        // Result, and these are Options.
+        let Some(head) = git(dir, ["rev-parse", "--short", "HEAD"]) else { return None }
+        let Some(branch) = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]) else { return None }
+        let Some(status) = git(dir, ["status", "--porcelain"]) else { return None }
+        let dirty = if status == "" { 0 } else { status.lines().len() }
+        Some(Repo{ head: head, branch: branch, dirty: dirty })
+    } ?? None
+}
+
+// Largest files in a directory, by the only measure available without
+// a stat surface: how many bytes reading them back yields. Skips
+// anything unreadable rather than failing the run.
+fn biggest(dir: String, n: Int) -> List<(String, Int)> {
+    let mut sized: List<(String, Int)> = []
+    for name in fs.list_dir(dir) ?? [] {
+        let path = fs.join([dir, name])
+        if fs.is_dir(path) { continue }
+        match fs.read_string(path) {
+            Ok(body) => sized.push((name, body.len()))
+            Err(_) => {}
+        }
+    }
+    sized.sort_by(|a, b| b.1.cmp(a.1))
+    sized.slice(0, if sized.len() < n { sized.len() } else { n })
+}
+
+fn main() -> Result<(), Error> {
+    let args = os.args()
+    let dir = if args.len() > 1 { args[1] } else { os.cwd()? }
+
+    if fs.is_dir(dir) == false {
+        eprintln("{dir} is not a directory")
+        os.exit(2)
+    }
+
+    println("repostat: {dir}")
+    println("shell:    {os.env("SHELL") ?? "unknown"}")
+
+    match describe(dir) {
+        Some(r) => println("git:      {r.branch} @ {r.head}, {r.dirty} file(s) dirty")
+        None    => println("git:      not a repository (or git is unavailable)")
+    }
+
+    let top = biggest(dir, 5)
+    if top.len() == 0 {
+        println("files:    none readable")
+    } else {
+        println("files:    {top.len()} largest")
+        for entry in top {
+            println("  {entry.1:8}  {entry.0}")
+        }
+    }
+
+    // Write the report next to nothing — a temp file we then remove,
+    // so the example leaves no litter.
+    let out = fs.join([os.env("TMPDIR") ?? "/tmp", "repostat.txt"])
+    fs.write_string(out, "{dir}\n")?
+    for entry in top {
+        fs.append_string(out, "{entry.1}\t{entry.0}\n")?
+    }
+    println("report:   {out} ({fs.read_string(out)?.lines().len()} lines)")
+    fs.remove(out)?
+    Ok(())
+}

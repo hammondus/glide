@@ -1214,6 +1214,14 @@ syntax is exactly the second-language-tooling-can't-see that's banned.
   shadowing trap, and (decisive here) no slot for mutability, which
   is why Go has no immutable locals.
 
+- **2010–2015** — the match-arm separator settles as a comma
+  everywhere it appears: Rust (`match x { A => 1, B => 2 }`, trailing
+  comma optional and inserted by rustfmt), Scala, Swift's `case`
+  clauses being statement-terminated instead. No mainstream language
+  makes an arm separator *illegal* — the newline-only form exists in
+  Haskell and F#, where layout is the whole syntax model rather than
+  an exception to a brace-and-comma one.
+
 **Glide takes** Go's newline rule verbatim (ratified after the
 interpreter forced the question), mandatory braces (see `goto fail`),
 struct-literals banned in control headers (Rust's rule, hit for
@@ -1221,7 +1229,10 @@ Rust's reason), and `let` as the only declaration form — the keyword
 is what immutable-by-default lives in. Assignment is a statement
 (the `if (b = 1)` typo family unwritable), boolean operators are
 conventional `&&`/`||`/`!` with no truthiness and no overloading
-(short-circuit is control flow).
+(short-circuit is control flow). Match arms take Rust's optional
+comma *and* keep the newline: forbidding the comma made a one-line
+match unwritable and turned the reflex trailing comma into a parse
+error, in a language that separates every other list with commas.
 
 ## No `++`/`--`
 
@@ -1565,6 +1576,54 @@ production defaults (Go's default client has no timeout — an
 incident generator). The out-list is discipline too: no GUI, no ORM,
 no ML, ever; protocol clients with living peripheries (SMTP) live on
 the `x/` porch where they can churn at the world's speed.
+
+## Running other programs: exit codes aren't errors, and there is no shell
+
+- **1971** — Unix settles the convention that a process exits 0 for
+  success and non-zero otherwise, and immediately the interesting
+  programs use the code as *data*: `grep` exits 1 for "no match", `cmp`
+  and `diff` exit 1 for "they differ", `test` exits 1 for "false". By
+  the time `set -e` arrives in the Bourne shell (1979) the two meanings
+  are already tangled — which is why `set -e` needs its long list of
+  exemptions, and why `grep x f || true` is a phrase every shell
+  programmer knows.
+- **1988–2003** — Python's `os.system` returns the raw wait status;
+  `subprocess` (PEP 324, 2003) splits the two properly: `.returncode`
+  is a field of the completed process, and only failing to *start* the
+  program raises. But `check_call` and later `check=True` exist because
+  people kept wanting the other behaviour, and Python's answer is to
+  make it opt-in, not default.
+- **1996 / 2009** — the injection lesson is learned twice. Perl's
+  `system LIST` (list form, no shell) versus `system STRING` (shell,
+  word-split) is documented as *the* security distinction in
+  perlfunc; Go's `os/exec` then ships in 2009 with no string form at
+  all — `exec.Command(name, arg...)` cannot go through a shell unless
+  you name the shell. Rust's `std::process::Command` (2015) makes the
+  same call. Nobody who built a process API after 1996 chose the
+  string.
+- **2015** — Rust's `Output` fixes the shape: `status`, `stdout`,
+  `stderr` in one struct, returned as `io::Result<Output>` where the
+  `Err` is an OS-level failure to spawn. Deno (2018→) and Bun copy it.
+  Go's `cmd.Output()` returns `([]byte, error)` and folds the exit
+  status *into* the error as `*ExitError` — which is why every Go
+  program that shells out contains the same `errors.As(&exitErr)`
+  dance to get the code back out.
+- **2017** — `exec.CommandContext` lands in Go, tying the child's life
+  to a context. Rust's std still has no equivalent: killing a child on
+  a timeout is the caller's problem, and the standard advice is a
+  crate.
+
+**Glide takes** the list form, always — there is no string command and
+no shell, so quoting bugs and injection are unrepresentable, and a
+shell is reachable only by naming it (`process.run("sh", ["-c", …])`).
+It takes Rust's `Output` shape and Python's split of the two failure
+kinds: `Err` is "could not run it", a non-zero exit is an ordinary `Ok`
+carrying `status()`. That is deliberately *not* Go's fold-into-error,
+because Glide has `?` — and a `?` that propagates grep's "no match"
+would be a trap laid in the language's most-used operator. Go's
+`CommandContext` is taken and made ambient: the child is bound to the
+enclosing scope, so `scope(timeout: 5.s)` kills it, with no context
+parameter to thread and no way to forget.
 
 ## Build & packages: no scripts, vendored, pinned
 
