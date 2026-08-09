@@ -46,12 +46,14 @@ or it is a bug.
      from real types — retiring `resultErrType`'s string slicing.
      Deferred out of M4b: **boxing `Option`** and **sized numerics in
      the runtime**.
-   - **M4c — generics, traits, and the numeric floor.** Sized
-     numerics landed first (see below): the six narrow widths now
-     have a runtime representation and trap at their own width, and
-     overflow traps in every tier. Still to come: declaration-site
-     bound checking, trait structural conformance, static match
-     exhaustiveness, boxed `Option`. The interpreter runs generics
+   - **M4c — generics, traits, and the numeric floor.** Landed in
+     order: sized numerics with a runtime representation and
+     trap-everywhere overflow; explicit numeric conversion (`u8(n)`);
+     then bound checking and trait conformance, with `Self` as a real
+     type and a two-trait universe. Still to come: static match
+     exhaustiveness, boxed `Option`, generator element types, the
+     spawn-captures-mut ban, and operator traits (which is what
+     `a < b` on a `T: Ord` waits for). The interpreter runs generics
      type-erased; monomorphisation is the compiled tier's problem.
 
 ## Decisions
@@ -467,6 +469,63 @@ or it is a bug.
   to end instead — every numeric primitive is *run* as a conversion,
   and `Bool`/`String` are asserted not to be.
 
+- **The universe traits are written in Glide, not built in Go.**
+  `internal/check/prelude.go` holds ~6 lines of Glide source, parsed
+  once. They *are* Glide declarations, so spelling them as Glide is
+  the auditable form: the whole definition is in one place, there is
+  no second half hidden in a Go table, and the parser is exercised by
+  the same source every program is. They reach `program.Load` through
+  `Known.Traits`, like every other thing the host provides, so both
+  tiers index one set.
+
+  Admission rule, and it is strict: **a universe trait names machinery
+  that already runs.** `Ord` qualifies — `Int` and `String` both have
+  `cmp` in the method tables. `Iterable` qualifies — the evaluator's
+  `iterate` already says "anything with an `iter()` method". `Hash`
+  and `Display` do not, and stay out; a trait whose required method the
+  evaluator cannot execute is `TestHostSurfaceMatchesRuntime`'s drift
+  in a different costume.
+
+- **Conformance is checked off the impl blocks, not the TypeTraits
+  index.** A generic trait's arguments live on the header — `impl
+  Iterable<Int> for Bag` is the only place `Int` is written — so
+  driving the pass off `Table.TypeTraits` (which records only trait
+  names) cannot bind them. Caught by the corpus: `tree.gld`'s `impl
+  Iterable<T> for Tree<T>` passed with the naive version *by
+  coincidence*, because its `T` and the trait's `T` happen to share a
+  name.
+
+- **`unify` binds a type parameter to another type parameter.** It
+  previously skipped any actual that was `IsOpaque`, which covers both
+  Unknown and a `*types.Var`. Unknown must indeed not bind — it would
+  poison the parameter for every later use — but a type *parameter*
+  must: `outer<T: Ord>` calling `inner<U: Ord>(a)` binds `U := T`,
+  which is how generic code composes and how the bound on `U` gets
+  something to check against. Before the fix, passing an unbounded `T`
+  where an `Ord` was required went unnoticed.
+
+- **The method-lookup guard tests `IsUnknown`, not `IsOpaque`.** This
+  is the whole of "a bound is the complete method set", in one line.
+  `methodOf` returns `modelled=false` for an unbounded parameter and
+  `modelled=true` for a bounded one, so `modelled` already carries the
+  distinction; keeping `IsOpaque` in the guard would silence exactly
+  the receivers bounds exist to make checkable. Operators still use
+  `IsOpaque`, which is why `a < b` on a `T: Ord` stays quiet — that
+  needs operator traits, deliberately deferred.
+
+- **A trait's default body is checked against `Self: ThisTrait`.**
+  Exactly the generality a default has: it may call the trait's own
+  methods and nothing else. Skipped entirely before M4c, for want of
+  a type variable to check it against.
+
+- **A required (body-less) trait method is no longer inherited.**
+  `declareFns` used to copy *every* trait method into the implementing
+  type's method set, defaults and requirements alike, which is what let
+  `impl Greet for Foo {}` resolve a `hello` that was never written —
+  the call type-checked and died at runtime. Only bodied methods are
+  inherited now; a requirement is a demand on the type, not a method
+  it acquires.
+
 - **A tuple literal's expected element types win, as a list
   literal's already did.** `checkExpr` pushed the expectation into
   each slot and then rebuilt the tuple's type from
@@ -523,31 +582,35 @@ or it is a bug.
 
 ## Remaining in M4c
 
-Sized numerics in the runtime are **done** (see the decisions above).
-Still open, in the order they are worth doing:
+Sized numerics, explicit conversion, bound checking and trait
+conformance are **done** (see the decisions above). Still open, in the
+order they are worth doing:
 
-1. **Generic bound checking and trait conformance — one job, not
-   two.** Checking `T: Ord` at a call site *is* asking "does this
-   type conform to `Ord`?", so conformance is the prerequisite rather
-   than a sibling. M4a parses bounds into the AST and M4b resolves
-   them into `types.Var`, but nothing checks one, and `impl Greet for
-   Foo {}` with `hello` never written is accepted today. The payoff
-   is larger than one more diagnostic: `types.IsOpaque` currently
-   makes *every* operation inside *every* generic body pass in
-   silence, and a bound is what turns a type parameter from a hole
-   into a known surface. It shrinks `Unknown` more than anything else
-   left.
+1. **Operator traits.** The half of `Ord` that bound checking
+   deliberately did not deliver: `a < b` on a `T: Ord` still passes in
+   silence, because operators consult `IsOpaque` where methods now
+   consult `modelled`. This is why `examples/tree.gld` — the flagship
+   generic in the repo, whose `insert_node<T: Ord>` compares with
+   `<` — is checked everywhere except the line that motivates its
+   bound. It was split out because it carries four unsettled language
+   decisions of its own: does `Ord` drive all of `< <= > >=`; does
+   `==` go through `Eq` or stay structural (it is structural today);
+   do `Add`/`Mul` exist and does `+` on a user type dispatch through
+   them; is `Ord` derived for structs or hand-written. Those belong in
+   their own commit where they are visible.
 2. **Boxed `Option`.** A key present in a `Map<K, V?>` holding `None`
-   is indistinguishable from an absent key — real data loss, but the
-   most invasive change of the three, since it touches the runtime
-   representation as well as the checker.
+   is indistinguishable from an absent key — real data loss, and the
+   only remaining *wrong answer* rather than a missing diagnostic. The
+   most invasive change left: runtime representation as well as
+   checker.
 3. The cheaper leftovers: static match exhaustiveness (the runtime
    catches it, and its message still says "exhaustiveness checking
    arrives with the compiler" — now the checker's job), the
    spawn-captures-mut ban, generator element types (a `yield`ing
    function is exempt from the tail-value check, so `yield "s"` in an
-   `Iterator<Int>` passes), and call-site inference for associated
-   functions.
+   `Iterator<Int>` passes), and call-site inference for *nullary*
+   associated functions (`Box.new()` erases its parameter, so a later
+   `add(1)` then `add("s")` passes; `Box.new(1)` already infers).
 
 **Two lexer gaps found while testing the conversions**, both small
 and both out of scope for the commit that found them: there are no

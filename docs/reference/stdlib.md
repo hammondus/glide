@@ -29,6 +29,34 @@ All print functions take exactly one argument; formatting happens in
 the interpolated string, not the call (`println("{n:6} {word}")`).
 These names are reserved — they cannot be bound or redeclared.
 
+## Universe traits
+
+Declared by the host, in Glide, and visible to every program without
+an import. Both are reserved: a program cannot redeclare them.
+
+| Trait | Requires | Notes |
+|---|---|---|
+| `Ord` | `cmp(self, other: Self) -> Int` | three-way ordering |
+| `Iterable<T>` | `iter(self) -> Iterator<T>` | what `for … in` consumes |
+
+The set is deliberately two. A universe trait names machinery that
+*already runs*: `Int` and `String` both have `cmp`, and the evaluator
+already treats anything with an `iter()` as iterable. A trait whose
+required method the runtime cannot execute would be drift between the
+tiers wearing a type's clothes.
+
+Still ○, and why: **`Hash`** needs a `hash()` that does not exist, and
+adding one means committing to a hash function — stable across runs?
+across versions? — with nothing yet forcing the answer. **`Display`**
+needs `to_string()`, and would constrain nothing anyway: interpolation
+is universal here, so `fn log<T>(v: T) { println("{v}") }` already
+accepts every `T`. A bound everything satisfies is decoration.
+
+Builtins satisfy a universe trait **structurally** — `Int` cannot
+write `impl Ord for Int`, and does not have to. User types must
+*declare* conformance (`impl Ord for Blob { }`), though the body
+carries only what is missing.
+
 ## Modules
 
 Import at the top of the file; imports are inert (run nothing).

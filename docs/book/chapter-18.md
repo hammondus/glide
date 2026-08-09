@@ -209,21 +209,41 @@ to that point the parser skipped the `<…>` list to find its closing
 bracket and threw the contents away, so nothing could have checked a
 bound because nothing recorded one.
 
-But parsing is all that happens yet. There is no specialisation and no
-checking. The `Stack<T>` above runs because the interpreter is
-dynamically typed underneath — you could push an `Int` and a `String`
-into the same stack today and it would work.
+There is still no specialisation — the interpreter runs generics
+type-erased — but there is now checking.
 
-So the examples in this chapter *run*, and none of the safety they
-describe is currently enforced. Write the bounds anyway: they are
-documentation, and they are now literally what the checker will read.
+M4c made the bounds real. They are verified **at the declaration** — a
+generic function's body is checked once against its bounds, so callers
+get the error at the call site instead of from deep inside the callee:
 
-M4c is where the checking arrives. Bounds get verified **at the
-declaration** — a generic function's body is checked once against its
-bounds, so callers get "your `T` does not implement `Ord`" at the call
-site instead of an error from deep inside the callee. Note the
-*interpreter* needs no monomorphisation for any of this: it runs
-generics type-erased and still enforces every rule statically.
+```
+error: line 3: Blob does not implement Ord, required by T
+```
+
+And a bound is the **complete** method set. On a `T: Ord`, `cmp`
+resolves through the bound and anything else is a compile error:
+
+```
+error: line 1: T has no method "frobnicate": it is bounded by Ord,
+       which does not declare one
+```
+
+That is what a bound is *for*. Without it the annotation is
+decoration, and a typo inside a generic body waits until runtime.
+
+An **unbounded** `<T>` is the deliberate opposite: fully opaque, no
+diagnostics, because the checker genuinely knows nothing about it and
+anything it said would be a guess. So the two spellings mean different
+things — `<T>` says "any type, and I will not touch it"; `<T: Ord>`
+says "any ordered type, and here is exactly what I may do".
+
+One piece is still missing, and it is worth knowing which: **operators**
+on a bounded `T`. `a < b` where `T: Ord` passes unchecked, because that
+needs operator traits, which are designed and not yet built. Methods
+are checked; operators wait.
+
+Note the *interpreter* needs no monomorphisation for any of this: it
+runs generics type-erased and still enforces every rule statically.
 Specialisation is the compiled tier's concern, and the two tiers accept
 exactly the same programs regardless.
 

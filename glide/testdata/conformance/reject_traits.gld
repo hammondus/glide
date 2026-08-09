@@ -1,0 +1,40 @@
+// Declaring conformance is a promise, and M4c collects on it. Every
+// case here was accepted in silence through M4b: an impl that
+// implements nothing, a signature that does not match, a bound
+// nothing satisfies, and a method no bound declares.
+trait Greet {
+    fn hello(self) -> String
+}
+
+type Silent = struct { n: Int }
+impl Greet for Silent { }       // error: Silent does not satisfy Greet: missing hello
+
+type Wrong = struct { n: Int }
+impl Greet for Wrong {          // error: hello returns Int, but the trait declares String
+    fn hello(self) -> Int { 1 }
+}
+
+type Arity = struct { n: Int }
+impl Arity { fn hello(self, extra: Int) -> String { "x" } }
+impl Greet for Arity { }        // error: takes 1 argument(s), but the trait declares 0
+
+type Blob = struct { n: Int }
+
+fn biggest<T: Ord>(a: T, b: T) -> T {
+    if a.cmp(b) > 0 { a } else { b }
+}
+
+// A bound is the complete method set: `Ord` declares `cmp` and
+// nothing else, so anything else on a `T: Ord` is an error rather
+// than a runtime surprise.
+fn misuse<T: Ord>(x: T) -> Int {
+    x.frobnicate()              // error: T has no method "frobnicate"
+}
+
+fn main() {
+    println(biggest(Blob{ n: 1 }, Blob{ n: 2 }).n)  // error: Blob does not implement Ord
+    println(Silent{ n: 1 }.n)
+    println(Wrong{ n: 1 }.n)
+    println(Arity{ n: 1 }.n)
+    println(misuse(1))
+}

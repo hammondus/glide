@@ -40,6 +40,16 @@ func (c *checker) resolve(te *ast.TypeExpr) types.Type {
 }
 
 func (c *checker) resolveName(te *ast.TypeExpr) types.Type {
+	// `Self` is the receiver's type: the concrete type inside an
+	// impl, the trait's own type variable inside a trait. It has to
+	// beat the type parameters, because a generic trait's `Self` is
+	// not one of its parameters.
+	if te.Name == "Self" && c.selfT != nil {
+		if len(te.Args) > 0 {
+			c.errf(te.Span, "Self takes no type arguments")
+		}
+		return c.selfT
+	}
 	if v, ok := c.tparams[te.Name]; ok {
 		if len(te.Args) > 0 {
 			c.errf(te.Span, "type parameter %s takes no type arguments", te.Name)

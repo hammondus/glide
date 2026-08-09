@@ -2,11 +2,13 @@
 
 **Glide**: effortless motion, no visible struggle, real speed —
 "human-friendly but performant" in one word. Binary: `glide`.
-File extension: `.gld`. Status: M1–M3 shipped and M4b landed — the
-tree-walking interpreter runs the whole ratified surface and now
+File extension: `.gld`. Status: M1–M3 shipped, and M4 is landing — the
+tree-walking interpreter runs the whole ratified surface and
 type-checks it first, in both tiers, with no way to opt out (see
-`glide/DESIGN-DECISIONS.md`). Generic *bound* checking and trait
-conformance (M4c) are the remaining checker work.
+`glide/DESIGN-DECISIONS.md`). M4c has landed sized numerics, explicit
+numeric conversion, generic bound checking and trait conformance.
+Remaining checker work: match exhaustiveness, boxed `Option`, generator
+element types, and operator traits.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee
@@ -266,6 +268,28 @@ implements Reader" is a text search), but no Rust-style forwarding
 boilerplate when shapes already match — bodies written only for what's
 missing.
 
+**Verified as of M4c.** An impl that does not satisfy what it declared
+is a compile error naming the method; a wrong signature, a wrong
+receiver kind, and a wrong generic argument all are too. Three further
+decisions fell out of building it:
+
+- **A small universe of traits, declared in Glide, not Go.** `Ord` and
+  `Iterable` only. The rule for admission is that a universe trait
+  names machinery that *already runs* — `Int` and `String` have `cmp`;
+  the evaluator already treats anything with `iter()` as iterable. A
+  trait whose required method the runtime cannot execute is drift
+  between the tiers wearing a type's clothes. `Hash` waits for a
+  committed hash function; `Display` waits for a reason to exist at
+  all, since interpolation is universal here and a bound everything
+  satisfies is decoration.
+- **Builtins conform structurally; user types must declare.** `Int`
+  cannot write `impl Ord for Int`, so it satisfies out of the same
+  method tables that type it. Everything a program declares still
+  declares.
+- **`Self` is a real type**, in traits and impls both. Without it the
+  canonical trait — `fn cmp(self, other: Self) -> Int` — could not be
+  written, which it could not be until M4c.
+
 Go's implicit model gets three things right; each survives explicitly:
 - **Consumer-defined interfaces** (Go's best architectural idea:
   accept interfaces, return structs) — intact: define the trait where
@@ -517,6 +541,21 @@ the human wins instead:
   bracket choice created (bare `[T]` collides with array sizes). No
   `where` clause in v0 — two ways to write bounds violates house rules;
   add it only if nested bounds make signatures genuinely unreadable.
+- **A bound is the complete method set** (M4c). On a `T: Ord`, `cmp`
+  resolves and anything else is a compile error naming the bound. This
+  is what a bound is *for*; without it the annotation is decoration and
+  a typo inside a generic body waits until runtime.
+
+  An **unbounded** `<T>` is the deliberate opposite: fully opaque, no
+  diagnostics, because the checker genuinely knows nothing about it and
+  anything it said would be a guess. So the two spellings mean
+  different things — `<T>` says "any type, and I will not touch it",
+  `<T: Ord>` says "any ordered type, and here is exactly what I may
+  do". That is the asymmetry that makes bounds worth writing.
+
+  Accepted cost: generic code that duck-typed its way through the
+  dynamic era stops compiling. Correct — that code was one typo from a
+  runtime error, and no bound was ever going to catch it.
 - **Const generics deferred** (`Matrix<T, const N>`): real machinery for
   numeric-library needs we don't have. Array `[N]T` needs only a
   comptime-constant N, which we have.

@@ -30,6 +30,11 @@ import (
 type Known struct {
 	Builtins map[string]bool // names a program may not redeclare
 	Modules  map[string]bool // modules a program may import
+
+	// Traits the host declares: the universe traits, parsed from the
+	// prelude. Passed in rather than reached for, like everything else
+	// here, so both tiers index the same set.
+	Traits []*ast.TraitDecl
 }
 
 // Variant is a sum-type variant, indexed by its own name because
@@ -53,6 +58,11 @@ type Table struct {
 	Methods    map[string]map[string]*ast.FuncDecl // type -> method -> decl
 	Variants   map[string]Variant                  // variant name -> owner
 	TypeTraits map[string][]string                 // type -> traits it declares
+
+	// Universe marks the traits the host declared rather than the
+	// program, so a diagnostic can say "builtin" instead of naming a
+	// prior declaration in a file the programmer cannot open.
+	Universe map[string]bool
 }
 
 // Load indexes f's declarations, reporting every collision it finds
@@ -71,6 +81,7 @@ func Load(f *ast.File, known Known) (*Table, error) {
 		Methods:    map[string]map[string]*ast.FuncDecl{},
 		Variants:   map[string]Variant{},
 		TypeTraits: map[string][]string{},
+		Universe:   map[string]bool{},
 	}
 	bag := &source.Bag{File: f.Source}
 
@@ -125,7 +136,17 @@ func Load(f *ast.File, known Known) (*Table, error) {
 		}
 	}
 
+	// Universe traits first, so a program redeclaring one is told it
+	// is a builtin rather than being allowed to shadow it.
+	for _, tr := range known.Traits {
+		t.Traits[tr.Name] = tr
+		t.Universe[tr.Name] = true
+	}
 	for _, tr := range f.Traits {
+		if t.Universe[tr.Name] {
+			bag.Add(tr.Span, "%q is a builtin trait and cannot be redeclared", tr.Name)
+			continue
+		}
 		if prev, dup := t.Traits[tr.Name]; dup {
 			bag.Add(tr.Span, "trait %q declared twice (first at %s)", tr.Name, t.where(prev.Span))
 			continue
@@ -139,6 +160,15 @@ func Load(f *ast.File, known Known) (*Table, error) {
 			continue
 		}
 		if im.Trait != "" {
+			// An impl for a trait nobody declared used to be accepted
+			// in silence, which is how `impl Iterable<T> for Tree<T>`
+			// stood for three milestones against a trait that did not
+			// exist. Declaring conformance to nothing is a typo, not a
+			// feature.
+			if _, declared := t.Traits[im.Trait]; !declared {
+				bag.Add(im.Span, "unknown trait %q", im.Trait)
+				continue
+			}
 			t.TypeTraits[im.Target] = append(t.TypeTraits[im.Target], im.Trait)
 		}
 		ms := t.Methods[im.Target]

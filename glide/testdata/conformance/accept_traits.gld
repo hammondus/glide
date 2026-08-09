@@ -1,0 +1,65 @@
+// Conformance is declared; satisfaction is structural (DESIGN.md,
+// Swift's model). The `impl Trait for Type` line is mandatory — so
+// "who implements Ord" stays a text search and nothing conforms by
+// accident — but its body carries only what is actually missing.
+//
+// `Ord` and `Iterable` are universe traits: they name machinery that
+// already runs, so `Int` and `String` satisfy `Ord` out of the same
+// method tables that type them, with no per-type declaration.
+
+// A bound turns a type parameter from a hole into a surface: `cmp`
+// resolves here because `Ord` declares it.
+fn biggest<T: Ord>(a: T, b: T) -> T {
+    if a.cmp(b) > 0 { a } else { b }
+}
+
+// Unbounded stays opaque, and must: an unbounded T genuinely tells the
+// checker nothing, so anything it said about `x` would be a guess.
+fn identity<T>(x: T) -> T { x }
+
+type Blob = struct { n: Int }
+
+impl Blob {
+    fn cmp(self, other: Self) -> Int { self.n - other.n }
+}
+
+// Empty body: the inherent `cmp` above already satisfies the trait.
+// This is the case Rust would make you write a forwarding method for.
+impl Ord for Blob { }
+
+// A trait with a default. The default is checked once against
+// `Self: Named`, which is exactly the generality it has — it may call
+// the trait's own methods and nothing else.
+trait Named {
+    fn name(self) -> String
+    fn greet(self) -> String { "hi " + self.name() }
+}
+
+type Person = struct { s: String }
+
+impl Named for Person {
+    fn name(self) -> String { self.s }
+}
+
+// A generic trait, and the type argument comes from the impl header.
+type Bag = struct { xs: List<Int> }
+
+impl Iterable<Int> for Bag {
+    fn iter(self) -> Iterator<Int> { self.xs.iter() }
+}
+
+fn main() {
+    // Builtins conform structurally.
+    println(biggest(3, 7))
+    println(biggest("a", "b"))
+    // A user type conforms because it declared that it does.
+    println(biggest(Blob{ n: 1 }, Blob{ n: 9 }).n)
+    println(identity(5))
+
+    println(Person{ s: "ann" }.greet())
+
+    // Bound first: a struct literal in a `for … in` header would
+    // collide with the loop body's brace.
+    let b = Bag{ xs: [1, 2] }
+    for v in b { println(v) }
+}

@@ -49,6 +49,7 @@ type scope struct {
 
 type checker struct {
 	tab  *program.Table
+	file *ast.File
 	bag  *source.Bag
 	info *Info
 
@@ -56,10 +57,27 @@ type checker struct {
 	fns     map[string]*types.Func
 	consts  map[string]types.Type
 	methods map[string]map[string]*types.Func
+	traits  map[string]map[string]*types.Func // trait -> method -> signature, Self-bound
 	tparams map[string]*types.Var
 
 	scope *scope
 	ret   types.Type // enclosing function's declared return type
+
+	// selfT is what `Self` means in the declaration being resolved:
+	// the concrete type inside an impl, and the trait's own type
+	// variable inside a trait. nil outside both, where `Self` is
+	// simply an unknown type name.
+	selfT types.Type
+}
+
+// withSelf binds `Self` for the duration of f. Paired with withParams
+// rather than folded into it because the two are independent: an impl
+// on a non-generic type binds Self and no parameters.
+func (c *checker) withSelf(t types.Type, f func()) {
+	saved := c.selfT
+	c.selfT = t
+	f()
+	c.selfT = saved
 }
 
 // File checks one program. It returns Info even when checking fails,
@@ -67,8 +85,9 @@ type checker struct {
 // pass) gets what was learned before the errors.
 func File(f *ast.File, tab *program.Table) (*Info, error) {
 	c := &checker{
-		tab: tab,
-		bag: &source.Bag{File: tab.File},
+		tab:  tab,
+		file: f,
+		bag:  &source.Bag{File: tab.File},
 		info: &Info{
 			Types:     map[ast.Expr]types.Type{},
 			Shorthand: map[*ast.DotName]*types.Variant{},
@@ -78,11 +97,13 @@ func File(f *ast.File, tab *program.Table) (*Info, error) {
 		fns:     map[string]*types.Func{},
 		consts:  map[string]types.Type{},
 		methods: map[string]map[string]*types.Func{},
+		traits:  map[string]map[string]*types.Func{},
 		tparams: map[string]*types.Var{},
 		ret:     types.Unit,
 	}
 	c.declareTypes(tab)
 	c.declareFns(tab)
+	c.checkConformance()
 	c.checkFile(f)
 	return c.info, c.bag.Err()
 }
@@ -96,34 +117,75 @@ func (c *checker) declareFns(tab *program.Table) {
 	}
 	for tn, ms := range tab.Methods {
 		set := map[string]*types.Func{}
-		c.withParams(c.paramsOf(tn), func() {
-			for name, fd := range ms {
-				set[name] = c.record(fd, c.signature(fd))
-			}
+		c.withSelf(c.selfType(tn), func() {
+			c.withParams(c.paramsOf(tn), func() {
+				for name, fd := range ms {
+					set[name] = c.record(fd, c.signature(fd))
+				}
+			})
 		})
 		c.methods[tn] = set
 	}
+	// Every trait's own signatures, resolved once with `Self` bound to
+	// the trait's type variable. This is what a bound consults: on a
+	// `T: Ord`, `t.cmp(u)` is this `cmp` with Self := T.
+	for name, tr := range tab.Traits {
+		c.traits[name] = c.traitSigs(tr)
+	}
 	// Trait defaults fill in where a type does not override, exactly
-	// as the evaluator's findMethod does. Verifying that an impl
-	// actually satisfies its trait is M4c; this only makes the calls
-	// resolve.
+	// as the evaluator's findMethod does. Conformance — that the type
+	// actually satisfies what it declared — is checked separately, in
+	// checkConformance.
 	for tn, traits := range tab.TypeTraits {
 		for _, trName := range traits {
 			tr := tab.Traits[trName]
 			if tr == nil {
 				continue
 			}
-			for _, fd := range tr.Fns {
-				if c.methods[tn] == nil {
-					c.methods[tn] = map[string]*types.Func{}
-				}
-				if _, override := c.methods[tn][fd.Name]; override {
-					continue
-				}
-				c.methods[tn][fd.Name] = c.record(fd, c.signature(fd))
-			}
+			c.withSelf(c.selfType(tn), func() {
+				c.withParams(c.paramsOf(tn), func() {
+					for _, fd := range tr.Fns {
+						if c.methods[tn] == nil {
+							c.methods[tn] = map[string]*types.Func{}
+						}
+						if _, override := c.methods[tn][fd.Name]; override {
+							continue
+						}
+						// Only a *default* (bodied) method is inherited.
+						// A required signature is a demand on the type,
+						// not a method it acquires; treating it as one is
+						// what let `impl Greet for Foo {}` resolve a
+						// `hello` that was never written.
+						if fd.Body == nil {
+							continue
+						}
+						c.methods[tn][fd.Name] = c.record(fd, c.signature(fd))
+					}
+				})
+			})
 		}
 	}
+}
+
+// traitSigs resolves a trait's method signatures with `Self` bound to
+// the trait's own type variable, and the trait's type parameters in
+// scope. The Var carries the trait as its bound so that `Self` inside
+// a default body is usable the same way a bounded `T` is.
+func (c *checker) traitSigs(tr *ast.TraitDecl) map[string]*types.Func {
+	self := &types.Var{Name: "Self", Bounds: []string{tr.Name}}
+	out := map[string]*types.Func{}
+	c.withSelf(self, func() {
+		var params []*types.Var
+		for _, tp := range tr.TypeParams {
+			params = append(params, &types.Var{Name: tp.Name, Bounds: boundNames(tp.Bounds)})
+		}
+		c.withParams(params, func() {
+			for _, fd := range tr.Fns {
+				out[fd.Name] = c.signature(fd)
+			}
+		})
+	})
+	return out
 }
 
 func (c *checker) record(fd *ast.FuncDecl, f *types.Func) *types.Func {
@@ -151,22 +213,36 @@ func (c *checker) checkFile(f *ast.File) {
 	}
 	for _, im := range f.Impls {
 		self := c.selfType(im.Target)
-		c.withParams(c.paramsOf(im.Target), func() {
-			for _, fd := range im.Fns {
-				c.fnBody(fd, c.methods[im.Target][fd.Name], self)
-			}
+		c.withSelf(self, func() {
+			c.withParams(c.paramsOf(im.Target), func() {
+				for _, fd := range im.Fns {
+					c.fnBody(fd, c.methods[im.Target][fd.Name], self)
+				}
+			})
 		})
 	}
+	// A trait's default bodies are checked against the trait's own
+	// type variable as self — `Self: ThisTrait` — which is exactly the
+	// generality a default has: it may call the trait's other methods
+	// and nothing else. Skipped before M4c because there was no such
+	// variable to check them against.
 	for _, tr := range f.Traits {
-		for _, fd := range tr.Fns {
-			if fd.Body != nil {
-				// A default body has no concrete self; checking it
-				// properly needs the trait's own type variable, which
-				// arrives with M4c. Until then it is skipped rather
-				// than checked against a wrong self.
-				continue
+		self := &types.Var{Name: "Self", Bounds: []string{tr.Name}}
+		sigs := c.traits[tr.Name]
+		c.withSelf(self, func() {
+			var params []*types.Var
+			for _, tp := range tr.TypeParams {
+				params = append(params, &types.Var{Name: tp.Name, Bounds: boundNames(tp.Bounds)})
 			}
-		}
+			c.withParams(params, func() {
+				for _, fd := range tr.Fns {
+					if fd.Body == nil {
+						continue
+					}
+					c.fnBody(fd, sigs[fd.Name], self)
+				}
+			})
+		})
 	}
 	for _, td := range f.Tests {
 		c.pushFn()

@@ -1,0 +1,21 @@
+// Declaration-stage trait rules — the ones that need no type
+// information, so they live in the declaration table rather than the
+// checker. Separate from reject_traits.gld because a failure here
+// stops the pipeline before the checker ever runs, which is correct:
+// there is no point type-checking against a trait that does not exist.
+type Ghost = struct { n: Int }
+impl NoSuchTrait for Ghost { }  // error: unknown trait "NoSuchTrait"
+
+// A universe trait is not redeclarable, exactly like a builtin name.
+// `Ord` and `Iterable` are declared by the prelude.
+trait Ord {                     // error: "Ord" is a builtin trait and cannot be redeclared
+    fn cmp(self, other: Self) -> Int
+}
+
+trait Iterable<T> {             // error: "Iterable" is a builtin trait and cannot be redeclared
+    fn iter(self) -> Iterator<T>
+}
+
+fn main() {
+    println(Ghost{ n: 1 }.n)
+}

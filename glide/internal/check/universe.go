@@ -307,7 +307,7 @@ func Host() program.Known {
 	for name := range modules {
 		ms[name] = true
 	}
-	return program.Known{Builtins: bs, Modules: ms}
+	return program.Known{Builtins: bs, Modules: ms, Traits: preludeTraits}
 }
 
 // builtinMethod finds a method on a built-in receiver, with the

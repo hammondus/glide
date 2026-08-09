@@ -400,10 +400,31 @@ declined — one name, already documentation.
   missing. Rust's orphan rule (impl your trait or your type, never
   foreign-for-foreign) supplies the coherence guarantee.
 
+- **2012 → 2017** — the *bound* question. C++ templates check nothing
+  at the declaration: an error surfaces inside the instantiated body,
+  which is where the language's legendary error messages come from,
+  and Concepts (C++20) are the thirty-year fix. Haskell, Rust (2015)
+  and Swift check the body *once* against its constraints, so the
+  error lands on the generic that is wrong rather than on the caller
+  that used it. Go's 2022 generics check bodies against constraints
+  too — its designers explicitly rejected the C++ model for the same
+  reason.
+- **The other half of that decision** is what an *unconstrained*
+  parameter permits. Every one of those languages says: nothing. Go's
+  `[T any]` supports no operation at all; Rust's bare `<T>` the same.
+  There is no mainstream language where a bound *adds* methods without
+  also being the complete list — because a bound that only adds is not
+  a contract, it is a hint.
+
 **Glide takes** Swift's declared-conformance/structural-satisfaction
 split with Rust's orphan rule and Java's default methods: one
 greppable `impl Reader for TcpConn {}` line, no forwarding
 boilerplate, interfaces that can grow without breaking implementors.
+Bounds are checked at the declaration and are the **complete** method
+set, with an unbounded `<T>` opaque — the universal answer above, and
+the reason the two spellings mean genuinely different things. `Self`
+is a real type in traits and impls, as it is in Swift and Rust, since
+`fn cmp(self, other: Self) -> Int` cannot be written without it.
 Go's genuinely good ideas survive explicitly: consumer-defined
 interfaces and small-interface culture. **No inheritance at all** —
 Simula (1967) invented it, the Gang of Four (1994) already advised

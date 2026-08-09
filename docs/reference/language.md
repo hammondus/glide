@@ -17,8 +17,8 @@ The checker reports only what it is certain of — anything it does not
 yet model is treated as unknown and passes in silence — so a ✓ row
 means "checked or enforced", and the rows still marked ○ are the ones
 where the *evaluator* is the only thing standing between you and the
-mistake. **M4c** finishes the job: generic bound checking, trait
-conformance, and match exhaustiveness.
+mistake. Generic bound checking and trait conformance landed in
+**M4c**; match exhaustiveness is what remains.
 
 ## Source files
 
@@ -62,7 +62,7 @@ Reserved words; none can be used as an identifier.
 | `break` / `continue` | loop control; parse error outside a loop | ✓ |
 | `defer` | block-scoped cleanup: `defer { … }` — runs LIFO at exit of the *enclosing block* (per-iteration in a loop body), on normal exit, `return`/`break`/`continue`, and panic unwind; skipped by `os.exit`. Body may not `return` (runtime error) or `break`/`continue` an enclosing loop (parse error) | ✓ |
 | `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
-| `trait` | trait declaration: bodied methods are defaults, inherited by any type declaring `impl Trait for Type` unless overridden; body-less methods are required signatures (unverified until the checker); all trait methods take `self`. Two traits supplying the same unoverridden default is an error at the call, naming both | ✓ |
+| `trait` | trait declaration: bodied methods are defaults, inherited by any type declaring `impl Trait for Type` unless overridden; body-less methods are required signatures, **verified** — an impl that does not satisfy them is a compile error naming the method ✓; all trait methods take `self`. `Self` is the receiver's type inside a trait or impl ✓. A default body is checked against `Self: ThisTrait`, so it may call the trait's own methods and nothing else ✓. Two traits supplying the same unoverridden default is an error at the call, naming both | ✓ |
 | `const` | module-level `const name = expr` (lowercase — it's a binding): evaluated once at load, declaration order, immutable | ✓ (M2 shim: initializers are restricted to pure expressions — no fn/module calls; full comptime evaluation arrives with the compiler ○) |
 | `scope` | structured-concurrency scope, an expression: `scope [(config)] [handle] { body }`. `s.spawn(f) -> Task`, `t.join()` returns what the closure returned; exit joins all children on every path, early exit cancels first; unjoined `Err` fails the scope at normal exit (first spawned wins, `?`-conversion applies); child panic cancels siblings and re-panics at exit; cancellation is uncatchable, runs `defer`+`errdefer`, delivered at blocking ops (`join`, generator handoffs; channel ops and `sleep` when they land) | ✓ (`scope(timeout: 5.s)` / `scope(deadline: t)` evaluate to `Result<T, Timeout>`: `Ok(v)` on completion, `Err(Timeout)` when the clock wins — `Timeout` matches the bare pattern `Timeout` and converts via `E.from(Timeout)`) |
 | `select` | an expression; arms line-separated like match: `pat = rx.recv() => expr`, `tx.send(v) => expr`, `else => expr` (non-blocking), optional `if cond` guard per arm (evaluated once at entry; false removes the arm — the nil-channel trick, replaced). Same channel may appear in several recv arms (`Some`/`None` split); the delivered value tries their patterns in order, no match → runtime error. Operands evaluate once at entry; uniformly random among ready; blocking select is a cancellation point (no `ctx.Done` arm exists or is needed). All arms disabled with no `else` → runtime error; zero arms → parse error | ✓ |
@@ -213,10 +213,16 @@ path). Discard is explicit: `_ = expr` ✓.
   fields: construct `.NotFound{ id: 7 }`, read `e.id`, match
   `NotFound{ id }` under the same mention-all-or-`..` rule as
   structs.
-- `impl TypeName { fn method(self) … }` ✓; `impl Trait for Type` ✓
-  (conformance asserted, not verified, until the checker — but
-  declaring it inherits the trait's default methods; a trait default
-  `iter()` makes implementors `for`-able).
+- `impl TypeName { fn method(self) … }` ✓; `impl Trait for Type` ✓ —
+  **conformance is declared, satisfaction is structural**: the `impl`
+  line is mandatory, so nothing conforms by accident, but its body
+  carries only what is missing. `impl Ord for Blob { }` is correct
+  when an inherent `cmp` of the right shape already exists ✓. An
+  unsatisfied requirement, a wrong signature, a wrong receiver kind
+  (`self` vs `mut self`) and a wrong generic argument are all compile
+  errors ✓. An `impl` for a trait nobody declared is an error ✓.
+  Declaring conformance still inherits the trait's *default* methods;
+  a trait default `iter()` makes implementors `for`-able.
 - Module-level: functions and types only, order-independent ✓;
   `const` ✓ (pure initializers, load-time); no `init()`, no life before `main` — permanent.
 
@@ -225,10 +231,16 @@ path). Discard is explicit: `_ = expr` ✓.
 Angle brackets, never square. **No turbofish, ever.**
 
 - Declaration sites bind parameters: `fn max<T: Ord>(a: T, b: T) -> T`,
-  `type Pair<A, B> = struct { … }`, `trait Container<T> { … }`.
-  Parsed into the AST and resolved into real types ✓ (M4a/M4b);
-  **bounds are not yet checked** ○ — inside a generic body a `T` is
-  opaque, so operations on it pass in silence until M4c.
+  `type Pair<A, B> = struct { … }`, `trait Container<T> { … }` ✓.
+- **Bounds are checked, and a bound is the complete method set** ✓. On
+  a `T: Ord`, `t.cmp(u)` resolves through the bound and anything else
+  is a compile error naming the bound. An **unbounded** `<T>` stays
+  fully opaque — the checker genuinely knows nothing about it, so it
+  says nothing. That asymmetry is the point: a bound is what turns a
+  type parameter from a hole into a surface.
+- Operators on a bounded `T` are still silent ○ — `a < b` where
+  `T: Ord` needs *operator traits*, which are designed and not yet
+  built. Methods are checked; operators wait.
 - Bounds are inline colon lists only: `<T: Ord + Hash>`. Unconstrained
   is bare `<T>` — no `[T any]` ceremony. **No `where` clause** in v0:
   two ways to write bounds violates house rules ✓ (parsed).
@@ -239,8 +251,11 @@ Angle brackets, never square. **No turbofish, ever.**
   concrete `impl Stack<Int>` is legal is undecided — it parses; the
   checker will rule.
 - **Bounds are checked at the declaration**, not the use site: a
-  generic body is verified once against its bounds, so callers get
-  "your `T` does not implement `Ord`" at the call ○.
+  generic body is verified once against its bounds, and callers get
+  "`Blob` does not implement `Ord`, required by `T`" at the call ✓.
+  A type parameter satisfies another's bound directly — `fn
+  outer<T: Ord>` may call `fn inner<U: Ord>(a: T)` ✓ — and an
+  unbounded one does not.
 - Monomorphised in the compiled tier; the interpreter runs generics
   **type-erased**, which is why it needs no specialisation to enforce
   every rule ○.
@@ -335,8 +350,8 @@ patterns in function signatures, ref/binding modes.
   type; `.Shorthand` against the expected type; `mut` paths;
   integer-literal range against a sized type; and every name being
   defined. What is *not* yet checked, and stays dynamic until M4c:
-  generic bounds, trait conformance, match exhaustiveness, and a
-  generator's element type. ○
+  match exhaustiveness and a generator's element type. ○ Generic
+  bounds and trait conformance are checked as of M4c ✓.
 - No null; no zero values; mandatory initialisation. ✓ (by
   construction in M2)
 - Errors are values; `?` propagates; panics are for bugs, kill the

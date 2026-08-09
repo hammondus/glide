@@ -259,11 +259,12 @@ find the corners of the design cheaply, and it has: several decisions
 in `DESIGN.md` are marked "forced by the interpreter", meaning the
 design changed because writing the evaluator revealed a problem.
 
-Running as of M4b: the type checker. Not yet running: comptime and
-`derive`, generic *bound* checking (type parameters resolve, but
-`T: Ord` is not verified), trait conformance, match exhaustiveness,
-`unsafe`, `embed`, and most of the designed standard library.
-Chapter 35 covers the path from here to a compiler.
+Running as of M4c: the type checker, sized numerics, explicit numeric
+conversion, generic bound checking and trait conformance. Not yet
+running: comptime and `derive`, operator traits (so `a < b` on a
+`T: Ord` is unchecked), match exhaustiveness, `unsafe`, `embed`, and
+most of the designed standard library. Chapter 35 covers the path from
+here to a compiler.
 
 You will see this reflected in every chapter. Sections marked ✓ have
 been run. Sections marked ○ are read from the design document. Where a

@@ -88,10 +88,10 @@ dogfood rule (Chapter 30) applied to the implementation itself.
 
 #### What is deliberately absent after M3
 
-Static generics (parsed, ignored), trait *checking* (conformance is
-asserted, not verified), `Mutex<T>`, `derive`, typed JSON decode, typed
-query rows, method values, `or |e|` blocks (declined), time
-formatting/parsing/calendars, and HTTP error middleware.
+`Mutex<T>`, `derive`, typed JSON decode, typed query rows, method
+values, `or |e|` blocks (declined), time formatting/parsing/calendars,
+and HTTP error middleware. (Static generics and trait conformance were
+on this list through M3 and M4b; M4c checks both.)
 
 #### The two tiers
 

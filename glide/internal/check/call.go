@@ -231,8 +231,17 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call) types.Type {
 	sig, modelled := c.methodOf(recv, f.Name)
 	if sig == nil {
 		c.inferArgs(x)
-		if modelled && !types.IsOpaque(recv) {
-			if hint, ok := methodHints[typeCtorName(recv)+"."+f.Name]; ok {
+		// `modelled` carries the type-parameter case on its own: an
+		// unbounded T reports false and stays silent, a bounded one
+		// reports true and lands in the branch below. So this guard
+		// tests Unknown rather than IsOpaque — using IsOpaque here
+		// would silence exactly the bounded receivers that bounds
+		// exist to make checkable.
+		if modelled && !types.IsUnknown(recv) {
+			if v, isVar := recv.(*types.Var); isVar {
+				c.errf(x.Span, "%s has no method %q: it is bounded by %s, which does not declare one",
+					v.Name, f.Name, boundsOf(v))
+			} else if hint, ok := methodHints[typeCtorName(recv)+"."+f.Name]; ok {
 				c.errf(x.Span, "%s", hint)
 			} else {
 				c.errf(x.Span, "%s has no method %q", recv, f.Name)
@@ -257,6 +266,11 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call) types.Type {
 // silence, because complaining about a method on a type the checker
 // does not model would be a false positive.
 func (c *checker) methodOf(recv types.Type, name string) (sig *types.Func, modelled bool) {
+	// A type parameter answers through its bounds. Unbounded, it
+	// answers nothing and the caller stays silent.
+	if v, ok := recv.(*types.Var); ok {
+		return c.boundMethod(v, name)
+	}
 	if n, ok := recv.(*types.Named); ok {
 		m := c.methods[n.Name][name]
 		if m == nil {
@@ -352,6 +366,10 @@ func (c *checker) checkArgs(sig *types.Func, x *ast.Call, at source.Span) types.
 			c.infer(x.Args[i])
 		}
 	}
+	// Bounds are checked here, once the arguments have said what each
+	// type parameter is. This is the half the *caller* sees; the body
+	// was already checked once against the bounds at its declaration.
+	c.checkBounds(sig, bind, at)
 	return c.erase(types.Subst(sig.Ret, bind))
 }
 
@@ -519,7 +537,13 @@ func unify(declared, actual types.Type, bind map[string]types.Type) {
 	}
 	switch d := declared.(type) {
 	case *types.Var:
-		if _, done := bind[d.Name]; !done && !types.IsOpaque(actual) {
+		// Unknown must not bind — it would poison the parameter for
+		// every later use. A type *parameter* must: `outer<T: Ord>`
+		// calling `inner<U: Ord>(a)` binds U := T, which is how
+		// generic code composes and how the bound on U gets something
+		// to check against. Before M4c both were skipped, so passing
+		// an unbounded T where an Ord was required went unnoticed.
+		if _, done := bind[d.Name]; !done && !types.IsUnknown(actual) {
 			bind[d.Name] = types.Default(actual)
 		}
 	case *types.App:

@@ -214,16 +214,33 @@ later; it can never be removed.
 
 ### 2. Under the Hood
 
-#### What "declared but not verified" means today
+#### What conformance checking does
 
 The interpreter registers an `impl Trait for Type` block's methods
-against the type and records the conformance. It does **not** verify
-that the type actually provides every required method — conformance is
-asserted, not checked, until the checker era.
+against the type, and as of M4c the checker **verifies** that the type
+actually provides every required method:
 
-The practical consequence: a missing method surfaces as a runtime
-"X has no method …" error at the call, rather than a compile error at
-the `impl`. Write the methods.
+```
+error: line 3: Foo does not satisfy Greet: missing hello() -> String
+```
+
+A wrong return type, a wrong argument type, a wrong argument count, a
+wrong receiver kind (`self` where the trait declared `mut self`) and a
+wrong generic argument are all caught the same way, and all of them
+point at the `impl` line rather than at the eventual call.
+
+The half that is *not* required is the boilerplate. Satisfaction is
+structural, so if the type already has a matching method the impl body
+is empty:
+
+```glide
+impl Blob { fn cmp(self, other: Self) -> Int { self.n - other.n } }
+impl Ord for Blob { }        // the inherent cmp already satisfies it
+```
+
+Note `Self`: inside a trait or an impl it is the receiver's own type.
+It had no meaning at all before M4c, which made `fn cmp(self, other:
+Self) -> Int` — the canonical trait method — unwritable.
 
 What *does* work today, and is the useful half: declaring `impl Trait
 for Type` **inherits the trait's default methods**. That is why
@@ -767,9 +784,9 @@ checker boxes Options, it will print `Some(Note{ … })`.
 override `count` with a `select count(*)` if the default's "fetch
 everything and measure it" is too slow.
 
-(`summary` takes a concrete `MemStore` because generic bounds are not
-checked yet; with the checker it would be
-`fn summary<S: NoteStore>(s: S) -> String`.)
+(`summary` could equally be written `fn summary<S: NoteStore>(s: S) ->
+String` — bounds are checked as of M4c, so the generic form is now the
+better one.)
 
 **Bad versus good: the interface that cannot grow**
 
@@ -833,8 +850,11 @@ be extended for years.
 - Trait versus sum type: **open set → trait, closed set →
   sum type**. Sum types buy exhaustiveness; traits buy third-party
   extension.
-- ○: trait checking (conformance is asserted, not verified), the orphan
-  rule, `any Trait`, trait composition (`trait A: B + C`).
+- ✓: conformance is verified — a declared `impl Trait for Type` that
+  does not satisfy the trait is a compile error, and `Self` is a real
+  type.
+- ○: the orphan rule, `any Trait`, trait composition (`trait A: B + C`),
+  and operator traits — `a < b` on a `T: Ord` still passes unchecked.
 
 **Exercises**
 
