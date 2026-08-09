@@ -61,7 +61,7 @@ for i in 0..10_000 { … }     // over a range
 That is the complete list. No `while`, no `do`/`while`, no `loop`, no
 `repeat`, no C-style three-clause form.
 
-```glide
+```glide-run
 fn main() {
     let mut i = 0
     for {
@@ -106,7 +106,7 @@ reach from inside one.
 
 #### Labeled break and continue
 
-```glide
+```glide-run
 fn main() {
     search: for x in 0..5 {
         for y in 0..5 {
@@ -229,7 +229,7 @@ for {
 The protocol is one method — `fn next(mut self) -> T?` — returning
 `None` when exhausted. One method with an `Option` return means no
 invalid states, no `hasNext`/`next` desynchronisation, and no
-`(value, ok)` tuple. Chapter 23 covers iterators in full.
+`(value, ok)` tuple. Chapter 24 covers iterators in full.
 
 A `List` is not an iterator; it is *iterable*. `xs.iter()` produces a
 fresh iterator each time, which is why you can loop over the same list
@@ -325,8 +325,10 @@ approximation:
 
 - The formatter keeps one-liners that fit on a line, so the common case
   stays compact.
-- Value-position `if` requires `else`, checked by the type checker (○),
-  so you cannot accidentally write a conditional with a missing branch.
+- Value-position `if` requires `else`, checked by the type checker ✓,
+  which also requires both arms to produce the same type — so you
+  cannot accidentally write a conditional with a missing branch or one
+  that returns two different things.
 - The two commonest ternaries are covered better by other constructs:
   `x != nil ? x : y` is `x ?? y`, and nested ternary chains are
   subjectless `match`, which is what they were always trying to be.
@@ -340,8 +342,8 @@ covered here:
 
 1. **Cleanup on error** — the `goto fail` C kernel idiom, goto's
    strongest modern case. Killed twice over: `defer`/`errdefer` do
-   structural cleanup (Chapter 21), and `?` does the early exit
-   (Chapter 19).
+   structural cleanup (Chapter 22), and `?` does the early exit
+   (Chapter 20).
 2. **Escaping nested loops** — this is the one that survives, as
    labeled `break`/`continue`. The alternatives are a flag checked at
    every level, or extracting a function purely so you can `return`.
@@ -650,7 +652,7 @@ function wants splitting.
 **A small state machine, showing `for` + `match` as the replacement for
 threaded dispatch:**
 
-```glide
+```glide-run
 type State = Scanning | InWord
 
 fn count_words(s: String) -> Int {
@@ -702,7 +704,7 @@ exists to show the shape.)
 
 **Nested loop escape, three ways:**
 
-```glide
+```glide-run
 fn main() {
     let grid = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
     let target = 5
@@ -746,7 +748,7 @@ would return `(Int, Int)?` — Chapter 14.)
 
 **The block expression earning its keep:**
 
-```glide
+```glide-run
 fn main() {
     // The working variables of the computation are hidden.
     let summary = {

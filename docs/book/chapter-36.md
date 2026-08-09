@@ -1,643 +1,551 @@
-# Chapter 36: Effective Glide
+# Chapter 36: Comptime, `derive`, and Metaprogramming
 
-Thirty-five chapters have covered what the language *is*. This one is
-about what a good Glide program *looks like* — the judgement calls that
-no individual feature chapter can settle because they are about
-choosing between features.
+Everything in this chapter is **○**. None of it runs. It is the design
+for how Glide does the things other languages use macros or reflection
+for, and it is worth a chapter because three features you have already
+met — `derive Json`, `derive Row`, and flexible `const` — are waiting
+on it, and because the *fences* around it are as important as the
+feature.
 
-There is a single organising heuristic, and it comes from Chapter 1's
-third pillar:
-
-> **The source code should tell you what it costs.**
-
-Almost every style question in this chapter reduces to that.
+The one-line summary: **comptime is ordinary language code executed at
+compile time**, it exists for exactly two purposes, and there is a hard
+rule that it is **not a second generics system**.
 
 ---
 
 ### 1. Basic Usage
 
-#### Naming
+#### Const evaluation
 
-| Kind | Convention | Examples |
+An ordinary function, run at compile time because a `const` position
+demands it:
+
+```glide
+fn make_crc_table() -> List<Int> {
+    let mut t = []
+    for i in 0..256 {
+        let mut c = i
+        for _ in 0..8 {
+            c = if c % 2 == 1 { 0xEDB88320 ^ (c / 2) } else { c / 2 }
+        }
+        t.push(c)
+    }
+    t
+}
+
+const crc_table = make_crc_table()          // ○ evaluated at build time
+```
+
+**Same function, either phase.** There is no `constexpr` sub-language
+and no separate const-evaluable dialect.
+
+The result lands in **read-only data**: shared across the program, zero
+startup cost, immutable by memory protection.
+
+The example that shows why this matters:
+
+```glide
+const re = regex.compile("^[a-z][a-z0-9_]*$")        // ○
+```
+
+A bad pattern is a **compile error**, and the compiled automaton ships
+in rodata. Compare Go's `regexp.MustCompile` in a `var`, which is a
+runtime panic during `init()`.
+
+#### `derive`
+
+```glide
+type Note = struct {
+    pub id: NoteId
+    pub title: String
+    pub created: Instant
+    pub body: String?
+} derive(Json, Row, Debug)                   // ○
+```
+
+`derive` asks the compiler to generate implementations by walking the
+type's structure at compile time. `derive(Json)` writes the encoder and
+decoder you would have hand-written; `derive(Row)` writes the
+column-name mapping; `derive(Debug)` writes the structural printer.
+
+It looks like magic. It is ordinary code generation, and the output is
+ordinary code.
+
+Options are **typed comptime arguments**, never string tags:
+
+```glide
+type User = struct { … } derive(Json(rename_all: camel))     // ○
+```
+
+A typo'd option is a compile error. Compare `json:"nmae"`, which
+compiles and ships.
+
+#### The `derive` roster
+
+| Derive | Generates | Chapter |
 |---|---|---|
-| Types, variants, constructors | `PascalCase` | `Note`, `NoteId`, `NotFound`, `Some` |
-| Bindings, functions, fields, modules | `snake_case` | `note_id`, `read_config`, `http` |
-| Constants | `snake_case` — same as any binding | `max_retries`, `default_timeout` |
+| `Json` | encoder + decoder | 31 |
+| `Row` | database column mapping | 33 |
+| `Debug` | structural `{x:?}` rendering | 6 |
+| `Enum` | `all()`, `name()`, `from_name()` | 13 |
+| `Arbitrary` | property-test generators | 22 |
 
-**The case rule is enforced by the formatter**, and it is grammar
-rather than style: pattern matching depends on it (Chapter 3).
+#### The reflection API
 
-There is no SCREAMING_CASE. `DESIGN.md`: it is C-preprocessor scar
-tissue, and an earlier evaluation time is not a siren.
+Comptime code can inspect a type's structure — fields, names, types,
+variants. That API is what `derive` implementations are written
+against, and `DESIGN.md` calls it "the genuinely hard design problem"
+with prior art in Zig's `@typeInfo` and C# source generators, "neither
+fully right".
 
-#### Naming, beyond case
+It is explicitly to be proven **in the interpreter, before any backend
+exists**.
 
-**Types are nouns; functions are verbs; predicates ask questions.**
+#### The discipline rules
 
-```glide
-type Connection = struct { … }
-fn connect(host: String) -> Result<Connection, Error>
-fn is_open(c: Connection) -> Bool
-```
+Three, and they are load-bearing:
 
-**Methods that mutate are verbs; methods that read are nouns.** Because
-there is no call-site `mut` marker on receivers (Chapter 16), the
-method name is the only signal a reader gets:
+**No IO at comptime.** Builds stay hermetic and reproducible.
+Code-generation-from-a-schema is a build step you run, not a comptime
+trick.
 
-```glide
-fn len(self) -> Int              // reads
-fn is_empty(self) -> Bool        // reads
-fn push(mut self, v: T)          // mutates
-fn clear(mut self)               // mutates
-```
+**Fuel-limited evaluation.** An instruction quota; exceeding it is a
+compile error, explicitly raisable. This is the halting-problem answer:
+comptime cannot hang your build indefinitely.
 
-**A past participle means "give me a new one".** `sorted()` returns a
-copy; `sort_by()` mutates in place. Rust's convention, and it maps
-exactly onto `self` versus `mut self`.
+**Deterministic by construction**, which follows from the first two —
+and which makes caching comptime results always sound. The fast dev
+backend leans on this.
 
-**Traits name capabilities; types name identities.** `Reader`,
-`Iterable`, `Ord`, `Display` — what you can *do*. `SqlStore`,
-`Circle`, `Config` — what something *is*.
+#### What comptime is not
 
-**Do not repeat the module in the name.** `http.get`, not
-`http.http_get`. Cross-module calls are already qualified.
+**Not macros.** No AST manipulation, no new syntax, no token trees.
 
-#### File and declaration order
+**Not a generics system.** No user-written functions that take or
+return types.
 
-**File order is narrative order.** The formatter deliberately does not
-reorder declarations, because sequence is the author's storytelling
-channel. Put the important thing first; helpers after.
-
-```glide
-// Good
-fn main() -> Result<(), Error> { … }
-fn run(cfg: Config) -> Result<(), Error> { … }
-fn load_config(path: String) -> Result<Config, ConfigError> { … }
-fn parse_line(s: String) -> Result<Entry, ConfigError> { … }
-```
-
-**Split a module across files freely.** Files share one namespace
-(Chapter 29), so splitting is editorial and has no API consequence.
-
-#### Signature design
-
-A reader should be able to use a function without reading its body.
-That means:
-
-**Precise error types.** `Result<Note, ApiError>` where the failure
-modes are known; `Result<Note, Error>` only in application code where
-the caller is `main`.
-
-**Optionality in the type.** `User?` when absence is possible; `User`
-when it is not — and the second half matters as much as the first
-(Chapter 14).
-
-**Distinct types for identifiers.** `fn get(id: NoteId)`, not
-`fn get(id: Int)` (Chapter 15).
-
-**Named arguments for anything a reader cannot infer from the value** —
-booleans always, and any two parameters of the same type:
-
-```glide
-copy(from: src, to: dst)
-resize(width: 800, height: 600)
-connect("db.local", tls: false)
-```
-
-**Defaults for optional configuration**, not a `Config` struct — unless
-the configuration travels to more than one function, in which case it
-is a struct (Chapter 7).
-
-#### Choosing between constructs
-
-The decision table that this book has been building toward:
-
-| Question | Answer |
-|---|---|
-| One of N shapes, closed set, want exhaustiveness | **Sum type** (13) |
-| One of N shapes, open set, third parties extend | **Trait** (17) |
-| Same code for many types | **Generics** (18) |
-| Might be absent | **`T?`** (14) |
-| Might fail, caller distinguishes causes | **`Result<T, SumError>`** (19) |
-| Might fail, caller only reports | **`Result<T, Error>`** (19) |
-| Bug, no caller can handle it | **panic** (20) |
-| Named identifier, no arithmetic | **`distinct`** (15) |
-| Two things, briefly | **Tuple** (11) |
-| Three things, or crossing an API boundary | **Struct** (12) |
-| Assign once, two branches | **`if` expression** (9) |
-| Assign once, many branches | **`match`** (10) |
-| Transform a value through stages | **Sequential redeclaration** (4) |
-| Accumulate across iterations | **`let mut`, then seal** (4) |
-| Absence has a sensible default | **`??`** (14) |
-| Absence aborts | **`let … else`** (14) |
-| Both cases have code | **`if let`** (14) |
-| Transforming a sequence | **Iterator adapters** (23) |
-| Doing something to each element | **`for` loop** (23) |
-| Writing an iterator | **Generator** (24) |
-| Bound a task's lifetime | **`scope`** (25) |
-| Bound an operation's time | **`scope(timeout:)`** (26) |
-| Stream of values between tasks | **Channel** (27) |
-| One value from a task | **`Task` + `join()`** (25) |
-| Wait on several channels | **`select`** (28) |
-| Cleanup always | **`defer`** (21) |
-| Cleanup only on failure | **`errdefer`** (21) |
-
-#### Reading a diff
-
-What a reviewer should look for, in rough order of value:
-
-1. **A new `mut`.** Is it a genuine accumulator, or an
-   assign-in-both-branches that wants an expression-`if`?
-2. **A new `_ =>` arm.** Has someone just opted out of exhaustiveness?
-3. **A new `??` on a `Result`.** An error was discarded — deliberately?
-4. **A new `?` on a line that had none.** A new early-exit path.
-5. **A widened signature** — `T` becoming `T?`, or a precise error type
-   becoming `Error`. Both are work pushed onto every caller.
-6. **A `pub` added.** A one-line diff that says "this became public",
-   and now it is a contract.
-7. **A `spawn` without a visible join or discard.**
-8. **An interpolation inside a query string.** The one place discipline
-   is entirely manual (Chapter 33).
-
-That list is short *because* the language makes most other changes
-either impossible or visible. There is no "did they forget a null
-check", no "does this new field break the JSON decoder", no "is this
-goroutine leaked".
+**Not runtime reflection.** There is none, at all, anywhere.
 
 ---
 
 ### 2. Under the Hood
 
-#### Why the formatter enforces case
+#### How a `derive` works
 
-Because pattern matching is ambiguous without it (Chapter 3), and
-because "conventions the tool enforces" and "conventions people
-remember" have very different adherence rates.
+`derive Json` is an ordinary comptime function. It receives the type's
+structure through the reflection API, walks the fields, and emits code:
 
-The formatter is a **pure function from AST to bytes** with **no
-configuration file format** (Chapter 2). Same code, byte-identical
-output, everywhere.
-
-One escape valve, and it is grammatical rather than configurable: **a
-trailing comma forces one-element-per-line.** That lets you preserve
-structural intent — a matrix-shaped literal, a routing table where each
-line is a route — through the grammar rather than through whitespace
-the formatter would erase.
-
-#### Why `glide test` is the style gate
-
-Format check, lints, unused-code errors, doc-link validation, and the
-race detector all run there, and **none of them is a compile error**.
-
-The reasoning (Chapter 2): a codebase compiling with 400 warnings
-trains everyone to ignore number 401, so hygiene must be an error
-*somewhere* — but a compiler that yells about whitespace while you
-think is hostile, and Go's comment-out-a-line-and-get-a-cascade
-experience is the failure mode. Dev builds warn; `glide test` and
-release builds error.
-
-#### Documentation is ordinary comments
-
-```glide
-// read_config loads and parses the configuration at path.
-// It returns Missing when the file does not exist, and Malformed
-// with a line number when parsing fails.
-pub fn read_config(path: String) -> Result<Config, ConfigError> { … }
+```
+for each field:
+    emit: write the key
+    emit: write the value via its Json impl
 ```
 
-Four rules, each with a reason:
+The emitted code is a straight-line encoder — no loop over field
+metadata at runtime, no string parsing, no boxing. It is what you would
+write by hand, generated.
 
-**No tag language.** `@param`/`@returns` is write-only noise restating
-a signature that is already explicit. Prose says what the signature
-cannot.
+That is the whole mechanism, and it is why the performance claim
+("serde-class speed") is credible: the generated code has no
+abstraction left in it.
 
-**The first sentence starts with the identifier name.** Load-bearing,
-not fussy: it is what makes one-line summaries readable in search,
-tooltips, and listings. A lint at test tier.
+#### Why this is not runtime reflection
 
-**Markdown subset from day one** — headings, lists, fences, links. Go
-spent twelve years on plain text before conceding in 1.19.
+Go's `json.Marshal` does the *same walk*, at runtime, on every call:
+look up the type descriptor, iterate the fields, parse each struct tag
+string, switch on the kind, box the value. Per call.
 
-**Checked identifier links.** `[Config]` resolves against real
-declarations, and a stale link fails at the test tier. `DESIGN.md` is
-blunt about the consequence: "renaming a function can fail
-`glide test` over a comment. That's correct."
+Comptime does the walk **once, at build time**, and the runtime sees
+only the result. Same information, different phase.
 
-Examples are Go-style **Example functions** — real compiled,
-output-checked code in test files, rendered into docs. Rust's
-doc-tests are rejected: runnable code inside comments is code invisible
-to the formatter, LSP, refactoring, and grep.
+#### Why this is not proc macros
 
-Undocumented `pub` items are a **vet-tier lint, advisory not gating** —
-full strictness breeds `// Foo does foo.`, which is worse than no doc
-because it occupies the space where a real one would go.
+Rust's `serde` derives are procedural macros: they receive a token
+stream and produce a token stream, executed by a compiler plugin
+compiled as a separate crate.
+
+The costs `DESIGN.md` names: **a second compiler** (proc-macro crates
+build first, and they build for the host, which complicates
+cross-compilation), **slow** (macro expansion is a significant fraction
+of Rust build times), and **opaque** (the formatter, LSP, and `grep`
+cannot see through the expansion).
+
+Comptime functions are just functions. The same tooling sees them.
+
+#### The `const` M2 shim
+
+Today, `const` initialisers are restricted to **pure expressions** — no
+function or module calls:
+
+```glide
+const max_retries = 3            // ✓
+const table = make_table()       // ○
+```
+
+Full comptime evaluation arrives with the compiler.
+
+#### Literals are arbitrary-precision until they land in a type
+
+This falls out of comptime, and it is Go's untyped constants / Zig's
+`comptime_int`:
+
+```glide
+const k = 1 << 100               // ○ fine in constant math
+let x: u8 = 300                  // ○ compile error, not a wrap
+```
 
 ---
 
 ### 3. Why This Design?
 
-#### Why `mut` scarcity is the highest-value habit
+#### Why comptime instead of macros
 
-`mut` is an audit mark, and **an audit mark is only worth anything if
-it is rare**.
+Zig's insight, adopted: **run ordinary language code at compile time**.
 
-If 90% of your locals are `let`, then `mut` on a binding is a signal a
-reviewer reads. If everything is `mut` by reflex, the marker carries no
-information, readers stop seeing it, and the one genuinely stateful
-variable in a function gets missed.
+`DESIGN.md`'s claim is that this covers roughly 90% of macro use cases
+without creating a second language that tooling cannot see through.
 
-This is why Chapter 4 spends so long on the alternatives —
-expression-`if`, `match`, sequential redeclaration, block expressions,
-build-then-seal. Each one is a way to not spend a `mut`.
+The 10% it does not cover is named honestly as a **known gap, accepted
+forever**: DSL-style macros — `html!` templates, embedded SQL syntax,
+new syntactic forms. Comptime functions over string constants get you
+compile-checked SQL; they do not get you new syntax.
 
-The same logic applies to every marker in the language. `_ =` is
-meaningful because silent discards do not exist. `?` is scannable
-because there is no invisible propagation. `pub` is reviewable because
-it is a keyword rather than a capitalisation.
+And that is the point. Embedded custom-syntax DSLs are exactly the
+"second language tooling cannot see" that macros were banned for. `//
+AST macros, ever. They're how ecosystems become unreadable.`
 
-#### Why "parse, don't validate" is the central pattern
+#### Why the "comptime is not generics" fence matters more than the feature
 
-Three chapters build to it — private fields (12), `Option` (14), and
-`distinct` (15) — and it is the most valuable pattern in the book:
+This is the most important paragraph in the chapter.
+
+Zig uses comptime *as* its generics system: `fn List(comptime T: type)
+type` returns a type. It is elegant and it has a specific consequence —
+**C++-template-tier error messages, deep inside the callee.**
+
+When a generic is checked at its *use* site rather than its
+declaration, a mismatch surfaces as a failure inside the library's
+body, with a stack of instantiation frames. That is why C++ template
+errors are legendary, and why C++20 added Concepts.
+
+Zig had no choice; comptime is all they have. Glide has trait-bounded
+generics (Chapter 18), where bounds are checked **at the declaration**,
+so:
+
+- The library author gets an error in their own code if they use
+  something the bound does not provide.
+- The caller gets "your `T` does not implement `Ord`" at the call site.
+
+`DESIGN.md` states the danger of removing the fence precisely:
+
+> Without the fence, hard generic bounds get "solved" by escaping to
+> comptime and the ecosystem ends up duck-typed and undiagnosable.
+
+That is a prediction about *ecosystem behaviour*, not about the
+feature. Given an escape hatch from a hard bound, people take it, and
+the resulting libraries have no checkable contracts.
+
+So: **no user-written functions that take or return types.** `List<T>`
+comes from generics, never from a comptime function.
+
+#### Why no runtime reflection — absent, not discouraged
+
+Everything Go uses `reflect` for happens at comptime here, against
+static types.
+
+The costs of runtime reflection, from `DESIGN.md`: it is "an
+interpretive loop per call, unauditable", "the biggest hole in Go's
+auditability story", and "a permanent performance tax".
+
+The auditability point is the interesting one. You cannot tell by
+reading a function what it will do to a value if it decides at runtime
+by inspecting the value's type. Reflection defeats the whole
+"skim a function and know what it can do" property that Chapter 1
+listed as a pillar.
+
+The real cost is named: **no deserialising into a type named by a
+runtime string.** The rare dynamic case hand-rolls a registry, visibly:
 
 ```glide
-type Email = struct { raw: String }
-
-impl Email {
-    pub fn parse(s: String) -> Email? { … }
-    pub fn value(self) -> String { self.raw }
-}
-
-fn send(to: Email, body: String) { … }
+// The escape hatch, written out rather than provided
+let decoders: Map<String, fn(String) -> Result<Event, Error>> = [
+    "created": decode_created,
+    "deleted": decode_deleted,
+]
 ```
 
-`send` does not validate, because it **cannot receive an invalid
-address**. Validation happened once, at the boundary, and the type
-carries the proof forward.
+Explicit, greppable, and typed.
 
-Count what disappears: every downstream null check, every "is this
-string actually an email" comment, every defensive re-validation, and
-the possibility of two call sites validating differently.
+#### Why no IO at comptime
 
-It needs three things together — mandatory initialisation so a bare
-`Email{}` is unwritable, private fields so `parse` is the only door,
-and `Option` so the failure has somewhere to go. Chapter 12's summary
-called it "the single most valuable pattern in the chapter", and it is
-the single most valuable pattern in the language.
+Hermetic, reproducible builds. If comptime could read a file or hit the
+network, a build's output would depend on the machine it ran on and the
+day it ran.
 
-#### Why "maps at the boundary, structs inside"
+The legitimate use case — generating code from a schema file — is a
+**build step you run, visibly, with the output committed**. That is the
+same position as "no build scripts" (Chapter 2), and the same position
+as `sqlc`-style schema codegen (Chapter 35). The schema becomes a
+versioned artifact.
 
-The same shape, applied to data rather than validation (Chapters 11,
-31, 33).
+`embed` is the designed exception, and it is not really one: `embed
+"static/**" as assets` is *declarative grammar*, and the **build
+system** provides the bytes. Comptime never does the IO.
 
-Untrusted or unstructured data arrives as a `Map` — from JSON, from a
-config file, from a database row. That is the honest representation of
-"text of unknown shape". Then it lives for three lines and becomes a
-type.
+#### Why fuel-limited evaluation
 
-The alternative — letting the map flow downstream — means every
-function knows the schema, restates the defaults, and handles absence.
-Two call sites can disagree about the default for a field, and nothing
-notices.
+Because comptime is Turing-complete and a compiler that can hang is
+hostile.
 
-#### Why signatures are the documentation
+An instruction quota with an explicit way to raise it means a runaway
+comptime computation is a compile error with a clear cause, not a build
+that never finishes.
 
-Because Glide spent its budget making signatures carry information:
-explicit types, precise errors, `T?` for absence, `distinct` for
-identity, `mut` for mutation, default values for optional
-configuration, and named arguments at call sites.
+#### Why determinism makes caching sound
 
-A signature that says
-`fn get(db: Db, id: NoteId) -> Result<Note?, StoreError>` tells you:
-what it needs, that the ID cannot be confused with another ID, that the
-note might not exist, that it might fail, and how it might fail.
+If comptime is deterministic — no IO, no clock, no randomness — then
+the result of evaluating a `const` or expanding a `derive` depends only
+on its inputs. So the fast dev backend can cache those results across
+builds without any invalidation logic beyond hashing the input.
 
-A signature that says `fn get(db, id)` tells you nothing, and it is
-what you get if you skip the annotations because the checker is not
-watching yet.
+That is a real compile-speed lever, and it is only available because of
+the discipline rules.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** *Effective Go* plus the community's accumulated conventions:
-short receiver names, `err` last, accept interfaces return structs,
-don't panic in libraries. Most of it transfers. What does not: Go's
-"a little copying is better than a little dependency" applies with less
-force when generics work, and Go's naming conventions around
-capitalisation do not exist here.
+**Zig.** Comptime as the whole metaprogramming story, including
+generics. The direct inspiration for the *mechanism* and the direct
+counterexample for the *scope* — Glide takes comptime and fences it
+away from generics.
 
-**Rust.** The API guidelines checklist plus clippy. Glide's style is
-mostly Rust's, minus lifetime-related conventions, minus the
-combinator-heavy style (`ok_or_else`, `map_err`, `and_then`) that
-Glide's three-construct approach replaces.
+**Rust.** Declarative macros (`macro_rules!`) and procedural macros.
+Enormously powerful — `serde`, `tokio::select!`, `sqlx::query!` — and
+the costs are a second compiler, significant build time, and opacity to
+tooling. Rust's `const fn` is the closest thing to Glide's const
+evaluation and is deliberately restricted.
 
-**Python.** PEP 8 (formatting, superseded in practice by Black) and
-PEP 20 (the Zen). "Explicit is better than implicit" is Glide's
-visibility pillar; "there should be one obvious way to do it" is
-`DESIGN.md`'s second principle.
+**C++.** Templates (accidentally Turing-complete), `constexpr`,
+`consteval`, and Concepts. The cautionary tale for use-site checking,
+and `constexpr` is a genuine success — C++ arrived at
+"run ordinary code at compile time" from the other direction.
 
-**Java.** Effective Java — still the best book of its kind, and
-half of its items are workarounds for language limitations Glide does
-not have. "Prefer immutability", "consider a builder", "use Optional
-sparingly", "prefer enums to int constants" — each is a chapter here
-instead of an item.
+**C#.** Source generators — compile-time code generation with access to
+the semantic model. `DESIGN.md` cites them as prior art for the
+reflection API, "neither fully right" alongside Zig's `@typeInfo`. C#
+also has full runtime reflection, which is how most of its
+serialisation works.
+
+**Go.** Runtime reflection plus `go generate` (a comment that runs a
+command — a build step by convention). `stringer` exists as an external
+tool because Go's enums cannot enumerate themselves, which is exactly
+the `derive Enum` use case.
+
+**Java.** Annotation processors (compile-time, verbose) plus runtime
+reflection (used by everything). Lombok is the annotation processor
+that rewrites your AST, and its relationship with IDEs is the standard
+argument against tooling-opaque codegen.
+
+**Lisp.** Macros that operate on the language's own data structures,
+with no syntax barrier. The most powerful version, and the source of
+the "every codebase becomes its own dialect" critique that `DESIGN.md`
+invokes when it bans AST macros.
 
 ---
 
 ### 5. Common Mistakes
 
-**Go-in-Glide, Rust-in-Glide, Java-in-Glide.** Chapter 37 is entirely
-about these.
+*(Anticipated — none of this runs yet.)*
 
-**Spending `mut` on assign-once variables.** The single most common
-translation artifact.
+**Reaching for comptime to solve a generics problem.** If you find
+yourself wanting a function that takes a type and returns a type, stop:
+the answer is a trait bound. That instinct is exactly what the fence
+exists to catch.
 
-**Widening a signature to avoid a decision.** Changing `Note` to
-`Note?` because one caller might not have one, or `ApiError` to `Error`
-because a new failure mode does not fit — both push work onto every
-caller, and both are usually a sign the boundary is wrong.
+**Expecting IO at comptime.** Reading a schema file at compile time is
+the thing that is banned. It is a build step with committed output.
 
-**Adding `_ =>` to silence an exhaustiveness error.** You have
-converted a compile-time work list into a silent default.
+**Expecting new syntax.** Comptime gives you code generation, not
+grammar extension. `html!{ <div>…</div> }` will never exist.
 
-**Letting a map escape the boundary.** Every downstream function now
-knows the schema.
+**Putting expensive computation in a `const` without thinking about
+build time.** Comptime evaluation costs build time, bounded by fuel. A
+`const` that computes a million-entry table costs that computation on
+every clean build.
 
-**Validating instead of parsing.** If a function starts with a
-precondition check, ask whether the type could make the precondition
-unnecessary.
+**Assuming `derive` output is invisible.** It is ordinary generated
+code. The designed tooling can show it to you — which is the difference
+from a proc macro whose expansion you must ask a special tool to
+reveal.
 
-**Over-abstracting early.** A trait with one implementation is a type
-with extra steps; a generic parameter that never varies is pure
-overhead; a module per type is a namespace, not a boundary.
-
-**Under-abstracting where it is cheap.** A `distinct` type is ten
-characters and kills a bug class. A sum type is one line and makes
-illegal states unrepresentable. These are not the expensive
-abstractions.
-
-**Writing documentation that restates the signature.**
-
-```glide
-// Bad
-// get_note gets a note.
-// Params: db - the database. id - the id.
-// Returns: the note, or an error.
-pub fn get_note(db: Db, id: NoteId) -> Result<Note?, StoreError>
-
-// Good
-// get_note loads a single note. It returns None when no note has
-// that id, which is not an error — callers routinely check for
-// existence this way.
-pub fn get_note(db: Db, id: NoteId) -> Result<Note?, StoreError>
-```
-
-Prose says what the signature cannot.
+**Using a runtime string to select a type.** There is no runtime
+reflection, so there is no `decode_into(typeName)`. Write the registry.
 
 ---
 
 ### 6. Performance Considerations
 
-**The pricing pillar in one table.** The expensive thing has the longer
-name — which means style and performance mostly agree:
+**Comptime shifts cost from runtime to build time.** That is the entire
+trade, and it is almost always the right one — a program runs many
+times and builds fewer times.
 
-| Idiomatic (cheap) | Named alternative (costly, deliberate) |
-|---|---|
-| `String` interpolation | `StringBuilder` for loops (○) |
-| `Int` | `BigInt` (○) |
-| Generic bound `<T: Shape>` (static) | `any Shape` (boxed, ○) |
-| `for x in xs` | adapter chain (lazy, composable) |
-| Immutable + struct update | `mut` accumulation |
-| Unbuffered `println` | buffered writer (○) |
-| `Duration` literals | — |
-| Scope-based cancellation | — |
+**`const` values cost nothing at runtime.** They land in read-only
+data: no startup construction, shared across the process, immutable by
+memory protection. A `const` lookup table strictly beats Go's `var`
+equivalent, which is built in every process at startup.
 
-Two rules of thumb follow:
+**`derive`d code is straight-line.** No metadata loop, no string
+parsing, no boxing. That is the "serde-class speed" claim, and it is
+what separates comptime derive from reflection.
 
-**Write the idiomatic version first.** It is usually the fast one, and
-where it is not, the slow-but-clear version is a better starting point
-than a fast-but-wrong one.
+**Comptime evaluation costs build time**, bounded by the fuel limit and
+mitigated by caching (which determinism makes sound).
 
-**When you do reach for the costly form, the source says so.** That is
-the property worth protecting — a reviewer can see the decision.
+**Monomorphisation and comptime interact** (Chapter 18): each is a
+build-time cost that buys runtime speed, and together they are why
+"compile speed is a feature" needs to be a stated principle rather than
+an aspiration.
 
-**Do not tune against the interpreter.** Two orders of magnitude
-slower than compiled Go, with a goroutine per generator, an environment
-allocation per call and per block, hash lookups for field access, and
-one interpreter lock.
+**No runtime reflection means no reflection tax.** Every Go program
+that encodes JSON pays an interpretive loop per field per call. That
+cost is simply absent.
 
 ---
 
 ### 7. Best Practices
 
-The distilled list. Most have appeared in a chapter; the value here is
-seeing them together.
+*(Anticipated, from the design's own guidance.)*
 
-**Structure**
+**Use `const` for anything computable at build time.** Lookup tables,
+compiled regexes, parsed configuration schemas, precomputed constants.
+The rule of thumb: if it does not depend on runtime input, it is a
+`const`.
 
-1. **Parse, don't validate.** Private fields plus a validating
-   constructor, at the boundary, once.
-2. **Maps at the boundary, structs inside.**
-3. **Make illegal states unrepresentable.** Correlated booleans and
-   correlated Options are sum types in disguise.
-4. **Create dependencies in `main` and pass them down.** No globals,
-   no `init()`, no service locator.
-5. **Attach data to the state that owns it.** `Running{ since }`, not
-   a `since` field that is meaningless in three of four states.
+**Prefer `derive` to hand-written boilerplate, and hand-written code to
+a clever derive.** A derive is right when the mapping is mechanical
+(JSON, database rows, debug output). When the mapping has real
+decisions in it — a wire format that differs from your domain model —
+write the conversion function (Chapter 33's "keep the wire type
+separate").
 
-**Mutability and bindings**
+**Do not write a derive for something used once.** A derive is a code
+generator; a code generator with one customer is a function.
 
-6. **Default to `let`. Earn every `mut`.**
-7. **Build with `mut`, then seal** — `let mut acc = …; …; let acc = acc`.
-8. **Use sequential redeclaration for refinement pipelines.**
-9. **Prefer expression-`if` and `match` to assign-in-every-branch.**
+**Respect the fence in your own designs.** If your library's ergonomics
+would improve with a comptime function that returns a type, the design
+document's prediction is that the ecosystem cost outweighs your
+convenience. Find the trait bound.
 
-**Types**
+**Keep comptime computations cheap.** Build time is a shared resource
+and "compile speed is a feature" is principle three.
 
-10. **Wrap identifiers in `distinct` types.** Ten characters, one bug
-    class.
-11. **Let the signature carry the information** — `T?` for absence,
-    precise error sums, distinct IDs, defaults for optional config.
-12. **Do not widen a signature to avoid a decision.**
-
-**Errors**
-
-13. **Libraries enumerate failures; applications use dynamic `Error`.**
-14. **Write `from` for every error type that wraps another.**
-15. **Add context at boundaries, not at every frame.**
-16. **Panics are for bugs.** A library that panics on bad input is
-    unusable.
-
-**Control flow**
-
-17. **Guard clauses first, happy path last, unindented.**
-18. **Avoid `_ =>` on closed types.** It spends the exhaustiveness
-    guarantee.
-19. **Adapters for transformations, loops for effects.** `?` does not
-    work inside a closure, which settles most cases.
-
-**Resources and concurrency**
-
-20. **`defer` on the line after the acquisition. Always.**
-21. **`errdefer` for compensation; do the success path explicitly.**
-22. **Let the scope own the lifetime** — of a task, a server, a
-    timeout.
-23. **Freeze before spawning.**
-24. **`os.exit` before you open anything; `Err` after.**
-
-**Testing and docs**
-
-25. **Write the property, then the examples.**
-26. **Do not mock what you can construct.**
-27. **Documentation says what the signature cannot.**
+**Reach for a build step when you need IO.** Schema codegen, protocol
+buffers, embedded asset manifests. Run it, commit the output, and the
+build stays hermetic.
 
 ---
 
 ### 8. Examples
 
-**One function, refactored through the whole book.**
+*(All ○ — illustrative of the design.)*
 
-Version 1 — a faithful translation of how this would be written in Go:
+**The three derives on one type:**
 
 ```glide
-fn process_order(db: Db, order_id: Int, user_id: Int, notify: Bool) -> Int {
-    let mut status = 0
-    let rows = db.query("select * from orders where id = :id",
-                        ["id": order_id]) ?? []
-    if rows.len() == 0 {
-        status = 404
-    } else {
-        let row = rows[0]
-        let total = row["total"] ?? 0
-        if total <= 0 {
-            status = 400
-        } else {
-            _ = db.exec("update orders set state = 'paid' where id = :id",
-                        ["id": order_id])
-            if notify {
-                _ = send_email(user_id, "paid")
-            }
-            status = 200
-        }
-    }
-    status
+type NoteId = distinct Int
+
+type Note = struct {
+    pub id: NoteId
+    pub title: String
+    pub created: Instant
+    pub body: String?
+} derive(Json, Row, Debug)
+```
+
+Four lines of declaration, and you get:
+
+- A JSON encoder and decoder where `body` is optional because it is
+  `String?`, `id` unwraps because it is `distinct`, and `created`
+  serialises as RFC 3339 — all falling out of the type, with no tags.
+- A database row mapper keyed by **column name**, so reordering a
+  SELECT is harmless.
+- Structural debug output for `{note:?}`.
+
+The equivalent Go needs struct tags on every field (unchecked strings),
+`sql.NullString` for the optional column, positional `rows.Scan`, and
+`%+v` that prints struct guts at users.
+
+**Const evaluation earning its keep:**
+
+```glide
+// A compiled regex, validated at build time, shipped in rodata.
+const slug_pattern = regex.compile("^[a-z][a-z0-9-]*$")
+
+// A lookup table, computed once, at build time.
+const crc_table = make_crc_table()
+
+// Configuration derived from other constants.
+const max_body = 1024 * 1024
+const chunk_size = max_body / 16
+```
+
+Every one of these is `var` plus `init()` in Go, which means: built at
+startup in every process, mutable in principle, and — for the regex —
+a runtime panic if the pattern is wrong.
+
+**Compile-checked SQL, the shape comptime enables:**
+
+```glide
+// The placeholder check (Chapter 35) is a pure comptime parse of a
+// literal string: no database, no network, hermetic.
+db.query<Note>(
+    "select id, title, created, body from notes where org = :org",
+    ["org": org],
+)
+```
+
+At compile time: parse the query for `:name` placeholders, compare
+against the parameter map's keys, and error on a mismatch naming the
+parameter. At runtime: nothing.
+
+This is the "unoccupied sweet spot" from Chapter 35 — schema checking
+needs a database, but placeholder checking needs only the string.
+
+**The known gap, stated:**
+
+```glide
+// This will never exist.
+let page = html! {
+    <div class="note">
+        <h1>{note.title}</h1>
+    </div>
 }
 ```
 
-Everything here compiles. What is wrong with it:
+Templates go through the standard library's templating engine with
+contextual auto-escaping, not through a macro that invents syntax.
+`DESIGN.md` accepts this gap forever, because the alternative is a
+second language the formatter, LSP, and `grep` cannot see through.
 
-- `order_id` and `user_id` are both `Int` and adjacent —
-  **transposable**.
-- `notify: Bool` at the call site is a bare `true` or `false` —
-  **a boolean trap**.
-- The return type is `Int`, so the caller must know that 404 means
-  not-found — **stringly-typed, in integers**.
-- `?? []` and `?? 0` **discard two errors silently** (well —
-  visibly, but without thought).
-- `rows[0]` **panics** if the invariant breaks.
-- `status` is a **`mut` return slot**, which is what expression-`if`
-  exists to delete.
-- Three levels of nesting for three preconditions.
-
-Version 2 — the same function written in the language:
+**The escape hatch, written out:**
 
 ```glide
-type OrderId = distinct Int
-type UserId = distinct Int
+// No runtime reflection means no decode-by-type-name. Write the
+// registry — it is explicit, typed, and greppable.
+type Event = Created{ id: Int } | Deleted{ id: Int }
 
-type OrderError =
-    NotFound{ id: OrderId }
-    | InvalidTotal{ id: OrderId, total: Int }
-    | Db{ cause: Error }
-
-impl OrderError {
-    fn from(e: Error) -> OrderError { Db{ cause: e } }
-}
-
-fn process_order(db: Db,
-                 order: OrderId,
-                 user: UserId,
-                 notify: Bool = true) -> Result<(), OrderError> {
-    let Some(row) = db.query_one(
-        "select total from orders where id = :id",
-        ["id": order],
-    )? else {
-        return Err(.NotFound{ id: order })
-    }
-
-    let total = row["total"] ?? 0
-    if total <= 0 {
-        return Err(.InvalidTotal{ id: order, total: total })
-    }
-
-    _ = db.exec("update orders set state = 'paid' where id = :id",
-                ["id": order])?
-
-    if notify {
-        _ = send_email(user, "paid")?
-    }
-    Ok(())
-}
-```
-
-And the call site:
-
-```glide
-match process_order(db, order_id, user_id, notify: false) {
-    Ok(())                          => http.text("ok")
-    Err(NotFound{ .. })             => http.not_found()
-    Err(InvalidTotal{ total, .. })  => http.bad_request("bad total {total}")
-    Err(Db{ cause })                => { eprintln("{cause}"); http.text("error") }
-}
-```
-
-Count the changes:
-
-| Was | Now |
-|---|---|
-| Two adjacent `Int` parameters | `OrderId` and `UserId` — transposition is a type error |
-| `notify` as a positional bool | `notify: false`, named, with a default |
-| `Int` return encoding statuses | `Result<(), OrderError>` — three named failures |
-| Two silent `??` | Two `?`, propagating with conversion |
-| `rows[0]` | `query_one` + `let … else` |
-| `mut status` | no mutable bindings at all |
-| Three levels of nesting | zero |
-| Caller must know 404 means not-found | caller `match`es, exhaustively |
-
-Nothing here is clever. Every change is a feature from an earlier
-chapter, applied because the situation called for it — and the result
-is shorter, flatter, and impossible to misuse in four specific ways.
-
-**The idiomatic service skeleton**, which is worth memorising because
-almost every Glide program has this shape:
-
-```glide
-import http
-import sql
-import time
-
-fn main() -> Result<(), Error> {
-    // 1. Dependencies, created once, visibly.
-    let db = sql.open(dsn)?
-    defer { _ = db.close() }
-
-    // 2. Wiring: closures inject dependencies into handlers.
-    let mut r = http.router()
-    r.get(`/notes/{id}`, |req| get_note(db, req))
-    r.post(`/notes`, |req| create_note(db, req))
-    let r = r                                     // sealed
-
-    // 3. Lifetime: the scope owns everything that runs.
-    scope s {
-        _ = s.spawn(|| sweeper(db))
-        http.serve(addr, r)
+fn decode_event(kind: String, body: String) -> Result<Event, Error> {
+    match kind {
+        "created" => decode_created(body)
+        "deleted" => decode_deleted(body)
+        _         => Err(.UnknownKind{ kind: kind })
     }
 }
 ```
 
-Three sections, in that order, and the third one is what makes the
-program correct on shutdown without any shutdown code.
+Compare Go, where this would be a `map[string]reflect.Type` and a
+`reflect.New` call. Six lines instead of three, and every possible
+event type is visible in the source.
 
 ---
 
@@ -645,50 +553,57 @@ program correct on shutdown without any shutdown code.
 
 **Summary**
 
-- The organising heuristic: **the source code should tell you what it
-  costs.** Almost every style question reduces to it.
-- **Case is grammar**, enforced by the formatter: `PascalCase` for
-  types and variants, `snake_case` for everything else, including
-  constants. No SCREAMING_CASE.
-- **Method names carry mutation intent**, because receivers take no
-  call-site marker. Verbs mutate; nouns read; past participles return a
-  copy.
-- **File order is narrative order** — the formatter will not reorder
-  declarations.
-- **`mut` scarcity is the highest-value habit.** An audit mark is worth
-  nothing if it is common, and the language provides five ways to avoid
-  spending one.
-- **Parse, don't validate** is the central pattern, and it needs
-  mandatory initialisation, private fields, and `Option` together.
-- **Maps at the boundary, structs inside.**
-- **Signatures are the documentation**, and Glide spent its budget
-  making them carry information. Do not widen one to avoid a decision.
-- **Documentation says what the signature cannot** — no tag language,
-  first sentence starts with the identifier, checked `[Identifier]`
-  links that break the build when stale, Example functions rather than
-  doc-tests.
-- **`glide test` is the style gate**, and formatting is never a compile
-  error, because a compiler that yells about whitespace while you think
-  is hostile.
-- The construct decision table in section 1 is the book's index in one
-  page.
+- **Everything in this chapter is ○.** It is the design behind
+  `derive Json`, `derive Row`, `derive Debug`, and flexible `const`.
+- **Comptime is ordinary language code executed at compile time** —
+  Zig's insight. Same function, either phase; no `constexpr`
+  sub-language.
+- It exists for exactly **two things**: **const evaluation** (functions
+  running in const positions, results landing in read-only data) and
+  **derive via comptime reflection** (walking a type's structure to
+  emit plain code).
+- **The fence matters more than the feature: comptime is not a second
+  generics system.** No user functions taking or returning types.
+  `List<T>` comes from trait-bounded generics, checked at the
+  *declaration*, so errors point at your code rather than deep inside a
+  callee — the C++/Zig failure mode, avoided.
+- **No AST macros, ever.** Comptime covers ~90% of macro use cases
+  without a second language tooling cannot see through. The accepted
+  permanent gap is DSL-style macros — `html!` will never exist.
+- **No runtime reflection. Absent, not discouraged.** It is an
+  interpretive loop per call, a permanent performance tax, and the
+  biggest hole in Go's auditability story. The real cost — no
+  deserialising into a type named by a runtime string — is paid by
+  hand-rolling a visible registry.
+- **Three discipline rules:** no IO at comptime (hermetic builds);
+  fuel-limited evaluation (a compile error, not a hung build);
+  deterministic by construction (so caching comptime results is always
+  sound).
+- **`derive` options are typed comptime arguments**, not string tags —
+  a typo is a compile error rather than a shipped bug.
+- The **reflection API is the genuinely hard design problem**, with
+  Zig's `@typeInfo` and C# source generators as imperfect prior art,
+  and it is to be proven in the interpreter before any backend exists.
+- M2 shim: `const` initialisers are restricted to pure expressions.
 
 **Exercises**
 
-1. **Run the Version 1 → Version 2 refactor on your own code.** Take a
-   function from a service you maintain, translate it literally, then
-   apply the changes in the Examples section one at a time. Note which
-   changes were mechanical and which required a decision you had been
-   avoiding — the second category is where the language earns its keep.
+1. **Cost the reflection tax.** Benchmark Go's `encoding/json` against
+   a hand-written encoder for the same struct. The ratio is what
+   comptime derive is claiming to recover. Then benchmark Rust's
+   `serde` against the same hand-written encoder — that ratio is the
+   target.
 
-2. **Audit `mut` in a file.** Write anything of a hundred lines, then
-   count the `mut` bindings and, for each, identify which of the five
-   alternatives from Chapter 4 could replace it. If more than a third
-   survive, look again at the ones assigned in every branch of an `if`.
+2. **Find the escape to comptime.** In a Zig codebase (or a C++ one
+   using templates), find a generic function whose error message, when
+   misused, points inside the library rather than at the call site.
+   Write down what the declaration-site-checked version would have
+   said. That difference is what the fence buys.
 
-3. **Write the review checklist.** Take the "reading a diff" list from
-   section 1 and adapt it to a codebase you actually review. Then note
-   which items on your *existing* mental checklist disappear entirely —
-   null checks, goroutine leaks, forgotten error handling, switch
-   statements missing a case. The size of that deleted list is the
-   argument for the whole language.
+3. **Design a derive.** Pick a mechanical mapping you write by hand
+   today — a builder, an equality function, a CLI flag parser from a
+   struct, a fixture generator. Write the comptime function's outline:
+   what it reads from the reflection API, what it emits, and what its
+   typed options are. Then ask whether the mapping is genuinely
+   mechanical or whether it has decisions in it — if it has decisions,
+   it wanted a function, not a derive.

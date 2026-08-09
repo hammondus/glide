@@ -1,183 +1,95 @@
-# Chapter 21: `defer` and `errdefer`
+# Chapter 21: Panics
 
-`defer` schedules a block to run when the enclosing scope exits — on
-success, on error, and during a panic — so that acquisition and cleanup
-sit together on adjacent lines.
+A **panic** is what happens when a program discovers it is wrong.
 
-Glide takes Go's construct with **three defects fixed** and adds a
-sibling Go lacks. The fixes are not speculative: Swift and Zig already
-shipped them, and Glide takes theirs.
+Not "the file was missing" — that is an error, and Chapter 20 covered
+it. A panic is for indexing past the end of a list, dividing `MinInt`
+by `-1`, or violating an invariant your own type promised to maintain.
+Things a correct program never does.
 
-Everything here is ✓.
+Glide's position is short and unusually firm: **panics kill the task,
+they are for bugs only, and there is no `recover`. Permanently.**
+
+Everything here is ✓, with the caveat that "kills the task" is
+currently "kills the program" outside a scope.
 
 ---
 
 ### 1. Basic Usage
 
-#### `defer`
+#### What panics
 
-```glide
-let db = sql.open("sqlite:notes.db")?
-defer { _ = db.close() }
-```
-
-The block runs when the enclosing block exits. Acquisition and release
-are two adjacent lines, so a reader never has to scan to the bottom of
-the function to check that the file gets closed.
-
-Multiple defers run **LIFO** — last registered, first run — which is
-what you want, because resources acquired later usually depend on ones
-acquired earlier.
-
-#### `defer` takes a block, only a block
-
-```glide
-defer { conn.close() }        // right
-defer conn.close()            // does not parse
-```
-
-This is Swift's form, and it means Go's argument-evaluation puzzle
-cannot be written. In Go, `defer f(x)` evaluates `x` **now** and calls
-`f` **later**, which is a genuine source of bugs:
-
-```go
-// Go — logs the value of `status` at the defer line, not at return
-defer log.Printf("finished with %s", status)
-```
-
-A block closes over variables like any closure, so everything is
-evaluated at scope exit. There is no second rule to remember.
-
-#### `defer` is **block**-scoped, not function-scoped
-
-This is the big one:
+You do not usually write a panic. You encounter one:
 
 ```glide
 fn main() {
-    for i in 0..2 {
-        defer { println("  cleanup {i}") }
-        println("  body {i}")
-    }
+    let xs = [1, 2, 3]
+    println(xs[7])
 }
 ```
 
 ```
-  body 0
-  cleanup 0
-  body 1
-  cleanup 1
+error: line 3: list index 7 out of range (len 3)
+$ echo $?
+1
 ```
 
-The defer runs at the end of **each iteration**. In Go, a `defer`
-inside a loop accumulates until the *function* returns:
+The current panic sources:
 
-```go
-// Go — every file stays open until the function ends
-for _, path := range paths {
-    f, _ := os.Open(path)
-    defer f.Close()          // fd exhaustion on a long list
-    process(f)
-}
-```
+| Cause | Example |
+|---|---|
+| List index out of range | `xs[7]` on a 3-element list |
+| Integer overflow (dev tier) | `MaxInt + 1` |
+| Division by zero | `n / 0` |
+| `MinInt / -1`, `-MinInt` | overflow with no representable result |
+| No matching `match` arm | non-exhaustive match on a sum type |
+| Unwrapping a non-matching `if let` | a value that is neither `None` nor the pattern |
+| A method that does not exist | dynamic dispatch failure (checker-era gone) |
+| `String.split("")` | empty separator |
+| `repeat(k)` with `k < 0` | |
+| `send` on a closed channel | a sender coordination bug (Chapter 28) |
 
-That is the classic file-descriptor-exhaustion bug, and it is invisible
-because the code looks correct. In Glide the shape is not reproducible.
+Note what is *not* on that list: file-not-found, parse failures,
+network timeouts, missing map keys. Those are `Result` and `Option`.
 
-Function-end cleanup is a defer at function scope, where it reads as
-what it is.
+#### Panics are not caught
 
-#### `errdefer`
+There is no `try`, no `catch`, and no `recover`. A panic unwinds and
+that is the end of the discussion for ordinary code.
 
-Runs **only when the scope exits on the error path** — a `return`
-carrying an `Err` (including what `?` propagates), or a panic. Not a
-plain return, not loop control.
+What *does* run on the way out: `defer` blocks and `errdefer` blocks
+(Chapter 22). A panicking task must release its locks and close its
+files as the failure propagates.
+
+#### Panics and tasks
+
+The designed rule is: **a panic kills the task, not the process.**
+Structured concurrency gives it a principled boundary — a panicking
+task fails its scope, which cancels siblings and re-panics at the scope
+exit (Chapter 26).
+
+Today, outside a scope, a panic ends the program with exit code 1.
+Inside a scope, the ratified behaviour already works: the panicking
+child cancels its siblings immediately, and the scope re-panics at
+exit.
+
+#### `expect` in tests is different
 
 ```glide
-type E = Boom
-
-fn work(fail: Bool) -> Result<Int, E> {
-    defer { println("  always") }
-    errdefer { println("  on error only") }
-
-    if fail { return Err(.Boom) }
-    Ok(1)
-}
-
-fn main() {
-    println("success:")
-    println("{work(false):?}")
-    println("failure:")
-    println("{work(true):?}")
+test "add works" {
+    expect(add(2, 2) == 5)
 }
 ```
 
 ```
-success:
-  always
-Ok(1)
-failure:
-  on error only
-  always
-Err(Boom)
+FAIL  this one fails
+      line 13: expect failed: left == right
+        left:  4
+        right: 5
 ```
 
-Note the ordering on the error path: `errdefer` ran before `defer`,
-because they run LIFO and `errdefer` was registered second.
-
-The canonical use is compensation — undo a partial effect:
-
-```glide
-fn store(path: String, data: String) -> Result<(), Error> {
-    let f = fs.create(path)?
-    errdefer { _ = fs.remove(path) }     // no partial files on failure
-    f.write(data)?
-    f.close()?                            // success: error propagates
-    Ok(())
-}
-```
-
-`defer` = always. `errdefer` = only on failure. They are not two ways to
-do one thing.
-
-#### Errors inside a defer must be visible
-
-The unused-`Result` rule applies inside defer blocks:
-
-```glide
-defer { _ = db.close() }        // the discard is explicit
-```
-
-You cannot silently drop the error, which is Go's worst `defer` defect
-— `defer f.Close()` discards the error that surfaces buffered-write
-failures, and that is silent data loss.
-
-#### What `defer` may not do
-
-```glide
-defer { return 5 }              // runtime error
-defer { break }                 // parse error
-defer { continue }              // parse error
-```
-
-A defer block runs during unwinding. Letting it `return` or redirect a
-loop would make the control flow of the enclosing function depend on
-cleanup code, which is exactly the confusion the construct exists to
-remove.
-
-#### When defers run
-
-| Exit path | `defer` | `errdefer` |
-|---|---|---|
-| Normal fall-through | ✓ | |
-| `return` with a value | ✓ | |
-| `return Err(…)` / `?` propagating | ✓ | ✓ |
-| `break` / `continue` | ✓ | |
-| Panic unwind | ✓ | ✓ |
-| Cancellation (Chapter 26) | ✓ | ✓ |
-| `os.exit` | **skipped** | **skipped** |
-
-`os.exit` skips everything, by design — it is an immediate exit, and
-that is what it is for.
+A failed `expect` reports and **continues** — it is not a panic.
+`require` (fail and stop) is ○. Chapter 23 covers testing.
 
 ---
 
@@ -185,511 +97,457 @@ that is what it is for.
 
 #### Implementation
 
-Each block maintains a stack of registered defer blocks. On exit —
-whatever the exit path — the evaluator pops and runs them in LIFO
-order.
+In the interpreter, a Glide panic is a Go panic carrying an `rtErr`
+value with a line number, recovered once in `Run` and printed as
+`error: line N: …`.
 
-`glide/DESIGN-DECISIONS.md` records a nice consequence: the panic path
-in `evalBlockDeferred` already runs both `defer` and `errdefer` on the
-way out, which turned out to be **exactly** the ratified cancellation
-behaviour. So when cancellation was implemented as a Go panic
-(`cancelUnwind`), the cleanup semantics came for free.
+`glide/DESIGN-DECISIONS.md` records the split explicitly: **`return`
+and `?` thread a signal value up the evaluator** (they are semantics),
+while **runtime errors panic** (they are diagnostics). That is why you
+cannot catch one — there is no signal to intercept.
 
-#### Error-path detection
+In the designed compiler, a panic unwinds the stack, running `defer`
+and `errdefer` frames, until it reaches the task boundary.
 
-`errdefer` fires when the block is exiting with an `Err`-carrying
-return or a panic. The evaluator knows which signal is propagating, so
-this is a check on the exit path rather than an inspection of the
-returned value.
+#### Three unwinds
 
-#### In the designed compiler
+Glide has three distinct ways a computation can stop early, and it is
+worth keeping them separate in your head:
 
-Defers with statically known registration compile to inline cleanup
-code in the block's epilogue, duplicated across exit paths. Defers in a
-loop or behind a conditional need a small runtime record. This is Go's
-post-1.13 optimisation, and it makes the common case roughly the cost
-of the cleanup call itself.
+| Unwind | Cause | Catchable? | Runs `defer`? | Runs `errdefer`? |
+|---|---|---|---|---|
+| **Error** | `?` propagating an `Err` | Yes — it is a value | Yes | Yes |
+| **Panic** | A bug | **No** | Yes | Yes |
+| **Cancellation** | The enclosing scope dying | **No** | Yes | Yes |
+
+Cancellation is Chapter 27's subject. The important structural point is
+that only the first is a *value* — the other two are control flow that
+user code cannot observe or intercept.
+
+#### Why `defer` runs during a panic
+
+It is required rather than nice-to-have. A panicking task must release
+its locks as the failure propagates to its scope, or the dead task
+deadlocks the program. `DESIGN.md` states this as a hard constraint on
+the defer design.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why `defer` and not RAII
+#### Why no `recover`
 
-RAII — cleanup attached to a value's destruction, as in C++ and Rust's
-`Drop` — is the obvious alternative and it does not work here.
+Go has `recover`, and `DESIGN.md` explains precisely why Glide does
+not: **Go's `recover` exists because unstructured goroutines gave
+panics nowhere to go.**
 
-RAII needs **deterministic destruction**: the runtime must know exactly
-when the last reference dies. C++ gets that from scope-based lifetimes;
-Rust gets it from the borrow checker. A tracing garbage collector gives
-neither — objects are collected eventually, at a time nobody chooses.
+In Go, a panic in any goroutine kills the entire process. That is
+catastrophic for a server, so every serious Go program wraps its
+handlers in `defer func() { recover() }()`. Once the mechanism exists,
+it gets used for other things — and `recover` becomes exception
+handling with worse ergonomics, which is exactly what the
+errors-as-values philosophy was avoiding.
 
-Finalizers running "eventually" is precisely how file descriptors leak.
-Java's `finalize()` was deprecated for this reason; C#'s `IDisposable`
-plus `using` is the admission that the GC cannot handle resources.
+Structured concurrency removes the original need. A panicking task
+fails its scope; the scope cancels its siblings and propagates. The
+blast radius is the scope, not the process, *by construction* rather
+than by everyone remembering the incantation.
 
-`DESIGN.md` names it directly: **`Drop` is a borrow-checker dividend we
-declined.** Having declined the borrow checker, `defer` is the right
-primitive.
+With the need gone, the escape hatch goes too. `DESIGN.md` marks it
+**permanent**.
 
-#### Why not `with`/`using` blocks
+#### Why panics are not errors
 
-Python's `with`, C#'s `using`, and Java's try-with-resources are the
-other alternative, and they **nest**:
+Because the distinction is about *who is wrong*.
 
-```python
-with open(a) as fa:
-    with open(b) as fb:
-        with open(c) as fc:
-            ...
-```
+If the file might not be there, the caller can reasonably encounter
+that, and it belongs in the type: `Result<String, Error>`. If the index
+is out of range, *your code* computed a bad index, and no caller can
+sensibly handle that — what would they do? Retry with a different
+index?
 
-Three resources, three indent levels. Python eventually added
-comma-separated forms and parenthesised groups to mitigate it, which is
-a tell.
+The test: **could a correct program encounter this?** If yes, it is a
+`Result` or an `Option`. If no, it is a panic.
 
-`defer` is flat:
+The consequence for API design is firm: **APIs never use panics to
+report expected failures.** A library that panics on malformed input is
+a library you cannot use safely, because there is no `recover`.
 
-```glide
-let fa = fs.open(a)?
-defer { _ = fa.close() }
-let fb = fs.open(b)?
-defer { _ = fb.close() }
-let fc = fs.open(c)?
-defer { _ = fc.close() }
-```
+#### Why bounds checks panic rather than returning an Option
 
-And a `with` block would be a second way to do what `defer` already
-does.
+`xs[7]` could have returned `T?`. It does not, deliberately.
 
-#### Why block-scoped
+Indexing is the operation you use when you *know* the index is valid —
+you just checked the length, or you are iterating a range derived from
+it. Making it return an Option would put a `??` or `let … else` on
+every array access in every loop, which is a tax on correct code to
+launder a bug into a value.
 
-Because function-scoped `defer` in a loop is a bug generator, and the
-bug is invisible.
-
-Go's rule made sense when `defer` was introduced (functions were the
-only cleanup boundary anyone considered), and the loop case has been
-biting people ever since. The standard Go workaround is to extract the
-loop body into a function purely so the `defer` fires — which is
-extracting a function to work around the language.
-
-Zig and Swift both chose block scope. Glide takes theirs.
-
-The cost: a `defer` inside an `if` block runs at the end of that `if`,
-which occasionally surprises someone expecting function scope. That is
-a smaller and more visible surprise than fd exhaustion.
-
-#### Why a block and not a call
-
-Go's `defer f(x)` evaluates the arguments immediately and calls later.
-That is a defensible choice (it captures the value at registration
-time, which is sometimes what you want) and it is a rule you must know,
-and people do not.
-
-Taking only a block means there is nothing to explain: it is a closure,
-it runs at scope exit, and everything inside is evaluated then. If you
-*want* registration-time capture, bind a variable first — which is
-visible.
-
-#### Why `errdefer` exists
-
-Because `defer` = always and "only on failure" is a genuinely different
-operation that Go programmers hand-write constantly:
-
-```go
-// Go — the rollback-if-failed pattern, written out
-tx, err := db.Begin()
-if err != nil { return err }
-committed := false
-defer func() {
-    if !committed {
-        tx.Rollback()
-    }
-}()
-… work …
-if err := tx.Commit(); err != nil { return err }
-committed = true
-```
-
-The `committed` flag is the tell. Zig noticed and added `errdefer`;
-Glide takes it.
-
-The canonical uses: rollback a transaction, delete a partially written
-file, release a half-acquired resource, undo a registration.
-
-Crucially, this is **not** two ways to do one thing. The success path
-still does explicit work — `f.close()?`, `tx.commit()?` — so no error
-is discarded on either route. `defer` handles what must happen
-regardless; `errdefer` handles compensation.
-
-#### Why the discarded-error rule
-
-Go's `defer f.Close()` silently drops the error. For a write-buffered
-file that error is *the* signal that your data did not reach the disk —
-silent data loss, and the folklore workaround is a named return plus a
-closure that assigns to it.
-
-Making the discard visible (`_ = db.close()`) costs four characters and
-makes the decision reviewable. And if you actually care, handle it:
+When you do not know the index is valid, the answer is not indexing:
 
 ```glide
-defer {
-    match db.close() {
-        Ok(())  => {}
-        Err(e)  => eprintln("closing db: {e}")
-    }
-}
+// You know it is valid
+for i in 0..xs.len() { use(xs[i]) }
+
+// You do not know — do not index
+let [_, path] = args else { usage() }
 ```
 
-#### Why linear "must-close" types were rejected
+Rust makes the same call (`xs[i]` panics, `xs.get(i)` returns
+`Option`). Glide has no `get` yet; when it lands it will be for exactly
+this case.
 
-A type system that *proves* every resource is closed is possible —
-linear or affine types. `DESIGN.md` calls it heavier than the problem
-in a GC language, and notes that a vet-tier "resource never closed on
-some path" lint retrofits most of the value at a fraction of the
-conceptual cost.
+#### Why send-on-closed panics
+
+Chapter 28 covers channels, but the reasoning belongs here: sending on
+a closed channel is a **coordination bug between senders**, not an
+expected outcome.
+
+A `Result`-returning `send` would tax every correct program with a
+check, to launder a bug into a value. And shutdown in Glide flows
+*down* the scope tree via cancellation, not *up* via send failures, so
+Rust's Err-on-receiver-gone pattern is not needed.
+
+Recorded cost: full static prevention would need affine senders —
+ownership machinery Glide sacrificed.
+
+#### Why overflow panics in dev and wraps in release
+
+Chapter 5 covered this. It is here as an example of the panic
+philosophy: an overflow *is* a bug, so a panic is right; and it is a
+bug you want to find during development, when the developer is
+watching. Release builds wrap because a check on every arithmetic
+operation is a tax production should not pay.
+
+The cost — dev and release differ — is taken knowingly, as Zig did.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** Function-scoped `defer` taking a call with immediately
-evaluated arguments, LIFO, runs on panic. Glide's three fixes — block
-scope, block-only form, visible error discard — plus `errdefer`. Go's
-`defer` is otherwise the direct model and a genuinely good idea.
+**Go.** `panic`/`recover`, with a panic in any goroutine killing the
+whole process. `recover` exists to work around that, and is then abused
+into exception handling — several popular Go web frameworks use
+panic/recover for control flow, which the language designers explicitly
+warned against. Glide removes the original problem and therefore
+removes the workaround.
 
-**Zig.** `defer` and `errdefer`, both block-scoped. The direct source
-of both of Glide's additions. Zig's `errdefer` can bind the error
-(`errdefer |e|`), which Glide does not currently provide.
+**Rust.** `panic!` with two modes: unwind (runs `Drop`, can be caught
+with `catch_unwind`) or abort. `catch_unwind` exists mainly for FFI
+boundaries and thread-pool workers, and the documentation discourages
+using it as exception handling. Rust also has `Result`, so the
+philosophical position is Glide's.
 
-**Swift.** `defer { … }`, block-scoped, block-only. The source of the
-block-only form. No `errdefer` — Swift's `do`/`catch` covers the error
-path differently.
+**Zig.** `@panic`, `unreachable`, and safety-checked undefined
+behaviour that panics in safe modes. No catching at all — the closest
+relative to Glide's position. Zig's tiered safety modes are the direct
+model for trap-in-dev/wrap-in-release.
 
-**Rust.** `Drop`, plus the `scopeguard` crate for defer-like behaviour.
-RAII works because ownership is tracked; the cost is the borrow
-checker. Rust's `?` interacting with `Drop` gives you `errdefer`
-semantics for free, since the value is dropped on the early return —
-which is elegant and is downstream of the ownership system.
+**Java / C# / Python / JavaScript.** Exceptions for everything, with no
+distinction between "the file is missing" and "this code is wrong".
+`NullPointerException` and `IndexOutOfBoundsException` are catchable,
+which means a `catch (Exception e)` swallows the bug and the program
+limps on in an unknown state. This is the failure mode the
+bugs-are-not-catchable rule prevents.
 
-**C++.** RAII destructors, and `std::unique_ptr` / `std::lock_guard`
-as the idiomatic wrappers. Deterministic and excellent when it works;
-the exception-safety rules around destructors (never throw from one)
-are the sharp edge.
+**C.** Undefined behaviour. No panic at all: an out-of-bounds write
+corrupts adjacent memory and the failure surfaces somewhere else
+entirely. Every safety feature in every language above is a response to
+this.
 
-**Python / C# / Java.** `with` / `using` / try-with-resources —
-block-structured, nesting, and requiring the resource type to implement
-an interface. The nesting is the problem; all three languages added
-mitigations for it.
-
-**C.** `goto fail`. Glide's `defer` plus `?` is the direct replacement,
-and it is why `goto` could be removed entirely (Chapter 9).
+**Erlang.** "Let it crash" plus supervision trees — a process dies, a
+supervisor restarts it. Glide's structured concurrency is
+architecturally similar (a scope is the boundary), and `DESIGN.md`
+flags Erlang-style supervision policies (`supervise(restart:
+.on_failure, …)`) as a likely future stdlib addition. The philosophies
+agree: do not try to patch up a process that has proven itself wrong;
+kill it at a known boundary and restart from a known state.
 
 ---
 
 ### 5. Common Mistakes
 
-**Writing `defer f.close()` without the block.** Does not parse. It is
-`defer { f.close() }` — or, since `close` returns a `Result`,
-`defer { _ = f.close() }`.
-
-**Forgetting the `_ =`.** The tail-value rule applies inside defer
-blocks, so a bare `db.close()` in a defer is an error. That is the
-feature.
-
-**Expecting a loop defer to run at function end.** It runs each
-iteration. If you genuinely want to accumulate cleanup until the end,
-hoist the acquisition out of the loop.
-
-**Putting a `return` in a defer.**
+**Designing an API that panics on bad input.**
 
 ```glide
-// Bad — runtime error
-defer { return 5 }
-```
-
-**Using `defer` where the success path should be explicit.**
-
-```glide
-// Bad — the commit error is discarded
-defer { _ = tx.commit() }
+// Bad — a library that panics is unusable, because nobody can recover
+pub fn parse_port(s: String) -> Int {
+    let Some(n) = s.parse_int() else {
+        panic("bad port")        // ○ there is no `panic` builtin, and good
+    }
+    n
+}
 
 // Good
-errdefer { _ = tx.rollback() }
-… work …
-tx.commit()?
+pub fn parse_port(s: String) -> Result<Int, ParseError> { … }
 ```
 
-The success path does its own work, visibly, and `errdefer` handles the
-failure. That is the pattern `errdefer` exists for.
+Note that there is no user-facing `panic()` builtin today, which makes
+this mistake harder to commit. That is deliberate.
 
-**Assuming `os.exit` runs defers.** It does not. If you need cleanup
-before exit, return an `Err` from `main` instead — that unwinds
-normally.
+**Looking for `recover`.** There is none, permanently. If you find
+yourself wanting it, one of two things is true: either the condition is
+an expected failure and should be a `Result`, or you want a task
+boundary — which is a `scope` (Chapter 26).
 
-**Registering a defer conditionally and losing track of the order.**
-Defers run LIFO in *registration* order, so a defer inside an `if` that
-did not execute was never registered.
+**Indexing without checking.**
 
-**Deferring in a hot loop.** Each iteration registers and runs a block.
-In the interpreter this is cheap but not free; in compiled code the
-optimiser handles the static cases. If a loop body acquires nothing,
-it needs no defer.
+```glide
+// Bad
+let first = xs[0]
+
+// Good
+let [first, ..rest] = xs else {
+    return Err(.Empty)
+}
+
+// Also good, when emptiness is not exceptional
+let first = if xs.len() == 0 { None } else { Some(xs[0]) }
+```
+
+**Assuming a `_ =>` arm prevents a panic.** It prevents *this* panic
+and creates a silent bug instead. A non-exhaustive match that panics is
+telling you something true.
+
+**Expecting `expect` in a test to stop the test.** It reports and
+continues. `require` is ○.
+
+**Relying on overflow wrapping.** It does not. Overflow traps in every
+tier and at every width, and `wrapping_add` / `wrapping_sub` /
+`wrapping_mul` / `wrapping_neg` ✓ are how you ask for the modular
+answer — by name, where a reader can see it.
+
+**Trying to turn a panic into an error at a boundary.** You cannot. If
+a subsystem can fail in ways you need to contain, run it in a scope —
+the panic will kill that task and fail that scope, which is the
+containment mechanism the language offers.
 
 ---
 
 ### 6. Performance Considerations
 
-**Statically known defers compile to inline epilogue code** (○) —
-roughly the cost of the cleanup call itself, duplicated across exit
-paths. This is Go's post-1.13 optimisation and it removed `defer` from
-the list of things to avoid in hot paths.
+**Bounds checks cost a compare and a predicted branch.** In tight loops
+the compiler eliminates them when it can prove the index is in range —
+`for i in 0..xs.len()` is the shape that allows this.
 
-**Conditional or looped defers need a runtime record** — a small push
-per registration. Still cheap, and it is why the compiler cannot always
-inline them.
+**Overflow checks cost roughly one instruction and a predicted branch
+per arithmetic operation** in the dev tier, and nothing in release.
+Typically a few percent, more in numeric-heavy loops.
 
-**Block scope means more, smaller defer frames** than Go's function
-scope. That is a wash on cost and a large win on correctness: the loop
-case that Go defers *accumulates* costs O(n) memory and n open file
-descriptors.
+**Panicking is expensive** and that is fine — it happens once, before
+the task dies. Unwinding runs every `defer` and `errdefer` frame on the
+way out.
 
-**Defers run during panic and cancellation unwinding**, which is
-required for correctness (locks must be released) and is not a
-performance consideration — it happens once, on the way out.
+**There is no happy-path cost to panics existing.** Unlike an
+exception-handling runtime, there is no landing-pad table to consult
+and nothing to set up at function entry. The unwind machinery is used
+only when unwinding.
 
-**In the interpreter**, a defer is a closure appended to the block's
-defer stack. One small allocation per registration.
+**`defer` running during unwind** is required for correctness, not an
+optimisation target.
 
 ---
 
 ### 7. Best Practices
 
-**Put the defer on the line after the acquisition. Always.**
+**Never panic for something a caller could encounter.** The rule, one
+more time, because it is the whole chapter:
+
+| Condition | Mechanism |
+|---|---|
+| File missing, network down, bad input | `Result` |
+| Key absent, no match found, empty list | `Option` |
+| Index out of range, broken invariant, unreachable state | panic |
+
+**Make invariants unrepresentable rather than asserted.** This is the
+best panic-avoidance strategy, and it is what Chapters 12–15 were
+about:
 
 ```glide
-// Good
-let db = sql.open(dsn)?
-defer { _ = db.close() }
-
-let f = fs.create(path)?
-defer { _ = f.close() }
-```
-
-This is the whole discipline. A reader checking for leaks scans for
-acquisitions and expects the next line to be the cleanup.
-
-**Use `errdefer` for compensation, and do the success path
-explicitly.**
-
-```glide
-// Good — the canonical shape
-fn write_atomic(path: String, data: String) -> Result<(), Error> {
-    let tmp = "{path}.tmp"
-    let f = fs.create(tmp)?
-    errdefer { _ = fs.remove(tmp) }      // clean up the partial file
-
-    f.write(data)?
-    f.close()?                            // errors propagate, visibly
-    fs.rename(tmp, path)?
-    Ok(())
+// Panics if the invariant is violated somewhere
+fn area(r: Rect) -> Float {
+    // assumes r.width > 0 — nothing enforces it
+    r.width * r.height
 }
-```
 
-If any `?` fires, the temporary file is removed. On success it is
-renamed. Neither path discards an error.
+// The invariant cannot be violated
+type Rect = struct { width: Float, height: Float }
 
-**Handle the close error when it matters.**
-
-```glide
-// Fine for a read-only handle
-defer { _ = f.close() }
-
-// Better for a writer, where close() flushes
-defer {
-    match f.close() {
-        Ok(())  => {}
-        Err(e)  => eprintln("closing {path}: {e}")
+impl Rect {
+    pub fn new(w: Float, h: Float) -> Rect? {
+        if w <= 0.0 || h <= 0.0 { return None }
+        Some(Rect{ width: w, height: h })
     }
 }
 ```
 
-For a buffered writer, the close error is the one that tells you the
-data did not land. Do not discard it out of habit.
+Private fields plus a validating constructor means every `Rect` that
+exists is valid, so nothing downstream needs to check or panic.
 
-**Scope the defer to the resource's actual lifetime.**
+**Use a scope as the containment boundary.**
 
 ```glide
-// Good — the lock is held for exactly the critical section
-{
-    let guard = mutex.lock()             // ○
-    defer { guard.release() }
-    critical_section()
+scope s {
+    _ = s.spawn(|| handle_request(req))     // a panic here kills this task
+    …
 }
-// the lock is free here
 ```
 
-Block scope makes this natural. In Go you would extract a function.
+This is the structural answer to "what if that code has a bug". Not
+`recover` — a boundary.
 
-**Do not defer what the control flow already guarantees.** A defer
-whose block is the last statement of a short function is noise —
-though if the function grows an early return later, the defer was
-right. Judgement call; err toward the defer.
+**Let bounds-check panics stand during development.** They are telling
+you the index computation is wrong. Silencing them with a clamp usually
+moves the bug rather than fixing it.
 
-**Keep defer blocks short and non-failing.** A defer that does real
-work, allocates, or can panic makes the unwind path complicated. Its
-job is to release something.
+**Prefer patterns to indexing** where the shape is uncertain.
+`let [a, b] = xs else { … }` both checks and destructures.
+
+**Do not write defensive checks against your own invariants in
+release-critical paths.** If a private field can only be set by a
+validating constructor, re-checking it in every method is noise. Check
+at the boundary, trust inside.
 
 ---
 
 ### 8. Examples
 
-**Block scope, demonstrated:**
+**The distinction, made concrete:**
 
 ```glide
-fn main() {
-    println("loop:")
-    for i in 0..2 {
-        defer { println("  cleanup {i}") }
-        println("  body {i}")
-    }
+type ParseError = Empty | NotANumber{ text: String } | OutOfRange{ n: Int }
 
-    println("nested blocks:")
-    {
-        defer { println("  outer done") }
-        {
-            defer { println("  inner done") }
-            println("  inner body")
-        }
-        println("  outer body")
+// Expected failure — a Result. The caller decides what to do.
+fn parse_port(s: String) -> Result<Int, ParseError> {
+    let s = s.trim()
+    if s == "" {
+        return Err(.Empty)
     }
+    let Some(n) = s.parse_int() else {
+        return Err(.NotANumber{ text: s })
+    }
+    if n < 1 || n > 65535 {
+        return Err(.OutOfRange{ n: n })
+    }
+    Ok(n)
 }
-```
 
-```
-loop:
-  body 0
-  cleanup 0
-  body 1
-  cleanup 1
-nested blocks:
-  inner body
-  inner done
-  outer body
-  outer done
-```
-
-Each defer fires at the end of *its own* block. In Go, all four of
-those would fire at the end of `main`.
-
-**`defer` versus `errdefer`, both paths:**
-
-```glide
-type E = Boom
-
-fn work(fail: Bool) -> Result<Int, E> {
-    defer { println("  always") }
-    errdefer { println("  on error only") }
-
-    if fail { return Err(.Boom) }
-    Ok(1)
+// A bug — indexing past the end. Nothing catches this.
+fn third(xs: List<Int>) -> Int {
+    xs[2]
 }
 
 fn main() {
-    println("success:")
-    println("{work(false):?}")
-    println("failure:")
-    println("{work(true):?}")
-}
-```
-
-```
-success:
-  always
-Ok(1)
-failure:
-  on error only
-  always
-Err(Boom)
-```
-
-**The transaction pattern, side by side with Go:**
-
-```go
-// Go — the `committed` flag is the missing construct, hand-written
-func transfer(db *sql.DB, from, to int, amount int) (err error) {
-    tx, err := db.Begin()
-    if err != nil {
-        return err
-    }
-    committed := false
-    defer func() {
-        if !committed {
-            tx.Rollback()
+    for s in ["8080", "", "abc", "99999"] {
+        match parse_port(s) {
+            Ok(n)                      => println("{s:8} -> port {n}")
+            Err(Empty)                 => println("{s:8} -> empty")
+            Err(NotANumber{ text })    => println("{s:8} -> not a number: {text}")
+            Err(OutOfRange{ n })       => println("{s:8} -> out of range: {n}")
         }
-    }()
-
-    if _, err = tx.Exec("update accounts set bal = bal - ? where id = ?", amount, from); err != nil {
-        return err
     }
-    if _, err = tx.Exec("update accounts set bal = bal + ? where id = ?", amount, to); err != nil {
-        return err
-    }
-    if err = tx.Commit(); err != nil {
-        return err
-    }
-    committed = true
-    return nil
+    println(third([1, 2, 3]))
+    println(third([1]))          // panics
 }
 ```
+
+```
+    8080 -> port 8080
+         -> empty
+     abc -> not a number: abc
+   99999 -> out of range: 99999
+3
+error: line 18: list index 2 out of range (len 1)
+```
+
+Four expected outcomes, handled exhaustively. One bug, which stops the
+program with a line number.
+
+Note *which* line number: the panic is reported at `xs[2]` inside
+`third`, not at the call site in `main`. That is correct — the bad
+index was computed there — and it is also the limitation that dev-tier
+error return traces (○, Chapter 20) exist to fix.
+
+**Making the invariant unrepresentable instead:**
+
+```glide-run
+type NonEmpty = struct { head: Int, tail: List<Int> }
+
+impl NonEmpty {
+    pub fn parse(xs: List<Int>) -> NonEmpty? {
+        if xs.len() == 0 { return None }
+        let mut tail = []
+        for i in 1..xs.len() { tail.push(xs[i]) }
+        Some(NonEmpty{ head: xs[0], tail: tail })
+    }
+
+    // Cannot panic: `head` always exists.
+    pub fn first(self) -> Int { self.head }
+
+    pub fn max(self) -> Int {
+        let mut best = self.head
+        for x in self.tail {
+            if x > best { best = x }
+        }
+        best
+    }
+}
+
+fn main() {
+    let Some(ne) = NonEmpty.parse([3, 1, 4]) else {
+        println("empty")
+        return
+    }
+    println(ne.first())
+    println(ne.max())
+
+    match NonEmpty.parse([]) {
+        Some(x) => println(x.first())
+        None    => println("rejected empty list")
+    }
+}
+```
+
+```
+3
+4
+rejected empty list
+```
+
+`first()` and `max()` cannot panic, and they contain no checks. The
+possibility of emptiness was resolved once, at `parse`, and the type
+carries the proof forward. This is the same parse-don't-validate
+pattern as Chapter 12, applied to panic avoidance.
+
+**Bad versus good: the library that panics**
 
 ```glide
-// Glide — errdefer IS the construct
-fn transfer(db: Db, from: Int, to: Int, amount: Int) -> Result<(), Error> {
-    let tx = db.begin()?                          // ○ transactions
-    errdefer { _ = tx.rollback() }
-
-    _ = tx.exec("update accounts set bal = bal - :n where id = :id",
-                ["n": amount, "id": from])?
-    _ = tx.exec("update accounts set bal = bal + :n where id = :id",
-                ["n": amount, "id": to])?
-    tx.commit()?
-    Ok(())
+// Bad — nobody can use this safely, because nobody can recover
+pub fn decode(data: String) -> Config {
+    let parts = data.split("=")
+    Config{ key: parts[0], value: parts[1] }     // panics on malformed input
 }
 ```
 
-The flag disappears, the closure disappears, and the Go version's
-subtle bug — `tx.Rollback()` after a successful commit is a silent
-no-op, so forgetting `committed = true` produces code that *works* and
-rolls back nothing — cannot be written.
-
-(`db.begin()` is ○; the designed transaction API is
-`db.tx(|tx| { … })`, a closure that commits on `Ok` and rolls back on
-`Err` — Chapter 33. `errdefer` is what makes that implementable.)
-
-**Bad versus good: the accumulating defer**
+A caller passing user-supplied data has no defence. There is no
+`recover`, so the only option is to validate the input *before* calling
+— which means duplicating the parser.
 
 ```glide
-// Bad in Go, unwritable here — shown for the contrast
-// for path in paths {
-//     f := os.Open(path)
-//     defer f.Close()      // Go: every file stays open until return
-//     process(f)
-// }
-
-// Glide: the same code is correct, because defer is block-scoped
-fn process_all(paths: List<String>) -> Result<Int, Error> {
-    let mut total = 0
-    for path in paths {
-        let text = fs.read_string(path).context("reading {path}")?
-        total += text.lines().len()
+// Good
+pub fn decode(data: String) -> Result<Config, DecodeError> {
+    let parts = data.split("=")
+    let [key, value] = parts else {
+        return Err(.Malformed{ text: data })
     }
-    Ok(total)
+    Ok(Config{ key: key, value: value })
 }
 ```
 
-The point is not that this particular function needs a defer — it is
-that if it did, the naive placement would be correct.
+The list pattern does the checking and the destructuring together, and
+the failure is a value the caller can handle. Note that this is
+*shorter* than the panicking version's honest equivalent would be with
+manual length checks.
 
 ---
 
@@ -697,49 +555,49 @@ that if it did, the naive placement would be correct.
 
 **Summary**
 
-- `defer { … }` schedules cleanup to run when the **enclosing block**
-  exits — normal fall-through, `return`, `break`/`continue`, `?`
-  propagation, panic, and cancellation. Not `os.exit`.
-- Defers run **LIFO**.
-- **Block-scoped, not function-scoped.** A defer in a loop body runs
-  each iteration, so Go's file-descriptor-exhaustion bug is not
-  reproducible.
-- **A block, only a block.** Go's argument-evaluation puzzle
-  (`defer f(x)` evaluates `x` now) cannot be written.
-- **Discarded errors must be visible** (`_ = db.close()`). Go's
-  `defer f.Close()` silently drops the error that reports failed
-  buffered writes.
-- **`errdefer`** runs only on the error path — an `Err`-carrying return
-  (including `?`) or a panic. It is the construct behind Go's
-  hand-written `committed := false` rollback pattern.
-- `defer` = always, `errdefer` = only on failure. Not two ways to one
-  thing: the success path still does explicit work (`tx.commit()?`), so
-  no error is discarded on either route.
-- A defer block may not `return` (runtime error) or `break`/`continue`
-  an enclosing loop (parse error).
-- Alternatives rejected: **RAII/`Drop`** needs deterministic
-  destruction that a tracing GC cannot provide; **`with`/`using`
-  blocks** nest one indent level per resource and would be a second way
-  to do the same thing; **linear must-close types** are heavier than
-  the problem in a GC language.
+- A **panic** means the program is wrong: out-of-range index, overflow
+  in dev builds, division by zero, a non-exhaustive match, a broken
+  invariant. It is not an error value and not control flow.
+- **There is no `recover`, permanently.** Go needs it because
+  unstructured goroutines gave panics nowhere to go; structured
+  concurrency gives them a principled boundary, so the escape hatch is
+  unnecessary and is not provided.
+- **A panic kills the task, not the process** (○ outside a scope
+  today). A panicking child cancels its siblings and the scope
+  re-panics at exit.
+- `defer` and `errdefer` **do** run during unwind — required, because a
+  panicking task must release its locks.
+- Glide has **three unwinds**: error (a value, catchable), panic (a
+  bug, uncatchable), and cancellation (Chapter 27, uncatchable). Only
+  the first is observable by user code.
+- The test for which mechanism: **could a correct program encounter
+  this?** Yes → `Result`/`Option`. No → panic.
+- **APIs never panic to report expected failures.** A library that
+  panics on bad input is unusable, because callers cannot recover.
+- Indexing panics rather than returning an Option, because indexing is
+  what you use when you *know* the index is valid; when you do not
+  know, use a pattern.
+- The best panic-avoidance strategy is making invariants
+  unrepresentable — private fields plus a validating constructor —
+  rather than asserting them.
 
 **Exercises**
 
-1. **Find the accumulating defer.** In a Go codebase, grep for `defer`
-   inside a `for` loop. For each, work out the maximum number of
-   resources that can be simultaneously held. If any of them is
-   unbounded (driven by input size), you have found the bug that block
-   scope prevents.
+1. **Audit a `catch`.** In a Java, C#, or Python codebase, find a
+   `catch (Exception e)` (or bare `except:`). List every distinct thing
+   that could reach it. Separate them into "expected failures the code
+   should handle" and "bugs that should have killed something". Most
+   such blocks are catching both, and the second category is being
+   silently survived.
 
-2. **Write the rollback three ways.** Implement a two-step operation
-   that must undo step one if step two fails: (a) with an `if` at every
-   exit point, (b) with a `committed` flag and a `defer`, (c) with
-   `errdefer`. Count the exit paths each version has to get right. Then
-   introduce a new early return into each and see which one stays
-   correct without being edited.
+2. **Remove a panic by construction.** Find a function in your code
+   that starts with a precondition check — a null check, a length
+   check, a range check. Redesign the type so the precondition cannot
+   be violated. Then count how many other functions could drop the
+   same check.
 
-3. **Decide who closes.** Design an API where a function returns an
-   open resource. Who defers the close — the function or the caller?
-   Write both versions and note what each makes impossible. This is the
-   question RAII answers automatically and `defer` makes you answer
-   deliberately, which is a real cost of the choice.
+3. **Design the containment boundary.** You are writing an HTTP server
+   where handler code is written by other teams and may contain bugs.
+   Without `recover`, describe how you would stop one bad handler from
+   taking down the process. Then check your answer against Chapter 26 —
+   the mechanism exists and is the reason `recover` was removable.

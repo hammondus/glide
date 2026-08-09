@@ -25,6 +25,14 @@ mistake. Generic bound checking, trait conformance, `Ord`, boxed
 - Extension `.gld`, UTF-8. ✓
 - Comments: `//` to end of line — the entire comment grammar; there
   is no `/* */`. ✓
+- A `#!` line is skipped, **only** as the first two bytes of a file, so
+  a `chmod +x` script runs: `#!/usr/bin/env -S glide run` ✓. It is
+  skipped, not stripped — the line still counts, so diagnostics report
+  the line an editor shows. `#` is not a comment character anywhere
+  else and remains an error. Use `env -S`: Linux passes everything
+  after the interpreter path as a *single* argument, so the plain
+  `#!/usr/bin/env glide run` looks for a binary named "glide run" and
+  fails there (it happens to work on macOS, which splits). ✓
 - No semicolons. A newline ends a statement when the previous token
   can end an expression (identifier, literal, `)`, `]`, `}`, `?`);
   a trailing operator or `.` continues the line, and so does a line
@@ -121,11 +129,9 @@ scientific, `_`-grouping.
 
 ## Types
 
-Type annotations are written but unchecked in M2.
-
 | Type | Notes | Status |
 |---|---|---|
-| `Int` | i64 on every target (the M2 value is Go int64) | ✓ |
+| `Int` | i64 on every target (a Go `int64` in the interpreter) | ✓ |
 | `Float` | f64 | ✓ |
 | `Bool`, `String`, `()` | | ✓ |
 | `List<T>`, `Map<K, V>` | **Map iteration is insertion order, and that is specified** — not incidental, and the compiled tier must reproduce it. Deleting a key drops it from the order; re-inserting appends. `json.encode` emits object keys in this order | ✓ |
@@ -138,7 +144,7 @@ Type annotations are written but unchecked in M2.
 | `i8…i64`, `u8…u64`, `f32` | sized numerics | ✓ — declared, checked, and represented at their own width. Literal range is enforced exactly at both ends (`let x: u8 = 300` and `let x: u64 = -1` are compile errors; `let x: u64 = 18446744073709551615`, `let x: i8 = -128` and `let x: Int = -9223372036854775808` are not), no implicit conversions between widths (`u8 + u16` is a compile error), and arithmetic **traps at the declared width** — `let x: u8 = 250` then `x + 10` is a positioned runtime error, not 260. The width lives on the value, not on the checker's annotation, so it survives type erasure: `+` inside `fn double<T>(v: T) -> T` traps at 8 bits when called with a `u8`. Conversion is **explicit and only explicit**: `u8(n)`, `Int(c)`, `Float(k)` — the type's own name applied to a value, Go's spelling. Out of range **traps** (`u8(300)` where 300 is a constant is a compile error; where it is a value it is a positioned runtime error) rather than truncating silently as Go does, and `n.wrapping_u8()` is the truncating form. Conversion is defined between the integer widths, the floats and `Rune`, and nowhere else — `String(65)` and `Bool(1)` are errors. Float→integer truncates toward zero. Every primitive type name is **reserved**, since `u8` now means something in expression position; a local `let u8 = 5` still shadows it, as in Go ✓ |
 | `i128`, `u128` | 128-bit integers | ○ — ratified, deferred past M4 (Go has no native 128-bit integer; see `glide/DESIGN-DECISIONS.md`) |
 | `Rune` | own type; `==`/ordering with other Runes only; Display prints the character, Debug quotes it | ✓ |
-| `distinct` | `type NoteId = distinct Int` — nominal wrapper: explicit construction `NoteId(7)` (wrong base type errors), **no inherited operators** (`NoteId(1) + 1` errors — an id is not a quantity), `==` within the same distinct type only, pattern `NoteId(n)` destructures, `.value()` unwraps, `impl NoteId { … }` works like any user type. Codecs (json/sql) unwrap at the boundary | ✓ (dynamic; the checker makes it static) |
+| `distinct` | `type NoteId = distinct Int` — nominal wrapper: explicit construction `NoteId(7)` (wrong base type is a compile error), **no inherited operators** (`NoteId(1) + 1` errors — an id is not a quantity), `==` within the same distinct type only, pattern `NoteId(n)` destructures, `.value()` unwraps, `impl NoteId { … }` works like any user type. Codecs (json/sql) unwrap at the boundary | ✓ (dynamic; the checker makes it static) |
 | `Duration`, `Instant` | see stdlib Concurrency/Time | ✓ |
 | `BigInt`, `Decimal` | stdlib, by name, never silent promotion | ○ |
 | `any Trait` | boxed trait object, visible dispatch | ○ |
@@ -379,23 +385,27 @@ patterns in function signatures, ref/binding modes.
 
 ## Semantics quick-list
 
-- Every program is type-checked before it runs, in every tier. ✓
-  (M4b). What is checked today: call argument types, arity, named
-  arguments and defaults; struct and variant literals (fields
-  present, no extras, no zero values); field, method and associated
-  function existence; operator operand types (including the
-  `Duration`/`Instant` set and `distinct`'s refusal to inherit any);
-  `if`/`for`/guard conditions; branch and match arms agreeing;
-  list/map element homogeneity; iterability; declared return types
-  and the tail-value rule; `?` on a Result with a reachable error
-  type; `.Shorthand` against the expected type; `mut` paths;
-  integer-literal range against a sized type; and every name being
-  defined. What is *not* yet checked, and stays dynamic until M4c:
-  everything listed here ✓ as of M4c — generic bounds, trait
-  conformance, match exhaustiveness, generator element types, the
-  spawn-captures-mut ban and undetermined type parameters included.
-- No null; no zero values; mandatory initialisation. ✓ (by
-  construction in M2)
+- Every program is type-checked before it runs, in every tier ✓, with
+  no way to skip it. What is checked: call argument types, arity, named
+  arguments and defaults; struct and variant literals (fields present,
+  no extras, no zero values); field, method and associated function
+  existence; operator operand types (including the `Duration`/`Instant`
+  set and `distinct`'s refusal to inherit any); `if`/`for`/guard
+  conditions; branch and match arms agreeing; list/map element
+  homogeneity; iterability; declared return types; `?` on a Result with
+  a reachable error type; `.Shorthand` against the expected type; `mut`
+  paths (**including on builtin receivers**); integer-literal range
+  against a sized type; generic bounds; trait conformance; match
+  exhaustiveness and unreachable arms; generator element types against
+  the declared `Iterator<T>`; the spawn-captures-`mut` ban; undetermined
+  type parameters; and every name being defined.
+- **Three rules are still enforced by the evaluator rather than the
+  checker**, so `glide check` does not report them and they fire only on
+  an executed path: the **tail-value rule**, the **nested-shadow ban**,
+  and a **bound whose type parameter appears only inside a container**
+  (`fn f<T: Ord>(xs: List<T>)` accepts a `List<Blob>`). All three
+  under-approximate — closing them cannot reject a program that works.
+- No null; no zero values; mandatory initialisation. ✓
 - Errors are values; `?` propagates; panics are for bugs, kill the
   task (M2: the program), and cannot be caught — no `recover`,
   permanent.

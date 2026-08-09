@@ -59,14 +59,25 @@ println(raw)            // 7
 ```glide
 fn get_note(id: NoteId) -> Note? { … }
 
-get_note(7)             // ○ will be a type error — an Int is not a NoteId
+get_note(7)             // expected NoteId, found Int
 get_note(NoteId(7))     // right
-get_note(order_id)      // ○ will be a type error — an OrderId is not a NoteId
+get_note(order_id)      // expected NoteId, found OrderId
 ```
 
-(These are checker-era errors. Today annotations are ignored, so the
-call would go through — but `distinct` construction and operators *are*
-enforced dynamically, as below.)
+Both of those are compile errors, reported before the program runs:
+
+```
+app.gld:9:22: expected NoteId, found Int
+ 9 |     println(get_note(7))
+   |                      ^
+app.gld:10:22: expected NoteId, found OrderId
+ 10 |     println(get_note(order_id))
+    |                      ^^^^^^^^
+```
+
+The second is the one that pays for the feature. `NoteId` and `OrderId`
+are both `Int` underneath, and every language without `distinct` will
+let you pass one where the other belongs.
 
 #### No inherited operators
 
@@ -88,7 +99,7 @@ The reasoning is one sentence in `DESIGN.md`: *an id is not a
 quantity.* Adding two note IDs is meaningless, so the language does not
 provide it. If your distinct type *is* a quantity — `Metres`,
 `Cents` — you implement the operator traits deliberately (○,
-Chapter 34's territory).
+Chapter 36's territory).
 
 #### Equality is within the type only
 
@@ -102,7 +113,7 @@ with the same underlying value.
 
 #### Methods work like any user type
 
-```glide
+```glide-run
 type NoteId = distinct Int
 
 impl NoteId {
@@ -158,11 +169,17 @@ code is the rule.
 example of a general principle — the best way to prevent something is
 for it to be unrepresentable rather than checked.
 
-#### Construction checks the base type dynamically
+#### Construction is checked statically
 
-`NoteId("x")` errors at construction time today, comparing the base
-type name. In the checker era this becomes a compile error, and the
-runtime check disappears.
+```
+app.gld:3:20: NoteId wraps Int, got String (no implicit conversion)
+ 3 |     println(NoteId("x"))
+   |                    ^^^
+```
+
+The evaluator keeps its own base-type check as a backstop, but the
+diagnostic you will actually see comes from the checker, before
+anything runs.
 
 #### Not yet a map key
 
@@ -332,10 +349,8 @@ Until operator traits are implementable, a heavily-arithmetic distinct
 type is painful. Weigh the transposition safety against the unwrapping
 noise.
 
-**Forgetting the wrapper at a construction site.** Today annotations
-are ignored so this silently works; in the checker era it will be an
-error. Write `NoteId(row["id"])` even though `row["id"]` alone
-currently passes.
+**Forgetting the wrapper at a construction site.** `expected NoteId,
+found Int` — a compile error. Write `NoteId(row["id"])`.
 
 **Using it as a map key.** Not supported yet. Use `.value()`.
 
@@ -405,7 +420,7 @@ type Millis = distinct Int
 type Bytes = distinct Int
 ```
 
-Note that Glide's `Duration` type (Chapter 26) exists precisely so you
+Note that Glide's `Duration` type (Chapter 27) exists precisely so you
 do not hand-roll `Millis` — `500.ms` is a real `Duration`. Use the
 stdlib type when there is one.
 
@@ -461,7 +476,7 @@ Everything downstream takes a `NoteId` and never sees a bare `Int`.
 
 **The transposition bug, prevented:**
 
-```glide
+```glide-run
 type AccountId = distinct Int
 type Cents = distinct Int
 
@@ -482,9 +497,9 @@ fn main() {
     let l = transfer(Ledger{ entries: [] }, src, dst, amt)
     println("{l.entries:?}")
 
-    // In the checker era, this is a compile error:
+    // A compile error, with both arguments flagged:
     //     transfer(l, src, amt, dst)
-    // because Cents is not an AccountId and AccountId is not Cents.
+    // expected AccountId, found Cents / expected Cents, found AccountId
 }
 ```
 
@@ -497,7 +512,7 @@ compiles and moves the wrong money.
 
 **A validated identifier:**
 
-```glide
+```glide-run
 type Slug = distinct String
 
 impl Slug {

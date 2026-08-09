@@ -1,612 +1,668 @@
-# Chapter 37: Common Anti-Patterns
+# Chapter 37: The Implementation Path
 
-Every language acquires anti-patterns from the languages its users came
-from. Glide is unusual in that its likely users come from *three*
-directions — Go, Rust, and the C-lineage mainstream — and each brings a
-different set of habits that are locally reasonable and globally wrong
-here.
+Most language books do not have this chapter, because most languages
+are finished. Glide is not, and the *path* from a tree-walking
+interpreter to a self-hosted compiler is a design artifact in its own
+right — one with a genuinely clever shortcut in it.
 
-This chapter is organised by origin, because that is how you will
-recognise them in your own code.
+`DESIGN.md` frames it as **two mountains wearing one name**: the
+compiler is a hill with a shortcut; the runtime is the actual decade,
+deferred indefinitely by the shortcut.
+
+Steps 1 and 2 are **done**. This chapter is otherwise about ○ work,
+except the parts describing what runs today.
 
 ---
 
-### 1. Basic Usage: The Catalogue
+### 1. Basic Usage
 
-#### Go-in-Glide
+#### The four steps
 
-**The functional-options pattern.** Thirty lines of ceremony to express
-what a signature should have said (Chapter 7).
-
-```glide
-// Bad
-type Option = fn(Config) -> Config
-fn with_timeout(d: Duration) -> Option { |c| Config{ timeout: d, ..c } }
-fn with_tls(b: Bool) -> Option { |c| Config{ tls: b, ..c } }
-fn connect(host: String, opts: List<Option>) -> Conn { … }
-
-connect("db.local", [with_tls(false)])
-
-// Good
-fn connect(host: String, port: Int = 5432, tls: Bool = true) -> Conn
-connect("db.local", tls: false)
+```
+1. Go tree-walking interpreter          (M1-M3 complete)
+2. The checker, in Go                   (M4 complete)
+3. Compiler frontend rewritten in Glide ← here
+4. Glide→Go transpiler, which compiles itself
+5. Someday: LLVM + own runtime
 ```
 
-The pattern exists in Go because Go has no defaults and no named
-arguments. Transplanting it costs a closure and a list allocation per
-call and produces a worse call site.
+**Step 1 — the interpreter (done).** Written in Go, it proves
+semantics. `DESIGN.md` names the three riskiest: generators, structured
+concurrency, and comptime reflection. Two of the three now run.
+Standard library modules are Go host shims behind Glide-shaped
+interfaces.
 
-**The `kind` field.** A struct with a discriminator string and
-mostly-unused pointers (Chapter 13).
+**Step 2 — the checker, in Go (M4, done).** Annotations stopped being
+documentation. This step was not in the original plan — the checker was
+step 2 *in Glide* — and the next section explains the reversal. What it
+delivered is Chapter 19: a mandatory, bidirectional, under-approximating
+checker, plus the conformance corpus that will judge its replacement.
 
-```glide
-// Bad
-type Node = struct {
-    kind: String
-    value: Int
-    left: Node?
-    right: Node?
-}
+**Step 3 — the frontend rewritten in Glide.** Lexer, parser, and
+checker, run on the interpreter. **Dogfooding at scale starts here**,
+against a design that step 2 has already proven. This is the current
+step, and the conformance corpus is what will prove the replacement
+faithful rather than merely plausible.
 
-// Good
-type Node = Leaf(Int) | Branch(Node, Node)
-```
+**Step 4 — the Glide→Go transpiler**, which then compiles itself.
 
-Tells: a `kind`/`type`/`tag` field; several `Option` fields where only
-certain combinations are valid; a comment explaining which fields apply
-when.
+**Step 5 — LLVM and a native runtime.** The real mountain, and the only
+step that takes Go out of the pipeline rather than out of the source
+tree.
 
-**Boolean flag soup.** Two booleans is four states; if only three are
-meaningful, it is a three-variant sum type (Chapter 12).
+#### One frontend, two backends
 
-**Sentinel returns.** `-1` for not-found, `""` for absent, `0` for
-unset. The Option exists (Chapter 14).
+The single most important structural fact about Glide's implementation:
+**the lexer, parser, and checker are one implementation, shared by the
+interpreter and the compiler.** The two tiers differ in how they
+execute a checked program. They never differ in what they accept, or in
+what it means.
 
-**The `ctx` parameter.** Cancellation is ambient (Chapter 26). A
-`timeout: Duration` parameter spreading through your call graph is
-`ctx` rebuilt by hand — and it is also *wrong*, because passing the
-same timeout to two sequential calls doubles the budget.
+This is not an efficiency measure. It is what makes it safe to ship
+both tiers. "Runs interpreted, fails compiled" is the bug class that
+discredits every dual-tier language, and it is unreachable when exactly
+one thing decides. OCaml has run `ocamlc`, `ocamlopt`, and an
+interactive toplevel over one frontend since the early 90s; Rust's Miri
+interprets the same MIR its codegen backends consume, and rustc's own
+compile-time evaluator *is* that interpreter.
 
-**Shutdown ceremony.** A stop channel, a `done` flag, a `shutting_down`
-boolean, a signal handler. The scope does all of it (Chapter 25).
+The consequence for you: **the interpreter is not scaffolding.**
+`glide run` is meant to be a statically-checked scripting language in a
+single static binary — a product, not a stepping stone. An earlier plan
+had it freezing at self-hosting so that "the evolving language keeps
+exactly one implementation"; the shared frontend delivers that property
+outright, and without the scripting tier slowly becoming an older
+language.
 
-```glide
-// Bad
-let (stop_tx, stop_rx) = channel()
-_ = s.spawn(|| sweeper(db, stop_rx))
-…
-stop_tx.close()
+#### Where the implementation is today
 
-// Good
-_ = s.spawn(|| sweeper(db))
-```
+M1 through M4 are complete. The first three were each defined by a
+program the interpreter had to run:
 
-**Reaching for a global.** There is no module-level `let`, and the
-reflex to want one is the tell (Chapter 29).
+| Milestone | Target | Delivered |
+|---|---|---|
+| **M1** | `wordfreq` | the whole expression language, no user types |
+| **M2** | the `Tree` example | `type`, `match` with guards, `impl`, `mut self`, `if let`, generators, `test` blocks with property testing |
+| **M3** | the `notes` service | named-field variants, dot shorthand, `distinct`, named arguments, `defer`, structured concurrency, channels, `select`, time, http/sql/json shims |
+| **M4** | *a property, not a program* | every annotation is checked, and no remaining case computes the wrong value |
 
-**`interface{}`-shaped thinking.** There is no top type. A
-`Map<String, Any>` is a struct that has not been written.
+M4 is the first milestone defined by a property instead of a program,
+and it broke into three:
 
-#### Rust-in-Glide
+| | Delivered |
+|---|---|
+| **M4a** | the representation: type parameters and bounds reach the AST at all |
+| **M4b** | the checker core (`internal/types`, `internal/check`), mandatory in every tier |
+| **M4c** | sized numerics, explicit conversion, generic bounds, trait conformance, `Ord`, boxed `Option`, match exhaustiveness, generator element types, the spawn-captures-`mut` ban, undetermined type parameters |
 
-**Combinator chains.** Rust's `Option` and `Result` have a large
-combinator surface, and Glide deliberately does not.
+Defining a milestone by "run this program" rather than "implement this
+feature list" is why the surfaces are minimal and coherent — the
+dogfood rule (Chapter 31) applied to the implementation itself. M4 is
+the exception that proves it: there is no single program that
+demonstrates "nothing computes a wrong answer".
 
-```glide
-// Rust-in-Glide (and most of these do not exist)
-config.get("port").and_then(|s| s.parse_int()).unwrap_or(8080)
+#### What is deliberately absent after M4
 
-// Glide
-let port = (config["port"] ?? "8080").parse_int() ?? 8080
-```
+`Mutex<T>`, `derive`, typed JSON decode, typed query rows, method
+values, arithmetic operator traits (`Add`, `Mul` — deferred for want of
+a forcing need), `or |e|` blocks (declined), time
+formatting/parsing/calendars, HTTP error middleware, streaming IO, and
+a `flag` module.
 
-`DESIGN.md` prefers three readable constructs (`??`, `if let`,
-`let … else`) plus `match` over twenty methods.
+#### The two tiers
 
-**Excessive `distinct` wrapping.** Rust's newtype pattern is cheap and
-idiomatic, and over-applied here it produces `.value()` noise —
-especially since operator traits are ○ (Chapter 15). Wrap identifiers;
-do not wrap counts, indexes, and lengths that the domain freely mixes.
+The tiered-backend design is what makes several decisions in this book
+possible:
 
-**Fighting for value semantics.** Collections are references and `let`
-does not freeze (Chapter 4). Writing defensive copies everywhere is
-paying for a guarantee the language did not promise. Either do not hand
-out the reference, or wait for persistent collections (○).
+| | Dev tier | Release tier |
+|---|---|---|
+| Integer overflow | **traps** | wraps |
+| Backtraces | captured | skipped |
+| Unused code | warning | **error** |
+| Debug info | complete (guaranteed) | best-effort |
+| Optimisation | speed of compilation | speed of code |
 
-**Expecting `?` on `Option`.** Not adopted (Chapter 14).
+`DESIGN.md` calls this "tiered backends keep paying rent". Each row is
+a case where the right answer for the edit loop and the right answer
+for production genuinely differ.
 
-**Trait objects everywhere.** `any Trait` (○) boxes and dispatches
-dynamically, and it is spelled differently *so that the cost is
-visible*. Generic bounds are the default.
+**The hard rule:** those may differ. **Semantics may not.** Loop
+back-edge cancellation checks were considered and rejected precisely
+because dev-tier programs would be more cancellable than release-tier —
+and "semantics that differ by tier are poison" (Chapter 27).
 
-**Premature lifetimes-thinking.** There is a GC. A closure can capture
-whatever it likes and return it; a struct can hold a reference to
-anything; nothing needs to be `'static`.
+---
 
-#### Java/C#-in-Glide
+### 2. Under the Hood
 
-**Interface-per-class.** A trait with one implementation is a type with
-extra steps (Chapter 17). Introduce the seam when a second
-implementation or a test substitution actually exists.
+#### Why the interpreter is a tree-walker
 
-**Getter/setter ceremony.**
+Because its first job was to prove **semantics**, cheaply.
 
-```glide
-// Bad
-type User = struct { name: String }
-impl User {
-    pub fn get_name(self) -> String { self.name }
-    pub fn set_name(mut self, n: String) { self.name = n }
-}
+A bytecode VM would be faster and would take longer to write and be
+harder to change. A tree-walker over the AST is the shortest path from
+"we designed this" to "does it actually work" — and several decisions
+in `DESIGN.md` are marked *"forced by the interpreter; ratified"*,
+meaning the design changed because writing the evaluator revealed a
+problem:
 
-// Good
-type User = struct { pub name: String }
-```
+- Statement termination rules, including the leading-dot continuation.
+- `//`-only comments.
+- Struct literals banned in control-flow headers.
+- Bare blocks as expressions.
 
-Field-level `pub` is the encapsulation mechanism (Chapter 12). Make a
-field public or do not; a getter that returns the field unchanged is
-noise.
+That is the interpreter doing its job.
 
-**Reaching for inheritance.** There is none, and there is no embedding
-either (Chapter 16). Composition holds data; traits hold behaviour.
+#### Why it was dynamically checked, and why that is ending
 
-**Exception-shaped error handling.** Wanting a `try`/`catch` at the top
-of `main` that handles everything. Errors are values with types; handle
-them where the decision belongs.
+Through M1–M3, type annotations were parsed, kept as strings, and
+ignored. `DESIGN-DECISIONS.md` gave the reason in one sentence:
+*writing a static checker in Go now would be thrown-away work*, because
+the checker was step 2 and would be written in Glide.
 
-**Looking for `recover`.** Permanently absent (Chapter 20). If you want
-a containment boundary, that is a scope.
+**That decision was reversed, and the reversal is worth studying** —
+both halves of the argument failed, in instructive ways.
 
-**Layer cake architecture.** `NoteController` → `NoteService` →
-`NoteRepository` → `NoteEntity`, where each layer is a thin pass-through
-and the interfaces exist for a dependency-injection framework that does
-not exist here. Chapter 38 covers this properly.
+The *thrown-away* half assumed the interpreter retires at self-hosting.
+It does not; it ships. Work that lands in a shipping tier is not thrown
+away, so the premise simply evaporated. The lesson is not that the
+reasoning was sloppy — it was sound *given* the roadmap it was written
+against. It is that a decision inherits every assumption of the plan
+around it, and when the plan moves, the decision has to be re-derived
+rather than re-quoted.
 
-#### Python/JavaScript-in-Glide
+The *sequencing* half is the more interesting failure: it inverted its
+own dependency. The bootstrap justified writing the frontend in Glide
+on the grounds that compilers are the best-case workload for this
+feature set — ASTs are sum types, a checker is exhaustive matching, `?`
+threads the phases. All true. **And none of it was available.**
+Exhaustiveness was dynamic. Generics never reached the AST. `Option`
+could not nest. Trait conformance was asserted rather than verified.
+The plan called for writing the largest, most type-dense Glide program
+that will ever exist, in the one tier that checked none of the
+properties that made it the right program to write.
 
-**Stringly-typed everything.** A `Map<String, String>` config that
-every consumer re-parses (Chapter 11).
+What actually transfers into Glide was never the Go code. It is the
+*design* — the type representation, the bidirectional rules,
+expected-type propagation, the diagnostic wording — plus the
+conformance corpus. Those are the expensive part, they are far cheaper
+to get right in a language that checks your work, and having them makes
+the Glide frontend a transcription rather than a rediscovery.
 
-**Truthiness habits.** `if xs` does not compile. That is the point
-(Chapter 5).
+Accepted cost, stated plainly: the Go frontend gets written once and
+ported once.
 
-**Dynamic dispatch on a string.**
+All of those rules are now static, with one exception worth naming: the
+**tail-value rule is still enforced by the evaluator**, at the moment a
+function is called, so `glide check` does not report it. It is a hole
+of the safe kind — under-approximating, never wrong — and closing it
+cannot break a program that works.
 
-```glide
-// Bad
-fn handle(kind: String, body: String) -> Result<(), Error> {
-    if kind == "created" { … } else if kind == "deleted" { … } else { … }
-}
+#### The three implementation decisions worth knowing
 
-// Good
-type Event = Created{ id: Int } | Deleted{ id: Int }
-fn handle(e: Event) -> Result<(), Error> {
-    match e {
-        Created{ id } => …
-        Deleted{ id } => …
-    }
-}
-```
+**One interpreter lock (a GIL), released around blocking operations.**
+Chapter 26 covered it. The point worth repeating: **the lock is the
+semantics, not just a guard.** Tasks interleave exactly at blocking
+operations, which is the ratified cancellation-point rule.
 
-**Side effects in comprehension-shaped code.** An adapter chain used
-for effects does nothing (it is lazy) or is a loop in disguise
+**Generators run on a goroutine plus a channel.** The cheapest correct
+lazy implementation for a tree-walker, because a suspended goroutine
+*is* a suspended frame with locals intact (Chapter 25).
+
+**Cancellation is a Go panic, not a signal.** Panics already unwind
+uncatchably through every construct, and the panic path already ran
+`defer` and `errdefer` — which is exactly the ratified cancellation
+behaviour (Chapter 27). The mechanism came for free.
+
+#### Why the transpiler is the clever part
+
+This is the shortcut that defers the decade.
+
+**Glide's runtime model was Go's from day one** — green threads,
+tracing GC, `defer`, channels, value structs. So Glide lowers onto Go
+source nearly one-to-one, and **every hellish part is prepaid**:
+
+| Needed | Provided by Go |
+|---|---|
+| Garbage collector | Go's, battle-tested |
+| Green-thread scheduler | goroutines, work-stealing |
+| Cross-compilation | `GOOS`/`GOARCH` |
+| Static binaries | `CGO_ENABLED=0` |
+| Debuggability | readable output, `//line` directives, delve |
+
+Writing a garbage collector and a green-thread scheduler is the
+multi-year part of a language implementation. Transpiling to Go skips
+both, permanently if you want.
+
+It also gives an **auditable bootstrap chain from a mainstream
+toolchain**: no binary seed, no trusting-trust anxiety. And it resolves
+the tiered-backend plan for years — interpreter as dev tier, transpiled
+Go as shipping tier.
+
+#### The known wrinkle
+
+`DESIGN.md` lists what must be lowered and flags the hard one:
+
+| Glide construct | Lowering |
+|---|---|
+| Sum types | tagged structs — mechanical |
+| `match` | switches — mechanical |
+| Dev-tier overflow traps | explicit checks in emitted code |
+| **Generators** | **goroutine pairs or CPS — the fiddly one** |
+
+Generators are flagged **"prototype before depending on the
+transpiler"**. Goroutine pairs are what the interpreter does — correct
+and heavy. A CPS or state-machine transformation is correct and fast
+and is real work. C# proves it is solvable (Chapter 25).
+
+#### Debugging, staged with the path
+
+Each era gets a different answer, and each is cheap for its era:
+
+**Interpreter era: a DAP server in the interpreter.** A tree-walker is
+a debugger that has not been asked — breakpoints are a per-statement
+check, stepping is eval-loop flags, inspection is the environment
+already held. Weeks, not months, and every editor gets it free through
+the Debug Adapter Protocol.
+
+**Transpiler era: `//line` directives and preserved identifier
+names** — a *day-one design constraint, not a retrofit*. Go's line
+directives exist for exactly this, so delve then debugs Glide at
+`.gld`-line granularity, and delve's goroutine awareness covers Glide
+tasks because **they are goroutines**. Twenty years of debugger
+investment ridden for two transpiler disciplines. The honest seam:
+stepping inside desugared constructs like generator state machines —
+keep the lowering line-faithful.
+
+**Native era: full DWARF**, with the standard cut — complete debug info
+is a dev-tier guarantee, release is best-effort.
+
+Two more designed capabilities worth knowing:
+
+**The scope tree beats the goroutine list.** A debugger shows
+`main → serve → request → query` — structure mandated for other reasons
+(Chapter 26), surfaced. Delve's 40,000 flat anonymous goroutines is the
+anti-pattern.
+
+**Deterministic-seed replay is the concurrency debugging story.** A
+race caught in `glide test` is a seed; stepping through the replay
+reproduces the exact interleaving. That is the bug class where
+debuggers normally fail, covered by two recorded decisions touching
 (Chapter 23).
 
-#### Glide-native anti-patterns
+#### Embedding
 
-These are not imported; they are ways to misuse features this language
-actually has.
+The interpreter gets a small public Go API — it exists anyway, since
+bootstrap steps 1 and 2 require it. Construct a VM, run source, bind Go
+functions, convert values, cancel runaway scripts.
 
-**`_ =>` as a habit.** The single most damaging one. Every `_ =>` on a
-closed type converts a future compile-time work list into a silent
-default. Write it only when "anything else" is genuinely the meaning —
-an HTTP method string, an integer.
+Three rules:
 
-**`??` as an error silencer.**
+**Influence is one-way.** The compiled language is the design
+authority. No semantics bent because they are awkward to marshal to Go.
+"The moment embedding argues *for* a language change, it loses."
 
-```glide
-// Bad — three failures vanish and the function returns a plausible number
-fn sync(db: Db) -> Int {
-    let a = db.exec("delete from stale") ?? 0
-    let b = db.exec("vacuum") ?? 0
-    _ = db.close()
-    a + b
-}
-```
+**The interpreter tracks the language; it does not freeze.** An earlier
+plan had it freezing at self-hosting so the evolving language would
+keep exactly one implementation. The goal was right, the mechanism was
+not: the shared frontend already guarantees one implementation, and
+freezing would have bought that guarantee at the price of the scripting
+tier drifting into an older language. Hosts still pin a version, as
+they pin any Go module — that is dependency management, not a freeze.
 
-Each discard is *visible*, which is the design working — and a reader
-can see three places where a failure disappears.
-
-**`mut` creep.** Six mutable bindings where one is needed devalues the
-marker everywhere else (Chapter 4).
-
-**Sum-type explosion.** Beyond seven or eight variants, ask whether two
-dimensions have been flattened into one. `HttpGet | HttpPost | GrpcUnary
-| GrpcStream` is probably `Protocol` × `Method`.
-
-**Generator abuse.** A generator whose body has side effects runs them
-at unpredictable times, or never (Chapter 24). Generators produce
-values.
-
-**Scope-per-call.** A scope with one child that you immediately join is
-a function call with extra steps (Chapter 25).
-
-**Channel-for-one-value.** `join()` returns what the closure returned;
-channels are for streams (Chapter 27).
-
-**Interpolation in a query string.** SQL injection, and the one place
-in the book where nothing structural stops you (Chapter 33).
-
-**Interpolated log messages** (○). The one place interpolation is an
-antipattern: an infinite-cardinality message cannot be grouped,
-counted, or alerted on.
-
-```glide
-// Bad
-log.info("user {id} logged in from {ip}")
-
-// Good
-log.info("user logged in", { user_id: id, ip: ip })
-```
-
----
-
-### 2. Under the Hood: Why These Persist
-
-**Anti-patterns are usually correct code from a different language.**
-None of the above is stupid. The functional-options pattern is
-excellent Go. The newtype-everything reflex is excellent Rust.
-Interface-per-class is defensible Java. They fail here because the
-constraint that motivated them is gone.
-
-That makes them hard to see: the code looks *good*, by a standard you
-learned honestly.
-
-**The reliable detection method is to ask what constraint the pattern
-solves, and whether that constraint exists here.**
-
-| Pattern | Constraint it solves | Present in Glide? |
-|---|---|---|
-| Functional options | No default parameters | No |
-| `kind` field + type switch | No sum types | No |
-| `sql.NullString` | No `Option` | No |
-| `ctx` threading | No structured cancellation | No |
-| Stop channels | No scoped task lifetime | No |
-| `recover` in handlers | Panics kill the process | No |
-| Getters | No field-level visibility | No |
-| Interface-per-class | DI framework needs a type | No |
-| Combinator chains | No `let … else` | No |
-| Defensive copying | Borrow checker enforces value semantics | **Yes** — this one is real |
-
-Note the last row. Not every imported instinct is wrong: Glide *does*
-have reference semantics without a borrow checker, so caring about
-aliasing is legitimate. The habit to keep is "know who can mutate
-this"; the habit to drop is "copy everywhere just in case".
+**Stdlib shims are injectable per host**, which buys capability-style
+sandboxing for free: untrusted scripts are simply never handed `fs` or
+`net`. `DESIGN.md` calls this "the one embedding requirement worth
+honouring while building the interpreter, because it is painful to
+retrofit."
 
 ---
 
 ### 3. Why This Design?
 
-#### Why the language cannot prevent most of these
+#### Why the frontend still gets written in Glide — just not first
 
-It prevents some. `interface{}`, `nil`, zero values, `recover`,
-inheritance, embedding, and `init()` are all unwritable. A `kind` field
-compiles but the sum type is easier. `ctx` threading compiles but the
-scope is shorter.
+The original argument had two halves. One did not survive; the other is
+the whole point and is untouched.
 
-What the language *does* is make the good version cheaper than the bad
-one, which is the only lever that works at scale. Nobody writes thirty
-lines of options pattern when one signature does it.
+**The half that failed — "writing it in Go is thrown away".** Covered
+above: it assumed a retiring interpreter, and the interpreter ships.
 
-`DESIGN.md`'s recurring phrase is **culture follows cost**. Go never
-grew a map/filter culture because closures cost forty characters.
-Property testing never went mainstream because setup cost an
-afternoon. Small interfaces are Go culture because they cost nothing.
+**The half that stands: compilers are the best-case workload for this
+feature set.** `DESIGN.md` is explicit —
 
-#### Why `_ =>` is singled out
+> ASTs are sum types, a checker is exhaustive matching, `?` threads the
+> phases; the ML family was designed for this. The compiler in Glide
+> will be nicer code than the interpreter that runs it.
 
-Because it is the one anti-pattern that *removes a guarantee the
-language was built to provide*, and it does so silently.
+That is a testable claim and it is the strongest possible dogfooding.
+If sum types, exhaustive `match`, and `?` do not make writing a
+compiler pleasant, the language's central bet is wrong. If they do, the
+implementation is also the demonstration.
 
-Exhaustiveness is the reason sum types are worth having (Chapter 13).
-The value is not "I can express one-of-N" — it is "when I add a sixth
-variant, the compiler hands me every place that needs updating". A
-`_ =>` arm opts that site out, permanently, and nothing ever tells you.
+**Which is exactly why it moved to step 3.** The claim is only testable
+if the features are real when the test runs. Written before the
+checker, the experiment would have measured Glide's *syntax* while
+none of the safety was switched on — a rigged trial, and one whose
+failures would have been indistinguishable from the tier's failures.
+Written after, it measures the thing the claim is actually about.
 
-`DESIGN.md`: a `_ =>` arm is legal but **spends the guarantee**.
+The ordering is the same lesson twice: a dogfooding exercise is only
+evidence if the food is real.
 
-#### Why over-abstraction is worse here than in Java
+#### Why transpile to Go rather than going straight to LLVM
 
-Because Glide's cheap abstractions are *very* cheap and its expensive
-ones are visibly expensive.
+Because LLVM gets you code generation and **not** a runtime.
 
-A `distinct` type is ten characters and zero runtime cost. A sum type
-is one line. A nested `fn` is free. These do not need justification.
+A language with green threads and a tracing GC needs: a garbage
+collector, a scheduler with work stealing and preemption, growable
+stacks, channel primitives, and a `defer` mechanism. `DESIGN.md` notes
+that runtime code "runs underneath the language's guarantees" — Go's
+runtime is Go with a hundred pragmas, and a no-GC unsafe dialect plus
+compiler special-casing is what writing one requires.
 
-A trait with one implementation, a generic parameter that never varies,
-a four-layer architecture — these cost indirection, binary size,
-compile time, and reader effort, and they buy flexibility you have not
-yet needed. In Java the ceremony is unavoidable so you stop noticing
-it; here it stands out.
+That is the decade. Transpiling to Go rents all of it, permanently if
+desired, and produces readable and debuggable output as a bonus.
 
-#### Why the "Go-in-Glide" section is the longest
+The costs are real: less control over layout and calling conventions, a
+Go toolchain in the build, and performance bounded by what Go's
+compiler will do with the emitted source. All acceptable for a shipping
+tier that aims at "faster than Go".
 
-Because Glide is a Go-tradition language and Go instincts mostly
-transfer — which makes the ones that do not transfer harder to spot.
+#### Why two backends at all
 
-A Rust programmer writing `.and_then().unwrap_or()` gets a compile
-error, because the methods do not exist. A Go programmer writing a
-functional-options pattern gets working code that a reviewer might
-approve.
+The tiered design dissolves the classic "fast compiler or fast code"
+dilemma. `DESIGN.md` calls sub-second dev builds non-negotiable and
+"arguably Go's most underrated property".
+
+You cannot have both from one backend. Two backends is two things to
+maintain, and it is what lets overflow, backtraces, hygiene, and debug
+info each have the right answer per tier.
+
+And the constraint that makes it safe: **only costs may differ, never
+semantics.**
+
+#### Why "breaking changes are free" is an implementation strategy
+
+It is not just a licence to change your mind. It is what makes the
+whole staged path viable.
+
+Because canonical formatting is a pure function from AST to bytes
+(Chapter 2), a mechanical rewrite produces a **zero-noise diff**. So
+`glide fix` can migrate every caller of a changed API, and a breaking
+change costs one command rather than a migration project.
+
+`DESIGN.md`: "canonical formatting is migration infrastructure."
+
+The complement is **toolchain pinning from day one** — the manifest
+pins the version, and newer toolchains build *as* the pinned one or
+refuse. Breaking changes being free makes pinning more necessary, not
+less.
+
+#### Why the interpreter survives
+
+Not out of sentiment, and not as a frozen relic: a statically-checked
+scripting language that ships as one static binary is a product, and a
+thinly served one. The nearest neighbour is Deno with TypeScript, and
+it is not close on the "one binary, nothing to install" axis.
+
+It survives *as the same language*, not an older snapshot of it,
+because the frontend is shared. That is the whole argument for the
+architecture: without it, the honest options were to freeze the
+interpreter or to accept two implementations drifting apart, and both
+are worse than sharing the one thing that decides what a program means.
+
+An earlier draft of this chapter argued the opposite — freeze at
+self-hosting, cite Lua 5.1. The Lua evidence is real but was read
+backwards: it shows *hosts pinning* a version and living happily there
+for a decade. Lua itself never stopped shipping.
 
 ---
 
 ### 4. Competing Approaches
 
-Every ecosystem has this chapter, and the interesting thing is what
-each one's list is *about*:
+**Go.** Bootstrapped from C, then self-hosted in Go 1.5 via an
+automated C-to-Go translation of the compiler. The translation
+approach — mechanical, auditable — is the same instinct as Glide's
+transpiler step.
 
-**Go's** anti-patterns are mostly about **over-abstraction** —
-interface pollution, premature generics, Java-style layering. Go's
-sparseness makes adding structure the temptation.
+**Rust.** Bootstrapped from OCaml, self-hosted early, LLVM backend
+throughout. Rust's compile times are the standing argument for
+"compile speed is a feature", and its recent Cranelift dev backend is
+the tiered design arriving a decade late.
 
-**Rust's** are mostly about **fighting the borrow checker** —
-`clone()` everywhere, `Rc<RefCell<T>>` as a habit, `unsafe` to avoid
-learning lifetimes. Rust's strictness makes escaping it the
-temptation.
+**Zig.** Bootstrapped from C++, self-hosted with its own backends plus
+LLVM, and now shipping a fast custom debug backend alongside LLVM
+release builds — the same tiered structure Glide plans.
 
-**Java's** are mostly about **ceremony** — anaemic domain models,
-`AbstractSingletonProxyFactoryBean`, getters on everything. Java's
-verbosity makes patterns-as-substitutes-for-features the temptation.
+**Nim.** Transpiles to C, which is the closest analogue to Glide's
+Go-transpiler step and demonstrates that it works long-term. Nim gets C
+portability; Glide gets Go's runtime, which is the bigger prize for a
+green-threaded GC language.
 
-**Python's** are mostly about **dynamism** — monkey-patching,
-`**kwargs` soup, mutable default arguments. Python's flexibility makes
-cleverness the temptation.
+**TypeScript.** Transpiles to JavaScript, permanently and by design,
+and is one of the most successful languages of the last decade. Strong
+evidence that "transpile to a mature host" is not a temporary
+embarrassment.
 
-**Glide's** list is mostly about **imported habits**, which is what a
-young language's list looks like. The native ones — `_ =>`, `??` as a
-silencer, `mut` creep — are all about *spending guarantees the language
-provides*, which is probably what a mature Glide list will look like
-too.
+**Kotlin.** Targets the JVM, renting the world's most tuned garbage
+collector — the same economics as Glide renting Go's runtime.
+
+**Elixir.** Targets the BEAM, renting Erlang's scheduler and
+supervision. The closest analogue to renting a *concurrency* runtime
+specifically.
 
 ---
 
-### 5. Common Mistakes (About Anti-Patterns)
+### 5. Common Mistakes
 
-**Treating this list as a style guide.** Every item here has a
-legitimate use. `_ =>` is right for genuinely open sets. `??` is right
-when the error truly does not matter. A trait with one implementation
-is right when the second is arriving next week. The anti-pattern is
-doing it *by reflex*.
+*(Reading the implementation, rather than using it.)*
 
-**Rewriting working code to remove them.** A functional-options
-pattern that works is not an emergency. Change it when you touch it.
+**Benchmarking the tree-walker and concluding something about the
+language.** It is two orders of magnitude slower than compiled Go and
+it is not the shipping tier. Generators cost a goroutine each; there is
+no compute parallelism; every field access is a map lookup.
 
-**Cargo-culting the fixes.** Applying `distinct` to every integer
-produces `.value()` noise; applying sum types to open sets makes them
-unextensible; applying "parse, don't validate" to values with no
-invariant is a wrapper around nothing.
+**Assuming every annotation is checked.** M4 is done and most are, but
+the checker reports only what it is certain of (Chapter 19): a bound is
+not enforced when its type parameter appears only inside a container,
+and the tail-value rule is enforced by the evaluator rather than the
+checker. A program that checks clean is not yet a program that is fully
+verified.
 
-**Missing that some instincts are still right.** Reference semantics
-without a borrow checker means aliasing is real (Chapter 4). Caring
-about who can mutate a shared collection is correct here.
+**Assuming the interpreter's warts are semantics.** Structs sharing on
+assignment (Chapter 12), builtin `Map`/`List` receivers where the
+compiled tier will use value semantics, defaults filling through
+function values (Chapter 7), decoded JSON keys being sorted
+(Chapter 35), and `x.0.1` failing to lex (Chapter 11) — all tier
+artifacts, all recorded as such in Appendix D.
+
+**Assuming ○ features are speculative.** They are recorded designs with
+stated rationale, not wishlist items. The distinction the book keeps
+making — ✓ runs, ○ is designed — is about *implementation status*, not
+confidence.
+
+**Expecting the interpreter to become the compiler.** It will not. It
+stays the interpreted tier — same language, same frontend, same
+accepted programs, different execution strategy. What it will *not*
+give you is a binary that runs on a machine with nothing installed, or
+compiled-tier speed.
 
 ---
 
 ### 6. Performance Considerations
 
-Most anti-patterns in this chapter cost clarity rather than speed. Four
-cost both:
+**The interpreter is a semantics prover.** Roughly two orders of
+magnitude slower than compiled Go on compute. Its costs are structural:
+an environment map allocation per call and per block, hash lookups for
+field access, a goroutine per generator, and one interpreter lock.
 
-**Functional options** allocate a closure per option and a list per
-call. A defaulted parameter allocates nothing.
+**The transpiler tier inherits Go's performance**, minus whatever the
+lowering costs. Sum types become tagged structs; `match` becomes
+switches; both are what you would write by hand. Generators are the
+open question — goroutine pairs would be slow, a state machine would
+not.
 
-**Trait objects by reflex** (`any Trait`, ○) box and dispatch
-dynamically where a generic bound would monomorphise. This is the
-biggest one — Go pays it invisibly on every interface value, and
-Glide's `any` keyword exists so you can see the bill.
+**The dev backend targets sub-second builds** and does not optimise.
+The release backend optimises and does not need to be fast.
 
-**Adapter chains used for effects** either do nothing (lazy) or add
-per-element closure dispatch where a loop would not.
+**Target envelope**, stated in `DESIGN.md`: faster than Go, usually
+competitive with Rust, never beating hand-tuned C. The last ~20% of
+performance is a recorded sacrifice — the price of no borrow checker.
 
-**Defensive copying** copies. If the copy is not buying a guarantee you
-need, it is pure cost.
-
-And one that costs *only* clarity, and is worth calling out for that
-reason: **`_ =>`** has zero runtime cost and removes a compile-time
-guarantee. It is the cheapest possible way to make a codebase worse.
+**Comptime caching is sound** because comptime is deterministic
+(Chapter 36), which is a real dev-build lever.
 
 ---
 
 ### 7. Best Practices
 
-**Ask what constraint the pattern solves.** The detection method from
-section 2, applied continuously. If the constraint is gone, so is the
-pattern.
+**Write for the compiled tier, test on the interpreter.** Do not
+restructure code to avoid blocks, closures, or generators based on
+tree-walker timings. Do use the interpreter to check that semantics are
+what you expected — that is what it is for.
 
-**Watch for these in review, in this order:**
+**Write annotations, including the bounds that are not yet enforced
+everywhere.** A bound through a container is unchecked today
+(Chapter 19); it documents the requirement now and will be enforced
+later, and because the checker under-approximates, "later" cannot break
+you.
 
-1. A new `_ =>` on a closed type.
-2. A new `mut` that is assigned in every branch.
-3. A `??` swallowing an error someone would want.
-4. A `kind`/`type`/`tag` field.
-5. A trait with one implementation.
-6. A parameter that is really ambient (`timeout`, `logger`) or really
-   a global (`db` threaded through five layers that do not use it).
-7. Interpolation inside a query.
+**Treat the interpreter's warts as temporary and avoid depending on
+them.** Do not rely on structs sharing on assignment; do not rely on
+defaults filling through function values; do not rely on decoded JSON
+key order. Appendix D lists them all with their designed fixes.
 
-**Prefer the cheap abstractions and be suspicious of the expensive
-ones.**
+**Pin the toolchain.** Breaking changes are free, which means your
+build must say which version it expects.
 
-| Cheap — use freely | Expensive — justify |
-|---|---|
-| `distinct` types | Traits with one implementation |
-| Sum types | Generic parameters that never vary |
-| Nested `fn`s | Architectural layers |
-| Block expressions | Trait objects (`any T`) |
-| Small structs | Modules per type |
+**Report the ugly corners.** The interpreter exists to find them, and
+several decisions in `DESIGN.md` are marked "forced by the interpreter"
+because someone hit a problem while implementing. That process is still
+open — the `or |e|` residue test (Chapter 20) is an explicit
+invitation.
 
-**When you catch yourself writing ceremony, look for the feature.**
-Almost every ceremonial pattern in this chapter has a one-line
-replacement, because the language was designed by cataloguing exactly
-these patterns and asking what feature would delete each one.
-
-That is, in a sense, what `DESIGN.md` *is*.
+**Read `DESIGN.md` second and `LINEAGE.md` third.** This book teaches;
+`DESIGN.md` records every decision and its cost; `LINEAGE.md` gives the
+history — who invented a feature, who adopted it, who tried living
+without it.
 
 ---
 
 ### 8. Examples
 
-**The full Go-in-Glide translation, and its fix.**
+**The bootstrap chain, drawn out:**
 
-A faithful port of a Go service, using every Go pattern:
+```
+Go toolchain (mainstream, auditable, no binary seed)
+   │
+   ├─ builds ─→  Glide interpreter + checker (Go)    ← steps 1 ✓, 2 ✓
+   │                 │
+   │                 └─ runs ─→ Glide frontend (Glide)          ← step 3 ○
+   │                                │
+   │                                └─ emits ─→ Go source
+   │                                               │
+   └───────────── builds ──────────────────────────┘
+                                                   │
+                                                   ▼
+                                        Glide compiler binary   ← step 4 ○
+                                                   │
+                                        compiles itself; its frontend
+                                        is the same one the interpreter
+                                        runs, so the tiers cannot drift
+```
 
-```glide
-// Bad — everything here is idiomatic Go and wrong here
-type ServerOption = fn(ServerConfig) -> ServerConfig
+No binary seed anywhere, and every link is a mainstream toolchain
+building readable source. That is the trusting-trust answer.
 
-fn with_timeout(d: Int) -> ServerOption { |c| ServerConfig{ timeout: d, ..c } }
-fn with_tls(b: Bool) -> ServerOption { |c| ServerConfig{ tls: b, ..c } }
+**The seed never goes away, and that is normal.** Once the frontend is
+Glide, building Glide needs a Glide — Go pins Go 1.4, Rust builds with
+the previous release, Zig ships a `zig1.wasm` blob. Glide's version is
+unusually cheap, because step 4 emits *Go source*: commit that
+generated Go and any Go toolchain rebuilds the whole chain. So "no Go"
+means none in the source of truth and none at runtime. It does not mean
+none on the build machine, which is the relationship most languages
+have with a C compiler. Removing that last link is step 5, and step 5
+is a runtime project, not a compiler one.
 
-type Job = struct {
-    kind: String            // "email" | "sms" | "push"
-    recipient: String
-    subject: String?        // only for email
-    body: String
-    sent: Bool
-    failed: Bool
-    error: String
-}
+**Why a compiler is the ideal dogfood, in miniature:**
 
-fn process(db: Db, j: Job, timeout: Int, verbose: Bool) -> Int {
-    let mut result = 0
-    if j.kind == "email" {
-        if j.subject == None {
-            result = 400
-        } else {
-            _ = send_email(j.recipient, j.subject ?? "", j.body) ?? false
-            result = 200
+```glide-run
+// An AST is a sum type.
+type Expr =
+    Num(Int)
+    | Add(Expr, Expr)
+    | Mul(Expr, Expr)
+    | Var(String)
+
+type TypeError = Unbound{ name: String }
+
+// A checker is exhaustive matching.
+fn check(e: Expr, env: Map<String, Bool>) -> Result<(), TypeError> {
+    match e {
+        Num(_)    => Ok(())
+        Add(a, b) => {
+            check(a, env)?          // `?` threads the phases
+            check(b, env)?
+            Ok(())
         }
-    } else if j.kind == "sms" {
-        _ = send_sms(j.recipient, j.body) ?? false
-        result = 200
-    } else {
-        result = 400
-    }
-    result
-}
-```
-
-Six anti-patterns, all imported, all individually defensible in Go:
-
-1. **Functional options** — three declarations and a closure per call.
-2. **`kind` string** with fields that apply to some kinds only.
-3. **`sent`/`failed`/`error`** — flag soup, eight states, three
-   meaningful.
-4. **`timeout: Int`** — a `ctx` parameter in disguise, and unitless.
-5. **`verbose: Bool`** positional — a boolean trap, and unused.
-6. **`Int` return** encoding HTTP statuses, plus a `mut` return slot,
-   plus two `?? false` silencing failures.
-
-The fix, feature by feature:
-
-```glide
-// Good
-type Recipient = distinct String
-
-type Delivery =
-    Email{ to: Recipient, subject: String, body: String }
-    | Sms{ to: Recipient, body: String }
-    | Push{ device: String, body: String }
-
-type Outcome =
-    Pending
-    | Sent{ at: Instant }
-    | Failed{ reason: String }
-
-type Job = struct {
-    pub id: JobId
-    pub delivery: Delivery
-    pub outcome: Outcome
-}
-
-type SendError =
-    Transport{ cause: Error }
-    | Rejected{ reason: String }
-
-impl SendError {
-    fn from(e: Error) -> SendError { Transport{ cause: e } }
-}
-
-fn process(db: Db, job: Job) -> Result<(), SendError> {
-    match job.delivery {
-        Email{ to, subject, body } => send_email(to, subject, body)?
-        Sms{ to, body }            => send_sms(to, body)?
-        Push{ device, body }       => send_push(device, body)?
-    }
-    Ok(())
-}
-```
-
-And the caller sets the budget rather than passing it:
-
-```glide
-scope(timeout: 5.s) {
-    process(db, job)?
-}
-```
-
-What changed:
-
-| Anti-pattern | Feature that deleted it |
-|---|---|
-| Functional options | Default parameters (7) |
-| `kind` string | Sum type (13) |
-| Fields that apply to some kinds | Payloads on variants (13) |
-| Flag soup | `Outcome` sum type (13) |
-| `timeout` parameter | `scope(timeout:)` (26) |
-| Positional bool | Named arguments (7) |
-| `Int` status return | `Result<(), SendError>` (19) |
-| `?? false` | `?` with conversion (19) |
-| `mut result` | `match` as an expression (10) |
-| Untyped `String` recipient | `distinct` (15) |
-
-Ten anti-patterns, ten features, and the second version is shorter.
-
-**The native anti-pattern, in isolation.** This one is worth its own
-example because it is the one you will commit after you are fluent:
-
-```glide
-// Bad — added six months in, when a fourth variant appeared and
-// this match would not compile
-fn describe(s: Shape) -> String {
-    match s {
-        Circle(r)  => "circle r={r}"
-        Rect(w, h) => "rect {w}x{h}"
-        _          => "shape"
+        Mul(a, b) => {
+            check(a, env)?
+            check(b, env)?
+            Ok(())
+        }
+        Var(name) => {
+            if env[name] ?? false { Ok(()) } else { Err(.Unbound{ name: name }) }
+        }
     }
 }
-```
 
-The `_` was added to make an error go away. The error was the compiler
-telling you that a new variant needed a description here, and now it
-never will again — this function will silently print `"shape"` for
-every future variant.
-
-```glide
-// Good
-fn describe(s: Shape) -> String {
-    match s {
-        Circle(r)  => "circle r={r}"
-        Rect(w, h) => "rect {w}x{h}"
-        Point      => "point"
-        Line(a, b) => "line {a}..{b}"
-    }
+fn main() {
+    let env = ["x": true]
+    let good = Expr.Add(.Num(1), .Var("x"))
+    let bad  = Expr.Mul(.Var("y"), .Num(2))
+    println("{check(good, env):?}")
+    println("{check(bad, env):?}")
 }
 ```
 
-Four arms, and adding a fifth variant breaks this function — which is
-the entire reason the type is a sum type.
+```
+Ok(())
+Err(Unbound{ name: "y" })
+```
+
+Twenty lines, and it demonstrates the claim: the AST is a sum type, the
+checker is a `match` the compiler verifies is exhaustive, and `?`
+threads the error path without a single `if err != nil`. Add a variant
+to `Expr` and this function stops compiling, with the compiler naming
+the gap.
+
+That is the workload the ML family was designed for, and it is why
+`DESIGN.md` predicts the Glide-written frontend will be nicer code than
+the Go interpreter running it.
+
+**The tier table, as a program would see it:**
+
+```glide
+fn main() {
+    let big = 9223372036854775807
+    println(big + 1)
+}
+```
+
+```
+# dev tier (the interpreter, today)
+error: line 3: Int overflow: 9223372036854775807 + 1 (use wrapping_add for modular arithmetic)
+```
+
+```
+# release tier (○)
+-9223372036854775808
+```
+
+Same program, different tier, different behaviour — deliberately, and
+only for *cost* behaviours. A program's *meaning* is identical across
+tiers, which is why loop back-edge cancellation checks were rejected.
 
 ---
 
@@ -614,53 +670,85 @@ the entire reason the type is a sum type.
 
 **Summary**
 
-- Most Glide anti-patterns are **correct code from another language**,
-  which is what makes them hard to see: they look good by a standard
-  you learned honestly.
-- **The detection method:** ask what constraint the pattern solves, and
-  whether that constraint exists here. Functional options solve "no
-  default parameters"; `kind` fields solve "no sum types"; `ctx`
-  threading solves "no structured cancellation". None of those
-  constraints exists.
-- **Go-in-Glide** is the longest list, because Go instincts mostly
-  transfer and the exceptions are therefore camouflaged: functional
-  options, `kind` fields, flag soup, sentinel returns, `ctx`
-  parameters, shutdown ceremony, globals.
-- **Rust-in-Glide:** combinator chains, over-wrapping with `distinct`,
-  defensive copying, expecting `?` on `Option`, trait objects by
-  reflex, lifetimes-thinking.
-- **Java-in-Glide:** interface-per-class, getter ceremony, inheritance
-  reflexes, exception-shaped handling, layer cake.
-- **Native anti-patterns** — the ones you will commit once fluent —
-  are all about **spending guarantees**: `_ =>` on closed types, `??`
-  as an error silencer, `mut` creep, generator side effects,
-  scope-per-call, channels for single values.
-- **`_ =>` is the worst**, because it silently removes the guarantee
-  that makes sum types worth having, and it has zero runtime cost. It
-  is the cheapest possible way to make a codebase worse.
-- **Not every imported instinct is wrong.** Reference semantics without
-  a borrow checker means aliasing is real, so caring about who can
-  mutate a shared collection is correct here.
-- The language cannot prevent most of these; it makes the good version
-  cheaper. **Culture follows cost.**
+- **Two mountains wearing one name.** The compiler is a hill with a
+  shortcut; the runtime is the actual decade, deferred indefinitely by
+  the shortcut.
+- **Five steps:** (1) Go tree-walking interpreter ✓, (2) the checker, in
+  Go ✓ (M4), (3) the frontend rewritten in Glide and run on the
+  interpreter — **current**, (4) a Glide→Go transpiler that compiles
+  itself, (5) someday, LLVM plus a native runtime.
+- **One frontend, two backends.** Lexer, parser and checker are a single
+  shared implementation; the tiers differ in how they execute a checked
+  program, never in what they accept. "Runs interpreted, fails compiled"
+  becomes unreachable by construction. Precedent: OCaml since the early
+  90s, Rust's Miri, Roslyn.
+- Milestones M1–M3 were defined by **a program that must run** —
+  `wordfreq`, `Tree`, the `notes` service — the dogfood rule applied to
+  the implementation. M4 is the first defined by a *property* instead:
+  every annotation is checked, and no remaining case computes the wrong
+  value. It is done, in three parts (M4a representation, M4b the checker
+  core, M4c the rules).
+- The interpreter is a **tree-walker** because its first job was to
+  prove semantics cheaply. Several `DESIGN.md` decisions are marked
+  *"forced by the interpreter; ratified"*.
+- It **was** dynamically checked through M3, on the argument that a Go
+  checker would be thrown-away work. Reversed: the interpreter ships rather than
+  retiring, so the work is not thrown away — and the original plan would
+  have written a checker in the one tier that checks nothing. What
+  transfers to Glide is the design and the conformance corpus, not the
+  Go code.
+- **The transpiler is the clever part.** Glide's runtime model was
+  Go's from day one, so it lowers nearly 1:1 and prepays the hellish
+  parts: GC, scheduler, cross-compilation, static binaries,
+  debuggability. It also gives an auditable bootstrap chain with no
+  binary seed.
+- **The known wrinkle: generators.** Sum types → tagged structs and
+  `match` → switches are mechanical; generators need goroutine pairs
+  (heavy) or CPS (real work), and are flagged "prototype before
+  depending on the transpiler".
+- **Compilers are the best-case dogfood**: ASTs are sum types, a
+  checker is exhaustive matching, `?` threads the phases. The prediction
+  is that the Glide frontend will be nicer code than the Go interpreter
+  running it — a testable claim about the language's central bet, and
+  the reason the rewrite stays on the roadmap. It moved *after* the
+  checker because the claim is only testable once the features it names
+  are actually switched on.
+- **Two tiers** let overflow, backtraces, hygiene, and debug info each
+  have the right answer. **Costs may differ; semantics may not** —
+  which is why loop back-edge cancellation checks were rejected.
+- **Debugging is staged**: a DAP server in the interpreter (a
+  tree-walker is a debugger that has not been asked), `//line`
+  directives plus preserved names in the transpiler era so delve works
+  at `.gld` granularity, full DWARF natively. Plus the scope tree
+  instead of a flat goroutine list, and deterministic-seed replay for
+  races.
+- **The interpreter survives as a shipping tier**, tracking the language
+  rather than freezing — a statically-checked scripting language in one
+  static binary, and the embedding library, with injectable stdlib shims
+  giving capability-style sandboxing. The earlier freeze plan was
+  dropped once the shared frontend delivered its goal outright.
+- **Breaking changes are free** *because* canonical formatting makes
+  `glide fix` produce zero-noise diffs. Toolchain pinning is the
+  complement.
 
 **Exercises**
 
-1. **Audit an imported pattern.** Take a design pattern you use
-   reflexively — options, builders, repositories, factories, DI
-   containers — and write down the language constraint it exists to
-   work around. Then check whether Glide has that constraint. Roughly
-   half of the Gang of Four catalogue is missing-language-feature
-   compensation, and it is instructive to work out which half.
+1. **Test the central claim.** Write a small interpreter or type
+   checker in Glide — an expression language with variables and let
+   bindings is enough. Then write the same thing in Go. Count the lines
+   spent on error handling and on dispatching over node kinds. The
+   claim is that the Glide version is nicer; check it.
 
-2. **Find your `_ =>` arms.** In a codebase with sum types, tagged
-   unions, or sealed classes, find every default/wildcard branch. For
-   each, decide whether "anything else" is genuinely the meaning or
-   whether it was added to silence an error. Then add a variant and see
-   which ones silently do the wrong thing.
+2. **Find a "forced by the interpreter" decision.** Read `DESIGN.md`
+   for the phrase. Pick one and work out what the implementer must have
+   hit. Then decide whether the resulting rule is a good language
+   design or merely an implementation convenience that got ratified —
+   the leading-dot continuation rule is the most interesting case.
 
-3. **Grade the ten-anti-pattern example.** Take the "Bad" version from
-   section 8 and, without looking at the fix, list every problem you
-   can find and the feature that solves it. Then compare with the
-   table. Anything you missed is a habit you still have; anything you
-   found that is not in the table is worth arguing about.
+3. **Design the generator lowering.** Take the three-line tree-walk
+   generator from Chapter 25 and write out what a Go state machine
+   implementing it would look like: what fields the state struct holds,
+   how many states there are, and how `yield from` recursion is
+   flattened. Then estimate whether goroutine pairs would be acceptable
+   as a first transpiler cut. This is a real open question on the
+   project's de-risk list, and your answer is worth as much as anyone's.

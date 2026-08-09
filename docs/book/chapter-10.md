@@ -15,9 +15,11 @@ Whatever syntax builds a value, the same syntax takes it apart. That is
 the whole mental model, and once you have it, every pattern form in the
 language follows without memorisation.
 
-Everything here is ✓, with one important caveat: **exhaustiveness is
-checked dynamically today**, not at compile time. The section marked
-Under the Hood explains what that means in practice.
+Everything here is ✓, including **static exhaustiveness checking**: a
+`match` that forgets a case is a compile error naming the case, not a
+runtime surprise. That landed in M4c and it changes how the chapter
+reads — see Under the Hood for exactly how far the analysis goes and
+where it deliberately stops.
 
 ---
 
@@ -82,8 +84,18 @@ fn area(s: Shape) -> Float {
 }
 ```
 
-Arms are **line-separated**, not comma-separated. A comma inside an arm
-means something else (multiple values — below).
+Arms are separated by a **newline or a comma**. The newline form is the
+one you will write most; the comma exists so a short match fits on one
+line, which is the shape the newline rule would otherwise make
+unwritable:
+
+```glide
+let n = match c { Red => 1, Green => 2, Blue => 3 }
+```
+
+A trailing comma is allowed. A comma *inside* an arm's pattern still
+means multiple values (below) — the two never collide, because one
+follows a pattern and the other follows a body.
 
 Three properties make `match` more than a `switch`:
 
@@ -96,8 +108,8 @@ possibility of testing for `Circle` and then reading a `Rect`'s fields.
 lowercase `r` *binds*. That is why Chapter 3 said case is grammar
 rather than style.
 
-**Exhaustiveness is checked.** Miss a variant and you get an error.
-Today it is at runtime:
+**Exhaustiveness is checked, at compile time.** Miss a variant and the
+program does not run:
 
 ```glide
 type Color = Red | Green | Blue
@@ -111,8 +123,13 @@ fn f(c: Color) -> String {
 ```
 
 ```
-error: line 2: match is not exhaustive: Blue not handled
+app.gld:4:5: match is not exhaustive: Blue not handled
+ 4 |     match c {
+   |     ^^^^^
 ```
+
+Every non-exhaustive match in the file is reported in one pass, so
+adding a variant hands you the complete list of places to visit.
 
 #### Every pattern form
 
@@ -364,24 +381,54 @@ happy path unindented.
 
 ### 2. Under the Hood
 
-#### Exhaustiveness today versus tomorrow
+#### How far exhaustiveness goes
 
-Static exhaustiveness checking is the headline benefit of sum types and
-it is **not implemented yet**. Today the interpreter checks at match
-time and errors if nothing matched, with a message that says so
-explicitly.
+Static exhaustiveness checking is the headline benefit of sum types,
+and it runs:
 
-The difference matters enormously in practice. Static checking means
-that when you *add* a variant, every `match` in the codebase that does
-not handle it becomes a compile error, and the compiler hands you the
-complete list of places the change touches. Dynamic checking means you
-find out when that code path runs.
+```glide
+type Shape = Circle(Float) | Square(Float) | Tri(Float, Float)
 
-So: write your matches as though the checker exists, because it will,
-and because a `_ =>` arm added to silence today's runtime error will
-silently swallow tomorrow's compile error. `DESIGN.md` is explicit
-that a `_ =>` arm is legal but **spends the guarantee** — write it only
-when "anything else" is genuinely the meaning.
+fn area(s: Shape) -> Float {
+    match s {
+        Circle(r) => 3.141592653589793 * r * r
+        Square(w) => w * w
+    }
+}
+```
+
+```
+app.gld:4:5: match is not exhaustive: Tri not handled
+ 4 |     match s {
+   |     ^^^^^
+```
+
+Four things are worth knowing about the analysis.
+
+**It covers sum types, `Option`, `Result` and `Bool`** — everything
+whose values can be enumerated. `Int`, `String` and structs cannot be,
+so they need a `_` arm, and forgetting it is still a runtime
+fall-through.
+
+**Coverage recurses one constructor deep.** `Err(A)` without `Err(B)`
+reports `Err(B) not handled` rather than treating `Err(_)` as one case.
+
+**An arm that cannot run is also an error** — after a catch-all, or a
+duplicate constructor. A dead arm is nearly always a bug you meant to
+be live.
+
+**A guarded arm covers nothing.** `Circle(r) if r > 0.0 =>` may not
+fire, so it does not discharge the `Circle` case. That is the price of
+guards being opaque to the analysis, and the alternative is an SMT
+solver — see *Why guards are opaque* below.
+
+Anything the analysis cannot judge passes in silence, and the runtime
+keeps its own fall-through check as an assertion. That is the
+checker-wide rule from Chapter 19: report only what is certain.
+
+A `_ =>` arm is legal but **spends the guarantee** — it makes every
+future variant handled, silently. Write it only when "anything else" is
+genuinely the meaning.
 
 #### How patterns are compiled ○
 
@@ -421,11 +468,18 @@ That closed three *silent wrong answers*: a present-but-`None` map
 entry read as absent, a `None` sent over a channel ended the stream,
 and `Option<Option<T>>` collapsed a level.
 
-The consequence: **`Option<Option<T>>` is unrepresentable today.** A
-`Some(None)` collapses to `None`. This shows up in one visible place —
-a channel that sends `None` reads as end-of-stream (Chapter 27) — and
-`glide/DESIGN-DECISIONS.md` records it as a tier limitation the checker
-era must fix by boxing.
+Consequences, all of them the ones you want:
+
+- **`Option<Option<T>>` is representable**, and `Some(None)` differs
+  from `None`. Spell it long-form (`Option<Int?>`); `T??` cannot lex.
+- **A present-but-`None` map entry reads as present**, not absent.
+- **A `None` sent over a channel is an ordinary element**
+  (Chapter 28), not end-of-stream.
+- `==` reaches inside the box, so `Some(1) == Some(1)`.
+
+The implicit `T -> T?` promotion is unchanged, because the checker
+knows where the coercion happens and the evaluator boxes exactly there
+— the load-bearing checker of Chapter 19.
 
 #### Struct-pattern strictness is a design lever
 
@@ -846,7 +900,7 @@ predicates.
 
 **A tiny expression evaluator — the canonical demonstration:**
 
-```glide
+```glide-run
 type Expr =
     Num(Int)
     | Add(Expr, Expr)
@@ -1022,13 +1076,17 @@ literal and binding what it needs. The equivalent in Go is a nested
   memorising.
 - Patterns appear in `let`, `let … else`, `if let`, `for` headers, and
   `match` arms.
-- `match` arms are **line-separated**, bind as they match, and an arm
-  body is a **single expression** (use a block for several statements).
+- `match` arms are separated by a **newline or a comma** — the comma is
+  optional, including a trailing one, and it is what makes a one-line
+  `match x { A => 1, B => 2 }` writable at all. Arms bind as they match,
+  and an arm body is a **single expression** (use a block for several
+  statements; `return` is a statement, so it needs one).
 - Case is grammar: capitalised patterns test, lowercase patterns bind.
-- **Exhaustiveness** is the payoff — adding a variant should break every
-  match that does not handle it. It is checked dynamically today and
-  statically in the checker era. Avoid `_ =>` on closed types; it
-  spends the guarantee.
+- **Exhaustiveness** is the payoff — adding a variant breaks every match
+  that does not handle it, **statically** ✓, in one pass, naming the
+  case. Coverage recurses one constructor deep, an unreachable arm is
+  an error too, and a guarded arm covers nothing. Avoid `_ =>` on closed
+  types; it spends the guarantee.
 - **List patterns are exact** unless they contain `..`. **Struct
   patterns must mention every field** unless they end with `..`. Both
   rules exist so that adding data breaks the patterns that claimed to

@@ -11,10 +11,11 @@ methods**. That combination is Swift's, and it fixes the two things
 Go's interfaces get wrong without adopting Rust's forwarding
 boilerplate.
 
-The chapter is mostly ✓ — traits, default methods, and `impl Trait for
-Type` all run. Trait *checking* (verifying that a type actually
-provides what it claims), the orphan rule, and `any Trait` boxing are
-○.
+The chapter is ✓ — traits, default methods, `impl Trait for Type`, and
+**conformance checking** all run: a type that declares a trait it does
+not satisfy is a compile error at the `impl` line, naming the method.
+The orphan rule, trait composition (`trait A: B + C`) and `any Trait`
+boxing are ○.
 
 ---
 
@@ -129,7 +130,7 @@ Swift got it right first, and Glide takes Swift's answer.
 The most common trait interaction you will hit early: a type with an
 `iter()` method works in `for … in`:
 
-```glide
+```glide-run
 type Bag = struct { items: List<Int> }
 
 impl Bag {
@@ -155,7 +156,7 @@ fn main() {
 [2, 4, 6]
 ```
 
-`for x in b` calls `b.iter()`. Chapter 23 covers the protocol; the
+`for x in b` calls `b.iter()`. Chapter 24 covers the protocol; the
 point here is that providing one method is what makes a user type
 participate in the language's iteration machinery.
 
@@ -379,7 +380,7 @@ the expensive one.
 `any` / `Object` / `interface{}` is the escape hatch that reflection
 crawls through. In Go, `interface{}` plus `reflect` is how JSON
 encoding, ORMs, and dependency-injection frameworks work — and Glide
-has banned runtime reflection (Chapter 34), so a top type would be a
+has banned runtime reflection (Chapter 36), so a top type would be a
 door to nothing useful and a way to lose type information.
 
 The needs it serves are covered: heterogeneous-but-known is a sum type;
@@ -444,9 +445,24 @@ Python has taken is the argument for declaring things.
 
 ### 5. Common Mistakes
 
-**Expecting conformance to be verified.** It is not, yet. A missing
-required method is a runtime "no method" error at the call, not a
-compile error at the `impl`. Write the methods.
+**Declaring a trait you have not satisfied.** This is a compile error
+at the `impl` line, not a runtime surprise at the call:
+
+```glide
+trait Greeter { fn greet(self) -> String }
+type Robot = struct { id: Int }
+impl Greeter for Robot { }
+```
+
+```
+app.gld:3:1: Robot does not satisfy Greeter: missing greet() -> String
+ 3 | impl Greeter for Robot { }
+   | ^^^^^^^^^^^^
+```
+
+A wrong signature, a wrong receiver kind (`self` versus `mut self`) and
+a wrong generic argument are all reported the same way. So is an `impl`
+for a trait nobody declared.
 
 **Forgetting that `impl Trait for Type` is what grants defaults.** A
 type with matching methods but no `impl` block does *not* get the
@@ -679,7 +695,7 @@ the trait and **no implementor changed**. In Go this is impossible.
 
 **A user type that participates in iteration:**
 
-```glide
+```glide-run
 type Bag = struct { items: List<Int> }
 
 impl Bag {
@@ -716,13 +732,13 @@ fn main() {
 2
 ```
 
-`iter()` is a generator (Chapter 24) — the body contains `yield`, so
+`iter()` is a generator (Chapter 25) — the body contains `yield`, so
 calling it returns an `Iterator`. One method makes `Bag` a
 first-class participant in the whole iteration ecosystem.
 
 **Consumer-defined traits, the architectural pattern:**
 
-```glide
+```glide-run
 // --- Your module defines the abstraction it needs ---
 type Note = struct { pub id: Int, pub title: String }
 
@@ -770,14 +786,13 @@ fn main() {
 
 ```
 2 notes: alpha, beta
-Note{ id: 1, title: "alpha" }
+Some(Note{ id: 1, title: "alpha" })
 None
 ```
 
-That second line is the `Option` unboxing wart from Chapter 14 showing
-through: `Some(v)` is the identity function in the interpreter, so
-Debug renders the inner value with no `Some(…)` wrapper. Once the
-checker boxes Options, it will print `Some(Note{ … })`.
+`Option` is boxed (Chapter 14), so a found note renders as
+`Some(Note{ … })` and an absent one as `None` — the two are distinct
+values, not one value and its absence.
 
 `count` and `titles` were written once in the trait. A future
 `SqlStore` implements `get` and `all` and gets both for free — and can

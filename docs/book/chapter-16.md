@@ -74,20 +74,34 @@ fn main() {
 error: line 8: cannot mutate through immutable binding "c" (declare it with `let mut`)
 ```
 
-This is enforced today — dynamically, like the other rules the checker
-will eventually make static. It closes the loophole that would otherwise make immutability a lie.
-Without it, `let` would mean "you cannot reassign this name, but anyone
-can gut the object through a method" — which is what `final` means in
-Java and `const` means for a JavaScript object.
+This is checked statically. It closes the loophole that would otherwise
+make immutability a lie: without it, `let` would mean "you cannot
+reassign this name, but anyone can gut the object through a method" —
+which is what `final` means in Java and `const` means for a JavaScript
+object.
 
 Mutability is **transitive through paths**: `a.b.c` is assignable only
 if `a` is `mut`.
 
-**Enforcement gap:** the interpreter does not currently enforce
-receiver-mut on *builtin* methods, so `xs.push(3)` works through a
-`let` binding today. `glide/DESIGN-DECISIONS.md` records this as the
-checker's job, noted so nobody mistakes it for a semantic decision.
-User-defined `mut self` methods *are* checked.
+The rule covers **builtin methods too**, which was an enforcement gap
+until the checker landed:
+
+```glide
+fn main() {
+    let m = ["a": 1]
+    m["b"] = 2
+}
+```
+
+```
+app.gld:3:6: cannot mutate through immutable binding "m" (declare it with `let mut`)
+ 3 |     m["b"] = 2
+   |      ^
+```
+
+`xs.push(v)`, `xs.sort_by(f)`, `xs.pop()`, `m.remove(k)` and index
+assignment all require a `mut` path, exactly as a user-defined
+`mut self` method does.
 
 #### Methods on any type
 
@@ -531,7 +545,7 @@ readability win for a large type.
 
 **A complete small type, showing all three method shapes:**
 
-```glide
+```glide-run
 type Stack = struct {
     items: List<Int>
 }
@@ -598,7 +612,7 @@ alone, which the reader can tell from the signature alone: it takes
 
 **A sum type with behaviour:**
 
-```glide
+```glide-run
 type Temp = Celsius(Float) | Fahrenheit(Float) | Kelvin(Float)
 
 impl Temp {
@@ -698,8 +712,11 @@ know about.
 - `impl` works on structs, sum types, and `distinct` types alike.
 - **There is no inheritance and no embedding.** Composition holds data;
   traits (with default methods) hold shared behaviour.
-- ○: method values (`x.method` unapplied). Enforcement gap: builtin
-  methods do not check receiver-mut yet.
+- **Receiver mutability is checked on builtins too** ✓ — `xs.push(3)`
+  through a `let` is a compile error naming the binding, not just a
+  convention for user types.
+- ○: method values (`x.method` unapplied), and free `mut` parameters
+  with their call-site marker.
 
 **Exercises**
 

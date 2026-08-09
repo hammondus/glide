@@ -117,7 +117,7 @@ order.
 
 #### Default parameters
 
-```glide
+```glide-run
 fn connect(host: String, port: Int = 5432, tls: Bool = true) -> String {
     "{host}:{port} tls={tls}"
 }
@@ -134,7 +134,7 @@ db.local:5432 tls=true
 Defaults are **real expressions**, evaluated **per call**, left to
 right, and may reference earlier parameters:
 
-```glide
+```glide-run
 fn width(s: String, w: Int = s.len()) -> Int { w }
 
 fn main() {
@@ -317,7 +317,7 @@ This keeps "one function type" true.
 **M2 gap:** the interpreter currently fills defaults through function
 values too:
 
-```glide
+```glide-run
 fn connect(host: String, port: Int = 5432) -> String { "{host}:{port}" }
 
 fn main() {
@@ -464,7 +464,7 @@ A nested `fn` has *provable* single ownership — scope is information.
 arguments, no overloading, variadics, no nested functions, closures
 for everything. The multiple-return-values design is the big
 divergence: Go returns `(T, error)` as a pair, and Glide returns
-`Result<T, E>` as one value that cannot hold both. Chapter 19 argues
+`Result<T, E>` as one value that cannot hold both. Chapter 20 argues
 that at length.
 
 **Rust.** Very close: `fn`, explicit signatures, tail expressions,
@@ -692,7 +692,7 @@ functions or a required parameter.
 
 **A small module showing the whole surface:**
 
-```glide
+```glide-run
 // retry.gld — a retry helper, built up from nothing.
 
 type Fail = Transient{ n: Int } | GaveUp
@@ -775,11 +775,11 @@ connect("db.local", tls: false)
 The bad version is thirty lines of machinery, allocates a closure and a
 list per call, and produces a worse call site. It exists in Go because
 Go left no alternative. Transplanting it here is the archetypal
-"Go-in-Glide" antipattern (Chapter 37).
+"Go-in-Glide" antipattern (Chapter 39).
 
 **Mutual recursion with nested functions:**
 
-```glide
+```glide-run
 fn is_even(n: Int) -> Bool {
     fn even(x: Int) -> Bool { if x == 0 { true }  else { odd(x - 1) } }
     fn odd(x: Int)  -> Bool { if x == 0 { false } else { even(x - 1) } }

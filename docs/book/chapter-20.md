@@ -1,552 +1,964 @@
-# Chapter 20: Panics
+# Chapter 20: Errors as Values
 
-A **panic** is what happens when a program discovers it is wrong.
+Glide's error philosophy is Go's — errors are ordinary values, visible
+in signatures, with no invisible control flow — with the boilerplate
+removed and the failure modes made enumerable.
 
-Not "the file was missing" — that is an error, and Chapter 19 covered
-it. A panic is for indexing past the end of a list, dividing `MinInt`
-by `-1`, or violating an invariant your own type promised to maintain.
-Things a correct program never does.
+`DESIGN.md` puts the diagnosis crisply: **Go and Rust each shipped half
+the answer.** Rust gave `Result` and no default error type, and spent
+eight years watching its ecosystem churn through `error-chain` →
+`failure` → `anyhow`/`thiserror`. Go gave only the dynamic half, so
+failure modes can never be enumerated and `errors.Is` is pattern
+matching rebuilt from pointer comparisons.
 
-Glide's position is short and unusually firm: **panics kill the task,
-they are for bugs only, and there is no `recover`. Permanently.**
+Glide ships both halves in the standard library on day one.
 
-Everything here is ✓, with the caveat that "kills the task" is
-currently "kills the program" outside a scope.
+All of this chapter is ✓ except error return traces. The dynamic
+`Error` type is constructible, boxed, and carries four methods —
+`message`, `cause`, `context` and `find`. `find` takes the type **as a
+value** (`e.find(ConfigError)`), superseding the `find<T>()` spelling
+`DESIGN.md` originally sketched; Glide has no turbofish and this was
+not the feature to invent one for.
 
 ---
 
 ### 1. Basic Usage
 
-#### What panics
+#### `Result<T, E>`
 
-You do not usually write a panic. You encounter one:
+A two-variant sum type: `Ok(T)` carrying a success, or `Err(E)`
+carrying a failure.
 
 ```glide
-fn main() {
-    let xs = [1, 2, 3]
-    println(xs[7])
+fn read_config(path: String) -> Result<Config, ConfigError>
+```
+
+A function that can fail **says so in its return type**. There are no
+exceptions. Nothing propagates invisibly. Every failure path is in a
+signature.
+
+Coming from Go, this is the `(Config, error)` return pair fused into
+one value that cannot hold both. Go hands you both slots and trusts you
+to check `err` before touching the config; nothing stops the code that
+forgets. A `Result` makes the either-or physical: there is no config to
+touch until you have gone through the check.
+
+#### `?` — propagate
+
+```glide
+let text = fs.read_string(path)?
+```
+
+On success, the expression produces the inner value and execution
+continues. On failure, the function **returns immediately**, handing
+the error to its caller.
+
+It is Go's `if err != nil { return err }` in one character. The early
+exit is still visible — on the line where it happens — but it no longer
+dominates the page:
+
+```go
+text, err := os.ReadFile(path)
+if err != nil {
+    return fmt.Errorf("reading input: %w", err)
+}
+```
+
+```glide
+let text = fs.read_string(path).context("reading input")?
+```
+
+A skim of any function shows every line that can exit early: look for
+`?`.
+
+#### `.context(…)` — add a breadcrumb
+
+```glide
+fs.read_string(path).context("loading config")?
+```
+
+Wraps an `Err` with a message on its way out and passes `Ok` through
+untouched. The chain renders as a trail:
+
+```glide
+fn load(p: String) -> Result<String, Error> {
+    fs.read_string(p).context("loading config")?
+}
+
+fn outer() -> Result<String, Error> {
+    load("/nope").context("startup")
 }
 ```
 
 ```
-error: line 3: list index 7 out of range (len 3)
+startup: loading config: open /nope: no such file or directory
+```
+
+A deep failure surfaces with its route attached. Compare Go's `%w`,
+which gets these semantics right with the worst possible syntax —
+wrapping controlled by a format verb.
+
+#### Sum-type errors
+
+Because errors are ordinary values, an error type is an ordinary sum
+type — and this is sum types' best use case:
+
+```glide
+type AppError =
+    NotFound{ path: String }
+    | Parse{ line: Int, why: String }
+    | Io{ cause: Error }
+```
+
+The signature now documents exactly what can go wrong, and `match` is
+exhaustive:
+
+```glide
+fn describe(r: Result<Int, AppError>) -> String {
+    match r {
+        Ok(n)                   => "port {n}"
+        Err(NotFound{ path })   => "no file {path}"
+        Err(Parse{ line, why }) => "line {line}: {why}"
+        Err(Io{ cause })        => "io: {cause}"
+    }
+}
+```
+
+No sentinel error values. No `errors.Is` or `errors.As`. Adding a
+variant breaks every caller that pattern-matches, at compile time.
+
+#### `?` converts error types
+
+This is the piece that makes sum-type errors practical.
+
+When `?` propagates an error out of a function whose declared error
+type is `E`, and the error is not already an `E`, the compiler calls
+`E.from(err)` to convert it:
+
+```glide
+impl AppError {
+    fn from(e: Error) -> AppError { Io{ cause: e } }
+}
+
+fn read_config(path: String) -> Result<Int, AppError> {
+    let text = fs.read_string(path)?        // Error → AppError, automatically
+    let Some(n) = text.trim().parse_int() else {
+        return Err(.Parse{ line: 1, why: "not a number" })
+    }
+    Ok(n)
+}
+```
+
+```glide
+println(describe(read_config("/nonexistent")))
+```
+
+```
+io: open /nonexistent: no such file or directory
+```
+
+`fs.read_string` returns `Result<String, Error>`; `read_config` returns
+`Result<Int, AppError>`; the `?` bridged them by calling
+`AppError.from`.
+
+Rules: declare `fn from(e: …) -> E` in `impl E`. If there is no `from`,
+the error propagates untouched. **Closures never convert**, because
+they have no declared return type.
+
+This is **the one implicit conversion in the language**, and it fires
+only at `?`.
+
+#### The dynamic `Error`
+
+`Error` is the type application code returns. **Anything is assignable
+to it**, which is what makes this need no ceremony:
+
+```glide-run
+fn port(raw: String) -> Result<Int, Error> {
+    let Some(n) = raw.parse_int() else {
+        return Err("{raw} is not a number")
+    }
+    if n < 1 || n > 65535 {
+        return Err("port {n} out of range")
+    }
+    Ok(n)
+}
+
+fn main() {
+    println(port("http"))
+    println(port("70000"))
+    println(port("8080"))
+}
+```
+
+```
+Err(http is not a number)
+Err(port 70000 out of range)
+Ok(8080)
+```
+
+That is the *type*-level erasure: no `from`, no wrapper type, no
+conversion. It is also why `?` propagates any callee's error into an
+`Error` slot for free.
+
+At the **value** level, `Error` is a real boxed value with four
+methods:
+
+| Method | Signature | Notes |
+|---|---|---|
+| `message()` | `-> String` | **this link only** |
+| `cause()` | `-> Error?` | the next link, `None` at the end |
+| `context(msg)` | `(String) -> Error` | a new Error wrapping this one |
+| `find(SomeType)` | `(type) -> SomeType?` | walks the **whole** chain for a concrete typed error |
+
+```glide-run
+type PortErr = NotANumber(String) | OutOfRange(Int)
+
+fn port(raw: String) -> Result<Int, PortErr> {
+    let Some(n) = raw.parse_int() else { return Err(.NotANumber(raw)) }
+    if n < 1 || n > 65535 { return Err(.OutOfRange(n)) }
+    Ok(n)
+}
+
+fn app(raw: String) -> Result<Int, Error> {
+    port(raw).context("reading $PORT")
+}
+
+fn main() {
+    match app("http") {
+        Ok(n)  => println("port {n}")
+        Err(e) => {
+            println("{e}")                  // the whole chain
+            println(e.message())            // this link only
+            println(e.cause())              // the next link
+            match e.find(PortErr) {
+                Some(NotANumber(s)) => println("not a number: {s}")
+                Some(OutOfRange(n)) => println("out of range: {n}")
+                None                => println("something else")
+            }
+        }
+    }
+}
+```
+
+```
+reading $PORT: NotANumber("http")
+reading $PORT
+Some(NotANumber("http"))
+not a number: http
+```
+
+Three things to take from that.
+
+**`message()` is this link only, and `"{e}"` is the whole chain.** A
+`message()` that returned the chain would leave no way to get just this
+one; interpolation already renders the trail.
+
+**`find` walks the whole cause chain** and takes the type as an
+ordinary value, because `e.find<T>()` cannot be parsed — it reads as a
+field access followed by `<`. Only *declared* types are accepted;
+`find(String)` would be a backdoor to a message `message()` already
+gives properly.
+
+**A variant pattern cannot match an `Error`.** The concrete error is
+inside the box, so this is a compile error rather than a silently dead
+arm:
+
+```
+app.gld:14:13: NotANumber cannot be matched against an Error: it is the
+dynamic error type, so the concrete error is inside it — recover it
+with e.find(PortErr)
+```
+
+Needing `find` deep in application code is a smell that a boundary
+should have been typed. Type your library's failure modes as a sum
+type and let `?` box them at the application edge.
+
+#### `??` — fall back, discarding the error
+
+```glide
+println(read_config("/nonexistent") ?? -1)      // -1
+```
+
+`??` on a `Result` unwraps `Ok` and takes the default on `Err`. The
+error is discarded — **deliberately**. Use it when you genuinely do not
+care why.
+
+#### `match` — handle in place
+
+When you want to inspect the error rather than propagate or default:
+
+```glide
+match load_config(path) {
+    Ok(c)  => c
+    Err(e) => {
+        eprintln("config failed ({e}); using defaults")
+        Config.default()
+    }
+}
+```
+
+#### `?` in `main`
+
+```glide
+fn main() -> Result<(), Error> {
+    let _ = fs.read_string("/nope")?
+    Ok(())
+}
+```
+
+```
+error: open /nope: no such file or directory
 $ echo $?
 1
 ```
 
-The current panic sources:
+The runtime turns `Ok(())` into exit code 0 and an `Err` into the error
+on stderr plus exit 1. Without this, every CLI would open with a
+ceremonial `run()` wrapper.
 
-| Cause | Example |
-|---|---|
-| List index out of range | `xs[7]` on a 3-element list |
-| Integer overflow (dev tier) | `MaxInt + 1` |
-| Division by zero | `n / 0` |
-| `MinInt / -1`, `-MinInt` | overflow with no representable result |
-| No matching `match` arm | non-exhaustive match on a sum type |
-| Unwrapping a non-matching `if let` | a value that is neither `None` nor the pattern |
-| A method that does not exist | dynamic dispatch failure (checker-era gone) |
-| `String.split("")` | empty separator |
-| `repeat(k)` with `k < 0` | |
-| `send` on a closed channel | a sender coordination bug (Chapter 27) |
+#### The two error styles
 
-Note what is *not* on that list: file-not-found, parse failures,
-network timeouts, missing map keys. Those are `Result` and `Option`.
+`DESIGN.md` draws the line explicitly:
 
-#### Panics are not caught
+- **Libraries define sum-type errors.** The signature documents what
+  can go wrong; callers can `match` and behave differently per case.
+- **Applications use the stdlib dynamic `Error`.** It holds any
+  concrete error plus a context chain. `fn run() -> Result<(), Error>`
+  and everything flows.
 
-There is no `try`, no `catch`, and no `recover`. A panic unwinds and
-that is the end of the discussion for ordinary code.
+`?`-conversion is what lets the two coexist: a library's `ApiError`
+converts into an application's `Error` for free.
 
-What *does* run on the way out: `defer` blocks and `errdefer` blocks
-(Chapter 21). A panicking task must release its locks and close its
-files as the failure propagates.
+#### Panics are not errors
 
-#### Panics and tasks
-
-The designed rule is: **a panic kills the task, not the process.**
-Structured concurrency gives it a principled boundary — a panicking
-task fails its scope, which cancels siblings and re-panics at the scope
-exit (Chapter 25).
-
-Today, outside a scope, a panic ends the program with exit code 1.
-Inside a scope, the ratified behaviour already works: the panicking
-child cancels its siblings immediately, and the scope re-panics at
-exit.
-
-#### `expect` in tests is different
-
-```glide
-test "add works" {
-    expect(add(2, 2) == 5)
-}
-```
-
-```
-FAIL  this one fails
-      line 13: expect failed: left == right
-        left:  4
-        right: 5
-```
-
-A failed `expect` reports and **continues** — it is not a panic.
-`require` (fail and stop) is ○. Chapter 22 covers testing.
+Out-of-bounds indexing, a broken invariant, division of `MinInt` by
+`-1`: things a correct program never does. They are not control flow,
+they are not caught in ordinary code, and APIs never use them to report
+expected failures. Chapter 21 covers them.
 
 ---
 
 ### 2. Under the Hood
 
-#### Implementation
+#### `Result` is not magic
 
-In the interpreter, a Glide panic is a Go panic carrying an `rtErr`
-value with a line number, recovered once in `Run` and printed as
-`error: line N: …`.
+`Result<T, E>` is an ordinary two-variant sum type that happens to be
+built in, so the whole ecosystem agrees on one. `Ok` and `Err` are
+reserved constructor names. Everything you know about matching sum
+types applies.
 
-`glide/DESIGN-DECISIONS.md` records the split explicitly: **`return`
-and `?` thread a signal value up the evaluator** (they are semantics),
-while **runtime errors panic** (they are diagnostics). That is why you
-cannot catch one — there is no signal to intercept.
+In the designed compiler it compiles to a tagged union — a
+discriminant plus the larger of `T` and `E`. There is no allocation and
+no unwinding machinery. A function returning a `Result` returns a
+small value in registers.
 
-In the designed compiler, a panic unwinds the stack, running `defer`
-and `errdefer` frames, until it reaches the task boundary.
+That is the performance story in one line: **error handling costs a
+branch.** Exceptions cost a table lookup and a stack unwind on the
+error path and (in zero-cost implementations) nothing on the happy
+path; the trade is that exceptions are invisible.
 
-#### Three unwinds
+#### How `?` is implemented
 
-Glide has three distinct ways a computation can stop early, and it is
-worth keeping them separate in your head:
+`expr?` desugars to roughly:
 
-| Unwind | Cause | Catchable? | Runs `defer`? | Runs `errdefer`? |
-|---|---|---|---|---|
-| **Error** | `?` propagating an `Err` | Yes — it is a value | Yes | Yes |
-| **Panic** | A bug | **No** | Yes | Yes |
-| **Cancellation** | The enclosing scope dying | **No** | Yes | Yes |
+```glide
+match expr {
+    Ok(v)  => v
+    Err(e) => return Err(E.from(e))     // or Err(e) if no `from` exists
+}
+```
 
-Cancellation is Chapter 26's subject. The important structural point is
-that only the first is a *value* — the other two are control flow that
-user code cannot observe or intercept.
+In the interpreter, `?` produces a signal value that threads up through
+the evaluator — the same mechanism as `return`. `glide/DESIGN-
+DECISIONS.md` records the distinction: `return` and `?` are
+*semantics*, so they are signals; runtime errors are *diagnostics*, so
+they panic and are recovered once in `Run`.
 
-#### Why `defer` runs during a panic
+The conversion lookup is static: propagating an error the target type
+cannot accept is a compile error naming both types and the missing
+`from`. One case stays in the evaluator — `?` into a
+`Result<_, Error>`, where the expression belongs to the callee while
+the expectation is the enclosing function's return type — and that
+path boxes rather than converting, since `Error` needs no `from`.
 
-It is required rather than nice-to-have. A panicking task must release
-its locks as the failure propagates to its scope, or the dead task
-deadlocks the program. `DESIGN.md` states this as a hard constraint on
-the defer design.
+#### Why the conversion is safe
+
+It is the one implicit conversion, and it is fenced three ways: it
+fires only at `?`, only when the target error type declares `from`, and
+only in a function with a declared return type. Closures are excluded
+precisely because they have no declared return type, so there would be
+nothing to convert *to*.
+
+#### Error return traces ○
+
+Zig's genuine novelty, adopted: record the chain of `?` propagation
+points an error travelled through, not just where it was created.
+Dev-tier only, riding the same machinery as backtraces.
+
+This is the answer to the standard complaint that errors-as-values lose
+the stack trace. You get the *propagation* trace, which is arguably
+more useful — it shows the path the error took through your code, not
+the call stack at the moment of creation.
+
+#### Backtraces are tiered
+
+Captured in dev builds, skipped in release. The tiered-backend design
+paying rent again, as with overflow and hygiene.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why no `recover`
+#### Why not exceptions
 
-Go has `recover`, and `DESIGN.md` explains precisely why Glide does
-not: **Go's `recover` exists because unstructured goroutines gave
-panics nowhere to go.**
+Three reasons, in order of weight.
 
-In Go, a panic in any goroutine kills the entire process. That is
-catastrophic for a server, so every serious Go program wraps its
-handlers in `defer func() { recover() }()`. Once the mechanism exists,
-it gets used for other things — and `recover` becomes exception
-handling with worse ergonomics, which is exactly what the
-errors-as-values philosophy was avoiding.
+**Invisible control flow.** Any call might unwind. You cannot tell from
+a signature, you cannot tell from the call site, and you cannot
+enumerate what might come out. Reasoning about resource cleanup becomes
+"which of these forty lines can throw?"
 
-Structured concurrency removes the original need. A panicking task
-fails its scope; the scope cancels its siblings and propagates. The
-blast radius is the scope, not the process, *by construction* rather
-than by everyone remembering the incantation.
+**Easy to ignore.** An uncaught exception propagates by default. An
+unhandled `Result` is a value sitting there — and in the designed
+toolchain, an unused `Result` is a hygiene error at `glide test`.
 
-With the need gone, the escape hatch goes too. `DESIGN.md` marks it
-**permanent**.
+**Java's checked exceptions are the proof by counterexample.** They
+tried to make failures visible in signatures. It worked, and the
+ceremony (declare-or-catch, exception signatures polluting every
+interface, versioning pain when a method adds a throws clause) drove
+people to `catch (Exception e) {}` and unchecked exceptions. A
+`Result` in the return type gets the visibility without the parallel
+declaration channel.
 
-#### Why panics are not errors
+#### Why `?` and not Go's `if err != nil`
 
-Because the distinction is about *who is wrong*.
+Go's explicitness is right. Its ergonomics are not, and the cost is
+measurable in three ways.
 
-If the file might not be there, the caller can reasonably encounter
-that, and it belongs in the type: `Result<String, Error>`. If the index
-is out of range, *your code* computed a bad index, and no caller can
-sensibly handle that — what would they do? Retry with a different
-index?
+**Volume.** Four lines per fallible call. In a function with five
+calls, twenty of the thirty lines are error plumbing, and the actual
+logic is scattered among them.
 
-The test: **could a correct program encounter this?** If yes, it is a
-`Result` or an `Option`. If no, it is a panic.
+**The eye slides off it.** When every fourth line is the same four
+lines, you stop reading them, and the one that returns the wrong
+variable or forgets to return at all survives review. Every Go
+programmer has shipped `if err != nil { return nil }`.
 
-The consequence for API design is firm: **APIs never use panics to
-report expected failures.** A library that panics on malformed input is
-a library you cannot use safely, because there is no `recover`.
+**It discourages wrapping.** Adding context means `fmt.Errorf("...:
+%w", err)`, which makes the block five lines, so people skip it, so
+errors arrive at the top with no route attached.
 
-#### Why bounds checks panic rather than returning an Option
+`?` costs one character, is visible on the line where the exit happens,
+and composes with `.context(…)` in the same expression. The
+explicitness is preserved; the ceremony is not.
 
-`xs[7]` could have returned `T?`. It does not, deliberately.
+#### Why sum-type errors instead of a single dynamic error
 
-Indexing is the operation you use when you *know* the index is valid —
-you just checked the length, or you are iterating a range derived from
-it. Making it return an Option would put a `??` or `let … else` on
-every array access in every loop, which is a tax on correct code to
-launder a bug into a value.
+Because "what can go wrong here" is exactly the question a signature
+should answer, and Go's `error` interface cannot answer it.
 
-When you do not know the index is valid, the answer is not indexing:
+In Go, `func Get(id int) (*Note, error)` tells you nothing about the
+failure modes. To handle "not found" differently from "database down",
+you need `errors.Is(err, ErrNotFound)` against a sentinel the library
+had to export, or `errors.As` with a concrete type — pattern matching
+rebuilt from pointer comparison and downcasting, with no compiler help
+and no exhaustiveness.
 
 ```glide
-// You know it is valid
-for i in 0..xs.len() { use(xs[i]) }
+type ApiError =
+    NotFound{ id: NoteId }
+    | BadInput{ msg: String }
+    | Db{ cause: Error }
 
-// You do not know — do not index
-let [_, path] = args else { usage() }
+fn get_note(id: NoteId) -> Result<Note, ApiError>
 ```
 
-Rust makes the same call (`xs[i]` panics, `xs.get(i)` returns
-`Option`). Glide has no `get` yet; when it lands it will be for exactly
-this case.
+Now the caller matches, the compiler checks coverage, and adding a
+fourth failure mode breaks every caller that needs to know.
 
-#### Why send-on-closed panics
+#### Why the dynamic `Error` also exists
 
-Chapter 27 covers channels, but the reasoning belongs here: sending on
-a closed channel is a **coordination bug between senders**, not an
-expected outcome.
+Because Rust's experiment says it must.
 
-A `Result`-returning `send` would tax every correct program with a
-check, to launder a bug into a value. And shutdown in Glide flows
-*down* the scope tree via cancellation, not *up* via send failures, so
-Rust's Err-on-receiver-gone pattern is not needed.
+Rust shipped `Result` with no default error type, so every application
+had to choose or invent one. The ecosystem churned for eight years
+before settling on the `anyhow` (applications) / `thiserror`
+(libraries) split — which is exactly the split `DESIGN.md` bakes into
+the standard library on day one.
 
-Recorded cost: full static prevention would need affine senders —
-ownership machinery Glide sacrificed.
+The insight is that libraries and applications want different things. A
+library's callers need to *distinguish* failures, so enumerate them. An
+application's `main` needs to *report* failures, so a chain of context
+strings is the right shape and enumerating them is pointless work.
 
-#### Why overflow panics in dev and wraps in release
+#### Why `?`-conversion is worth an implicit conversion
 
-Chapter 5 covered this. It is here as an example of the panic
-philosophy: an overflow *is* a bug, so a panic is right; and it is a
-bug you want to find during development, when the developer is
-watching. Release builds wrap because a check on every arithmetic
-operation is a tax production should not pay.
+Without it, every `?` crossing an error-type boundary needs a
+`.map_err(…)`:
 
-The cost — dev and release differ — is taken knowingly, as Zig did.
+```rust
+let text = fs::read_string(path).map_err(AppError::Io)?;
+```
+
+which is `if err != nil` reincarnated — mechanical noise at every call
+site. Rust tried life without automatic conversion before the `From`
+impl mechanism matured, and nobody would go back.
+
+The fences (only at `?`, only with a declared `from`, never in
+closures) keep it from becoming a general implicit-conversion system.
+
+#### Why `or |e| { … }` was declined
+
+`GRAMMAR.md`'s original sketch proposed a handle-in-place construct:
+
+```glide
+let cfg = load_config() or |e| { default_config() }
+```
+
+`DESIGN.md` fought it and declined it, in favour of its parts:
+
+- Wrap-and-propagate — the flagship use — is `?`-conversion.
+- Fallback is `??`.
+- Inline error inspection is `match`.
+
+And a decisive technical objection: **the pipes lied.** `return` inside
+the proposed block would return from the *enclosing function*, which a
+closure's `return` cannot do. A construct that impersonates a closure
+but is not one starts life owing an explanation.
+
+It is deferred with a test rather than killed. The open question in
+`DESIGN.md`: writing real Glide, count the sites where none of the
+three reads well. Frequent and ugly → ratify, probably with Zig's
+`catch` spelling rather than pipes. Rare → the deferral becomes
+permanent.
+
+You will not find `or |e|` anywhere in this book, because it does not
+exist. If you find yourself wanting it while writing Glide, that
+observation is data — record it.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `panic`/`recover`, with a panic in any goroutine killing the
-whole process. `recover` exists to work around that, and is then abused
-into exception handling — several popular Go web frameworks use
-panic/recover for control flow, which the language designers explicitly
-warned against. Glide removes the original problem and therefore
-removes the workaround.
+**Go.** `(T, error)` pairs, the `error` interface, `errors.Is`/`As`,
+`%w` wrapping. Same philosophy, half the mechanism. What Go gets right:
+errors are values, visible in signatures, no invisible control flow.
+What it lacks: enumerable failure modes, a propagation operator,
+compile-checked handling, and a way to stop the caller touching the
+result before checking the error.
 
-**Rust.** `panic!` with two modes: unwind (runs `Drop`, can be caught
-with `catch_unwind`) or abort. `catch_unwind` exists mainly for FFI
-boundaries and thread-pool workers, and the documentation discourages
-using it as exception handling. Rust also has `Result`, so the
-philosophical position is Glide's.
+**Rust.** `Result<T, E>`, `?`, `From` conversion, no default error
+type. Glide is Rust's mechanism plus the standard-library `Error` that
+Rust's ecosystem eventually built for itself. Glide also declines
+Rust's combinator surface (`map_err`, `and_then`, `ok_or_else`,
+`unwrap_or_default`, …) in favour of three constructs plus `match`.
 
-**Zig.** `@panic`, `unreachable`, and safety-checked undefined
-behaviour that panics in safe modes. No catching at all — the closest
-relative to Glide's position. Zig's tiered safety modes are the direct
-model for trap-in-dev/wrap-in-release.
+**Zig.** Error unions (`!T`), `try`, `catch`, error sets that the
+compiler infers and can enumerate, and `errdefer`. Zig's inferred error
+sets are arguably better than declared sum types for ergonomics and
+worse for API stability (the set changes when the body changes). Glide
+takes `errdefer` (Chapter 22) and error return traces from Zig.
 
-**Java / C# / Python / JavaScript.** Exceptions for everything, with no
-distinction between "the file is missing" and "this code is wrong".
-`NullPointerException` and `IndexOutOfBoundsException` are catchable,
-which means a `catch (Exception e)` swallows the bug and the program
-limps on in an unknown state. This is the failure mode the
-bugs-are-not-catchable rule prevents.
+**Java.** Checked exceptions — the right goal, the wrong mechanism. The
+declare-or-catch obligation propagates through every signature, adding
+a method's exception is a breaking change, and the escape hatches
+(`RuntimeException`, `catch (Exception e)`) get used because the
+ceremony is too high.
 
-**C.** Undefined behaviour. No panic at all: an out-of-bounds write
-corrupts adjacent memory and the failure surfaces somewhere else
-entirely. Every safety feature in every language above is a response to
-this.
+**C#, Python, Ruby, JavaScript.** Unchecked exceptions. Concise, and
+you cannot tell from a signature what might come out. JavaScript
+additionally has promise rejections as a parallel channel with its own
+`.catch`, and `async`/`await` reintroduces `try`/`catch` on top —
+two error mechanisms in one language.
 
-**Erlang.** "Let it crash" plus supervision trees — a process dies, a
-supervisor restarts it. Glide's structured concurrency is
-architecturally similar (a scope is the boundary), and `DESIGN.md`
-flags Erlang-style supervision policies (`supervise(restart:
-.on_failure, …)`) as a likely future stdlib addition. The philosophies
-agree: do not try to patch up a process that has proven itself wrong;
-kill it at a known boundary and restart from a known state.
+**C.** Integer error codes, `errno`, and the caller's discipline. The
+baseline everything else improves on, and the source of the
+"return value or error, never both" confusion that `Result` fixes.
+
+**Haskell.** `Either e a` with monadic composition, which is `Result`
+with `?` generalised into `do` notation. More powerful, and requires
+understanding monads.
 
 ---
 
 ### 5. Common Mistakes
 
-**Designing an API that panics on bad input.**
+**Using `??` where you meant `match`.**
 
 ```glide
-// Bad — a library that panics is unusable, because nobody can recover
-pub fn parse_port(s: String) -> Int {
-    let Some(n) = s.parse_int() else {
-        panic("bad port")        // ○ there is no `panic` builtin, and good
+// Bad — you will never know why this failed
+let cfg = load_config(path) ?? Config.default()
+
+// Good, if you would want to know
+let cfg = match load_config(path) {
+    Ok(c)  => c
+    Err(e) => {
+        eprintln("config failed ({e}); using defaults")
+        Config.default()
     }
-    n
 }
-
-// Good
-pub fn parse_port(s: String) -> Result<Int, ParseError> { … }
 ```
 
-Note that there is no user-facing `panic()` builtin today, which makes
-this mistake harder to commit. That is deliberate.
+`??` discards the error deliberately. That is a feature when the error
+is genuinely uninteresting and a bug when it is not.
 
-**Looking for `recover`.** There is none, permanently. If you find
-yourself wanting it, one of two things is true: either the condition is
-an expected failure and should be a `Result`, or you want a task
-boundary — which is a `scope` (Chapter 25).
-
-**Indexing without checking.**
+**Forgetting `?` and letting the `Result` sit there.**
 
 ```glide
-// Bad
-let first = xs[0]
-
-// Good
-let [first, ..rest] = xs else {
-    return Err(.Empty)
+// Bad — the tail-value rule catches this one, at least
+fn setup(db: Db) {
+    db.exec("create table …")
 }
-
-// Also good, when emptiness is not exceptional
-let first = if xs.len() == 0 { None } else { Some(xs[0]) }
 ```
 
-**Assuming a `_ =>` arm prevents a panic.** It prevents *this* panic
-and creates a silent bug instead. A non-exhaustive match that panics is
-telling you something true.
+```
+error: setup declares no return value but its body ends with a Result;
+       discard it with `_ = …` or declare `-> Result<…>`
+```
 
-**Expecting `expect` in a test to stop the test.** It reports and
-continues. `require` is ○.
+Either propagate (`?`), discard visibly (`_ =`), or handle. The
+language will not let you do nothing.
 
-**Relying on overflow behaviour.** It differs between tiers by design.
-If you want modular arithmetic, `wrapping_*` (○) will be the way to
-say so.
+**Returning `Result<T, Error>` from a library.** Use a sum type. The
+dynamic `Error` is for applications, where the caller is `main` and
+reporting is the only response.
 
-**Trying to turn a panic into an error at a boundary.** You cannot. If
-a subsystem can fail in ways you need to contain, run it in a scope —
-the panic will kill that task and fail that scope, which is the
-containment mechanism the language offers.
+```glide
+// Bad, in a library
+fn parse(s: String) -> Result<Ast, Error>
+
+// Good
+type ParseError =
+    Unexpected{ line: Int, found: String }
+    | Unterminated{ line: Int, what: String }
+    | Empty
+
+fn parse(s: String) -> Result<Ast, ParseError>
+```
+
+**Not writing `from`.** Without it, `?` cannot bridge error types and
+the error propagates untouched — which today silently produces a
+`Result` whose error type does not match the signature. Write the
+conversion:
+
+```glide
+impl AppError {
+    fn from(e: Error) -> AppError { Io{ cause: e } }
+}
+```
+
+**Using `?` inside a closure and expecting it to exit the enclosing
+function.** It exits the closure. This is the same rule as `return`
+(Chapter 8), and it is why iterator adapters cannot propagate errors:
+
+```glide
+// Bad — the ? returns from the closure
+let results = paths.iter().map(|p| fs.read_string(p)?).collect()
+
+// Good — a loop can propagate
+let mut results = []
+for p in paths {
+    results.push(fs.read_string(p)?)
+}
+```
+
+**Stacking `.context` on every call.** Context is for the *boundary*
+where a reader would lose track, not for every frame. Three levels of
+"reading config: opening file: opening file: no such file" is noise.
+
+**Treating a panic as an error.** Indexing out of range, dividing by
+zero, and a failed invariant are bugs. Do not design an API that
+panics for an expected condition, and do not try to catch one — there
+is no `recover`.
+
+**Expecting `?` to work on an Option.** Not adopted (Chapter 14). Use
+`??`, `if let`, or `let … else`.
 
 ---
 
 ### 6. Performance Considerations
 
-**Bounds checks cost a compare and a predicted branch.** In tight loops
-the compiler eliminates them when it can prove the index is in range —
-`for i in 0..xs.len()` is the shape that allows this.
+**A `Result` is a tagged union** (○) — a discriminant plus the larger
+of `T` and `E`, returned in registers when small. There is no
+allocation on either path.
 
-**Overflow checks cost roughly one instruction and a predicted branch
-per arithmetic operation** in the dev tier, and nothing in release.
-Typically a few percent, more in numeric-heavy loops.
+**`?` compiles to a branch.** Test the tag, and either continue or
+return. On the happy path that is one well-predicted branch.
 
-**Panicking is expensive** and that is fine — it happens once, before
-the task dies. Unwinding runs every `defer` and `errdefer` frame on the
-way out.
+**Compare exceptions.** Zero-cost exception implementations (C++,
+Rust's panics) put nothing on the happy path and pay a table lookup
+plus a stack unwind on the error path. So exceptions are *cheaper* on
+the happy path and much more expensive when thrown.
 
-**There is no happy-path cost to panics existing.** Unlike an
-exception-handling runtime, there is no landing-pad table to consult
-and nothing to set up at function entry. The unwind machinery is used
-only when unwinding.
+The trade Glide makes: one predicted branch per fallible call, in
+exchange for visibility. For the error rates real programs have — where
+"file not found" is normal — the branch is the right side of the trade.
 
-**`defer` running during unwind** is required for correctness, not an
-optimisation target.
+**`.context(…)` allocates** — it builds a wrapped error with a message.
+On the happy path it does nothing (it passes `Ok` through), so the cost
+is on the failure path only, which is where you can afford it.
+
+**Sum-type errors are as large as their largest variant.** An error
+enum with one variant holding a large struct makes every `Result`
+returning that error type large. Box the outlier.
+
+**Backtraces are dev-tier only.** Capturing one is expensive
+(hundreds of nanoseconds to microseconds); release builds skip it.
+
+**In the interpreter**, `?` is a signal value threading up through the
+evaluator, which is cheap relative to everything else the tree-walker
+does.
 
 ---
 
 ### 7. Best Practices
 
-**Never panic for something a caller could encounter.** The rule, one
-more time, because it is the whole chapter:
-
-| Condition | Mechanism |
-|---|---|
-| File missing, network down, bad input | `Result` |
-| Key absent, no match found, empty list | `Option` |
-| Index out of range, broken invariant, unreachable state | panic |
-
-**Make invariants unrepresentable rather than asserted.** This is the
-best panic-avoidance strategy, and it is what Chapters 12–15 were
-about:
+**Enumerate failure modes at library boundaries; use the dynamic
+`Error` inside applications.**
 
 ```glide
-// Panics if the invariant is violated somewhere
-fn area(r: Rect) -> Float {
-    // assumes r.width > 0 — nothing enforces it
-    r.width * r.height
-}
+// A library module
+type StoreError =
+    NotFound{ id: NoteId }
+    | Conflict{ id: NoteId }
+    | Backend{ cause: Error }
 
-// The invariant cannot be violated
-type Rect = struct { width: Float, height: Float }
+pub fn get(db: Db, id: NoteId) -> Result<Note, StoreError>
+```
 
-impl Rect {
-    pub fn new(w: Float, h: Float) -> Rect? {
-        if w <= 0.0 || h <= 0.0 { return None }
-        Some(Rect{ width: w, height: h })
-    }
+```glide
+// The application
+fn main() -> Result<(), Error> {
+    let db = sql.open(dsn)?
+    let note = store.get(db, NoteId(7))?      // StoreError → Error via from
+    println("{note:?}")
+    Ok(())
 }
 ```
 
-Private fields plus a validating constructor means every `Rect` that
-exists is valid, so nothing downstream needs to check or panic.
-
-**Use a scope as the containment boundary.**
+**Write `from` for every error type that wraps another.** It is three
+lines and it is what makes `?` work across the boundary:
 
 ```glide
-scope s {
-    _ = s.spawn(|| handle_request(req))     // a panic here kills this task
+impl ApiError {
+    fn from(e: Error) -> ApiError { Db{ cause: e } }
+}
+```
+
+**Add context at boundaries, not at every frame.**
+
+```glide
+// Good — one breadcrumb per meaningful layer
+fn load_user(db: Db, id: UserId) -> Result<User, Error> {
+    let row = db.query_one(sql, ["id": id]).context("loading user {id}")?
     …
 }
 ```
 
-This is the structural answer to "what if that code has a bug". Not
-`recover` — a boundary.
+The message should name *what you were trying to do*, not repeat the
+function name.
 
-**Let bounds-check panics stand during development.** They are telling
-you the index computation is wrong. Silencing them with a clamp usually
-moves the bug rather than fixing it.
+**Keep `?` on the line where the risk is.** Do not hoist a fallible
+call into a variable just to `?` it later — the whole point is that the
+exit is visible where it happens.
 
-**Prefer patterns to indexing** where the shape is uncertain.
-`let [a, b] = xs else { … }` both checks and destructures.
+```glide
+// Bad
+let result = fs.read_string(path)
+let text = result?
 
-**Do not write defensive checks against your own invariants in
-release-critical paths.** If a private field can only be set by a
-validating constructor, re-checking it in every method is noise. Check
-at the boundary, trust inside.
+// Good
+let text = fs.read_string(path)?
+```
+
+**Reserve panics for bugs.** If a caller could reasonably encounter the
+condition, it is a `Result`. If it means your code is wrong, it is a
+panic.
+
+| Condition | Result or panic |
+|---|---|
+| File not found | `Result` |
+| Malformed input | `Result` |
+| Network timeout | `Result` |
+| Index out of range | panic |
+| Broken invariant inside your own type | panic |
+| Unreachable match arm | panic |
+
+**Do not swallow errors in `defer`.** The discard must be visible
+(`_ =`), which the language enforces — Chapter 22.
+
+**Prefer `let … else` over `match` for the abort case.**
+
+```glide
+// Good
+let Ok(cfg) = load_config(path) else {
+    return Err(.Startup{ why: "no config" })
+}
+```
 
 ---
 
 ### 8. Examples
 
-**The distinction, made concrete:**
+**A complete error-handling flow, built up in stages:**
 
-```glide
-type ParseError = Empty | NotANumber{ text: String } | OutOfRange{ n: Int }
+```glide-run
+import fs
 
-// Expected failure — a Result. The caller decides what to do.
-fn parse_port(s: String) -> Result<Int, ParseError> {
-    let s = s.trim()
-    if s == "" {
-        return Err(.Empty)
-    }
-    let Some(n) = s.parse_int() else {
-        return Err(.NotANumber{ text: s })
+// Stage 1 — the failure modes, enumerated.
+type AppError =
+    NotFound{ path: String }
+    | Parse{ line: Int, why: String }
+    | Io{ cause: Error }
+
+// Stage 2 — the conversion that makes `?` work across boundaries.
+impl AppError {
+    fn from(e: Error) -> AppError { Io{ cause: e } }
+}
+
+// Stage 3 — a fallible function. Note the single `?`.
+fn read_port(path: String) -> Result<Int, AppError> {
+    let text = fs.read_string(path)?
+    let Some(n) = text.trim().parse_int() else {
+        return Err(.Parse{ line: 1, why: "not a number" })
     }
     if n < 1 || n > 65535 {
-        return Err(.OutOfRange{ n: n })
+        return Err(.Parse{ line: 1, why: "out of range" })
     }
     Ok(n)
 }
 
-// A bug — indexing past the end. Nothing catches this.
-fn third(xs: List<Int>) -> Int {
-    xs[2]
-}
-
-fn main() {
-    for s in ["8080", "", "abc", "99999"] {
-        match parse_port(s) {
-            Ok(n)                      => println("{s:8} -> port {n}")
-            Err(Empty)                 => println("{s:8} -> empty")
-            Err(NotANumber{ text })    => println("{s:8} -> not a number: {text}")
-            Err(OutOfRange{ n })       => println("{s:8} -> out of range: {n}")
-        }
-    }
-    println(third([1, 2, 3]))
-    println(third([1]))          // panics
-}
-```
-
-```
-    8080 -> port 8080
-         -> empty
-     abc -> not a number: abc
-   99999 -> out of range: 99999
-3
-error: line 18: list index 2 out of range (len 1)
-```
-
-Four expected outcomes, handled exhaustively. One bug, which stops the
-program with a line number.
-
-Note *which* line number: the panic is reported at `xs[2]` inside
-`third`, not at the call site in `main`. That is correct — the bad
-index was computed there — and it is also the limitation that dev-tier
-error return traces (○, Chapter 19) exist to fix.
-
-**Making the invariant unrepresentable instead:**
-
-```glide
-type NonEmpty = struct { head: Int, tail: List<Int> }
-
-impl NonEmpty {
-    pub fn parse(xs: List<Int>) -> NonEmpty? {
-        if xs.len() == 0 { return None }
-        let mut tail = []
-        for i in 1..xs.len() { tail.push(xs[i]) }
-        Some(NonEmpty{ head: xs[0], tail: tail })
-    }
-
-    // Cannot panic: `head` always exists.
-    pub fn first(self) -> Int { self.head }
-
-    pub fn max(self) -> Int {
-        let mut best = self.head
-        for x in self.tail {
-            if x > best { best = x }
-        }
-        best
+// Stage 4 — exhaustive handling at the boundary.
+fn describe(r: Result<Int, AppError>) -> String {
+    match r {
+        Ok(n)                   => "port {n}"
+        Err(NotFound{ path })   => "no file {path}"
+        Err(Parse{ line, why }) => "line {line}: {why}"
+        Err(Io{ cause })        => "io: {cause}"
     }
 }
 
 fn main() {
-    let Some(ne) = NonEmpty.parse([3, 1, 4]) else {
-        println("empty")
-        return
-    }
-    println(ne.first())
-    println(ne.max())
-
-    match NonEmpty.parse([]) {
-        Some(x) => println(x.first())
-        None    => println("rejected empty list")
-    }
+    println(describe(read_port("/nonexistent")))
+    println(read_port("/nonexistent") ?? -1)
 }
 ```
 
 ```
-3
-4
-rejected empty list
+io: open /nonexistent: no such file or directory
+-1
 ```
 
-`first()` and `max()` cannot panic, and they contain no checks. The
-possibility of emptiness was resolved once, at `parse`, and the type
-carries the proof forward. This is the same parse-don't-validate
-pattern as Chapter 12, applied to panic avoidance.
+The `?` on line one of `read_port` did three things: unwrapped the
+success, returned early on failure, and converted `Error` into
+`AppError` via `from`. In Go that is four lines plus a `fmt.Errorf`
+wrap; in Rust before `From` matured it was a `.map_err`.
 
-**Bad versus good: the library that panics**
+**The context chain:**
 
 ```glide
-// Bad — nobody can use this safely, because nobody can recover
-pub fn decode(data: String) -> Config {
-    let parts = data.split("=")
-    Config{ key: parts[0], value: parts[1] }     // panics on malformed input
+import fs
+
+fn load(p: String) -> Result<String, Error> {
+    fs.read_string(p).context("loading config")?
+}
+
+fn startup() -> Result<String, Error> {
+    load("/nope").context("startup")
+}
+
+fn main() {
+    match startup() {
+        Ok(s)  => println(s)
+        Err(e) => println("{e}")
+    }
 }
 ```
 
-A caller passing user-supplied data has no defence. There is no
-`recover`, so the only option is to validate the input *before* calling
-— which means duplicating the parser.
+```
+startup: loading config: open /nope: no such file or directory
+```
+
+Three layers, three breadcrumbs, read outside-in. That message tells
+you what the program was doing and what actually failed — which is what
+you want at 3am and what a bare "no such file or directory" does not
+give you.
+
+**Side by side with Go:**
+
+```go
+// Go
+func readPort(path string) (int, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return 0, fmt.Errorf("reading %s: %w", path, err)
+    }
+    n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+    if err != nil {
+        return 0, fmt.Errorf("parsing port: %w", err)
+    }
+    if n < 1 || n > 65535 {
+        return 0, fmt.Errorf("port out of range: %d", n)
+    }
+    return n, nil
+}
+```
+
+```glide
+// Glide
+fn read_port(path: String) -> Result<Int, AppError> {
+    let text = fs.read_string(path).context("reading {path}")?
+    let Some(n) = text.trim().parse_int() else {
+        return Err(.Parse{ line: 1, why: "not a number" })
+    }
+    if n < 1 || n > 65535 {
+        return Err(.Parse{ line: 1, why: "out of range" })
+    }
+    Ok(n)
+}
+```
+
+Fifteen lines to eight. But count the *decisions* rather than the
+lines: the Go version returns `0, err` three times, and each `0` is a
+value the caller must know not to trust. The Glide version cannot
+produce a port and an error simultaneously.
+
+And the caller's side is where the real difference shows. The Go
+caller gets an `error` and can distinguish cases only by
+`errors.Is`/`As` against types the library remembered to export. The
+Glide caller gets a three-variant sum type and a compiler that checks
+they handled all three.
+
+**Bad versus good: the swallowed error**
+
+```glide
+// Bad — three ways to lose information, all in four lines
+fn sync(db: Db) -> Int {
+    let a = db.exec("delete from stale") ?? 0        // error gone
+    let b = db.exec("vacuum") ?? 0                   // error gone
+    _ = db.close()                                   // error gone
+    a + b
+}
+```
+
+Nothing here is *illegal* — Glide makes each discard visible, which is
+the point — but a reader can see three places where a failure vanishes
+and the function still returns a plausible number.
 
 ```glide
 // Good
-pub fn decode(data: String) -> Result<Config, DecodeError> {
-    let parts = data.split("=")
-    let [key, value] = parts else {
-        return Err(.Malformed{ text: data })
-    }
-    Ok(Config{ key: key, value: value })
+fn sync(db: Db) -> Result<Int, Error> {
+    let a = db.exec("delete from stale").context("clearing stale rows")?
+    let b = db.exec("vacuum").context("vacuuming")?
+    db.close()?
+    Ok(a + b)
 }
 ```
 
-The list pattern does the checking and the destructuring together, and
-the failure is a value the caller can handle. Note that this is
-*shorter* than the panicking version's honest equivalent would be with
-manual length checks.
+The signature now says the operation can fail, each failure carries
+where it happened, and the caller cannot use the count without dealing
+with the possibility.
 
 ---
 
@@ -554,49 +966,62 @@ manual length checks.
 
 **Summary**
 
-- A **panic** means the program is wrong: out-of-range index, overflow
-  in dev builds, division by zero, a non-exhaustive match, a broken
-  invariant. It is not an error value and not control flow.
-- **There is no `recover`, permanently.** Go needs it because
-  unstructured goroutines gave panics nowhere to go; structured
-  concurrency gives them a principled boundary, so the escape hatch is
-  unnecessary and is not provided.
-- **A panic kills the task, not the process** (○ outside a scope
-  today). A panicking child cancels its siblings and the scope
-  re-panics at exit.
-- `defer` and `errdefer` **do** run during unwind — required, because a
-  panicking task must release its locks.
-- Glide has **three unwinds**: error (a value, catchable), panic (a
-  bug, uncatchable), and cancellation (Chapter 26, uncatchable). Only
-  the first is observable by user code.
-- The test for which mechanism: **could a correct program encounter
-  this?** Yes → `Result`/`Option`. No → panic.
-- **APIs never panic to report expected failures.** A library that
-  panics on bad input is unusable, because callers cannot recover.
-- Indexing panics rather than returning an Option, because indexing is
-  what you use when you *know* the index is valid; when you do not
-  know, use a pattern.
-- The best panic-avoidance strategy is making invariants
-  unrepresentable — private fields plus a validating constructor —
-  rather than asserting them.
+- `Result<T, E>` is a two-variant sum type: `Ok(T)` or `Err(E)`. A
+  function that can fail says so in its return type. There are no
+  exceptions and no invisible control flow.
+- **`?` propagates**: unwrap the success, or return the failure to the
+  caller. It is Go's four-line `if err != nil` in one character, with
+  the early exit still visible on the line where it happens.
+- **`.context(…)`** wraps an `Err` with a breadcrumb and passes `Ok`
+  through, producing a readable outside-in chain.
+- **`?` converts error types** by calling `E.from(err)` when the target
+  type declares it. This is the one implicit conversion in the
+  language, and it fires only at `?`, only with a declared `from`, and
+  never in closures.
+- **Libraries define sum-type errors** so callers can distinguish
+  failures exhaustively; **applications use the dynamic `Error`** with
+  its context chain. `?`-conversion bridges them. This is the
+  `thiserror`/`anyhow` split, shipped in the standard library.
+- **`??` on a Result** unwraps `Ok` and takes the default on `Err`,
+  discarding the error deliberately.
+- `match` handles in place when you need to inspect the error.
+- **`main` may return `Result<(), Error>`** — the runtime prints the
+  error to stderr and exits 1.
+- **Panics are for bugs only** and cannot be caught (Chapter 21).
+- `or |e| { … }` was **declined** in favour of `?`-conversion, `??`,
+  and `match`, and is deferred with a count-the-residue test.
+- **`Error` is erased at the *type* level and boxed at the *value*
+  level** ✓. Anything is assignable to it, so `Err("config is empty")`
+  needs no ceremony — but what lands in an `Error` slot *becomes* an
+  `Error`, so a program-made error and a host one are the same kind of
+  thing and print alike.
+- **`Error` has four methods** ✓: `message()` (this link only),
+  `cause()`, `context(msg)`, and `find(SomeType)` which walks the whole
+  chain. `find` takes the type **as a value**, because `find<T>()`
+  cannot be parsed and Glide has no turbofish.
+- **A variant pattern cannot match an `Error`** — a reported error
+  naming `find`, never a silently dead arm.
+- ○: dev-tier error return traces.
 
 **Exercises**
 
-1. **Audit a `catch`.** In a Java, C#, or Python codebase, find a
-   `catch (Exception e)` (or bare `except:`). List every distinct thing
-   that could reach it. Separate them into "expected failures the code
-   should handle" and "bugs that should have killed something". Most
-   such blocks are catching both, and the second category is being
-   silently survived.
+1. **Count the plumbing.** Take a 100-line Go function that does real
+   I/O and count the lines that are error handling. Then translate it
+   and count again. Separately, count the number of times the Go
+   version returns a zero value alongside an error — each one is a
+   value the caller must know not to touch.
 
-2. **Remove a panic by construction.** Find a function in your code
-   that starts with a precondition check — a null check, a length
-   check, a range check. Redesign the type so the precondition cannot
-   be violated. Then count how many other functions could drop the
-   same check.
+2. **Enumerate a library's failures.** Pick a library you use whose
+   errors are opaque (a `string` or a bare `error`). Write down every
+   distinct thing that can go wrong, then write the sum type. Now ask:
+   of those, how many would a caller genuinely handle differently? That
+   number is the right size for the enum, and anything beyond it
+   belongs inside a `Backend{ cause }` variant.
 
-3. **Design the containment boundary.** You are writing an HTTP server
-   where handler code is written by other teams and may contain bugs.
-   Without `recover`, describe how you would stop one bad handler from
-   taking down the process. Then check your answer against Chapter 25 —
-   the mechanism exists and is the reason `recover` was removable.
+3. **Run the or-block residue test.** `DESIGN.md` has an open question:
+   `or |e| { … }` was declined, and the test is to write real Glide and
+   count the sites where none of `?`-conversion, `??`, and `match`
+   reads well. Write 200 lines of error-heavy Glide and keep a tally.
+   If your count is high and the sites are ugly, that is evidence for
+   reviving the construct — and it is exactly the kind of evidence the
+   design document asks for.

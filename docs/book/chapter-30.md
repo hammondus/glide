@@ -1,639 +1,670 @@
-# Chapter 30: Files, Processes, and CLI Programs
+# Chapter 30: Modules, Imports, and Visibility
 
-This is the shortest chapter in the book, because the surface it
-describes is deliberately tiny. In the interpreter era every stdlib
-module is a Go host shim behind a Glide-shaped interface, and
-`stdlib.md` states the policy plainly: **surfaces are minimal and grow
-when a program needs them — the dogfood rule.**
+Glide's module system is Go's, kept almost unchanged, with one
+substitution: **`pub` instead of capitalisation**.
 
-What exists today is four functions. What the shape teaches — argument
-handling, exit codes, stream discipline, and error propagation out of
-`main` — is the whole chapter.
+A directory is a module. Imports are qualified and **inert**. There are
+exactly two visibility levels. And nothing runs before `main` —
+no `init()`, no module-level `let`, no import side effects.
+
+That last property is load-bearing and is the most interesting part of
+the chapter.
+
+The single-file interpreter means much of this is ○ today — there is no
+package manager and no multi-file resolution yet — but `pub`, imports,
+`const`, and the no-life-before-`main` guarantee all run.
 
 ---
 
 ### 1. Basic Usage
 
-#### The `os` module
+#### A directory is a module
 
-| Function | Signature |
-|---|---|
-| `os.args()` | `() -> List<String>` — program name first, then arguments |
-| `os.exit(code)` | `(Int) -> !` — immediate exit |
+All `.gld` files in a directory share **one namespace**. There are no
+intra-module imports, no per-file declarations, and no `mod.rs` tree.
+Split a module across files however reads best; the files are not a
+structure, they are a filing decision.
+
+This is Go's model exactly, and Rust's module tree (`mod.rs`,
+`pub(super)`, path attributes) is declined as ceremony that buys almost
+nothing.
+
+#### Imports
+
+```glide
+import http                          // stdlib: a bare name
+import "github.com/x/y" as y         // external: a URL, aliased  ○
+```
+
+At the top of the file, one per line. Modules are used **qualified**:
 
 ```glide
 import os
-
-fn main() {
-    let args = os.args()
-    println("{args:?}")
-}
-```
-
-```bash
-$ glide run prog.gld a b
-["prog.gld", "a", "b"]
-```
-
-`os.args()[0]` is the program name, as in C and Go.
-
-#### The `fs` module
-
-| Function | Signature |
-|---|---|
-| `fs.read_string(path)` | `(String) -> Result<String, Error>` |
-
-```glide
 import fs
-
-fn main() -> Result<(), Error> {
-    let text = fs.read_string("notes.txt").context("reading notes")?
-    println("{text.lines().len()} lines")
-    Ok(())
-}
-```
-
-That is the whole `fs` surface today. Writing, directory listing,
-metadata, and streaming are ○.
-
-#### Argument handling
-
-There is no flag parser (○ — `flag` is on the committed stdlib list).
-Argument handling is a **list pattern**:
-
-```glide
-import fs
-import os
 
 fn main() -> Result<(), Error> {
     let [_, path] = os.args() else {
-        eprintln("usage: linecount <file>")
+        eprintln("usage: prog <file>")
         os.exit(2)
     }
-
-    let text = fs.read_string(path).context("reading input")?
-    println("{text.lines().len()} lines")
+    let text = fs.read_string(path)?
+    println(text)
     Ok(())
 }
 ```
 
-Three things are doing work in those four lines:
+There is no `from x import y`, no wildcard import, and no way to bring
+an individual name into scope unqualified.
 
-- `[_, path]` matches **exactly two** elements, so it rejects both
-  no-arguments and too-many-arguments. That exactness is the whole
-  reason it is a complete check (Chapter 10).
-- `eprintln` sends the usage message to **stderr**, so it cannot
-  contaminate the program's output in a pipeline.
-- `os.exit(2)` **diverges**, which satisfies the `let … else` rule.
-  `2` is the Unix convention for misuse.
+#### Imports execute nothing
 
-For an optional second argument, match both shapes:
+This is the guarantee, and it is absolute. Importing a module runs no
+code. There is no registration magic, no `import _ "lib/pq"` running
+hidden driver setup, and no "what happens on import" question to ask.
+
+A module you import is inert until you call it.
+
+#### `pub` is the visibility system
 
 ```glide
-let args = os.args()
-let (path, n) = match args {
-    [_, p]       => (p, 10)
-    [_, p, raw]  => (p, raw.parse_int() ?? 10)
-    _            => {
-        eprintln("usage: head <file> [lines]")
-        os.exit(2)
+pub type Note = struct {
+    pub id: NoteId
+    pub title: String
+    body: String              // private to the module
+}
+
+pub fn create(title: String) -> Note { … }
+
+fn validate(t: String) -> Bool { … }      // private to the module
+```
+
+Two levels, and that is all:
+
+| | Visible where |
+|---|---|
+| default | inside the module |
+| `pub` | outside the module too |
+
+Struct fields take `pub` **individually**, so a public type with
+private fields is the natural encapsulation shape (Chapter 12).
+
+There is no `pub(crate)`, no `internal`, no friend classes. Wanting a
+third level usually means the module boundary is drawn wrong.
+
+#### Module level is `const` only
+
+```glide
+const max_retries = 3
+const default_timeout = 30.s
+```
+
+Module level holds **functions, types, `impl` blocks, and `const`
+bindings**. There is no module-level `let`, no mutable global, and no
+`init()`.
+
+`const` is evaluated once at load, in declaration order, and is
+immutable. In the designed language it is **comptime-evaluated**
+(Chapter 36), so it can hold anything a compile-time computation can
+produce:
+
+```glide
+const table = make_crc_table()                  // ○
+const re = regex.compile("^[a-z]+$")            // ○ — a bad pattern is
+                                                //   a compile error
+```
+
+**M2 shim:** today, `const` initialisers are restricted to pure
+expressions — no function or module calls. Full comptime evaluation
+arrives with the compiler.
+
+Const names are `snake_case`, like any binding. There is no
+SCREAMING_CASE convention.
+
+#### Runtime state lives in `main`
+
+Since there are no mutable globals, the pattern is: create in `main`,
+pass down.
+
+```glide
+fn main() -> Result<(), Error> {
+    let db = sql.open(dsn)?
+    defer { _ = db.close() }
+
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+
+    scope s {
+        _ = s.spawn(|| sweeper(db))
+        http.serve("127.0.0.1:8080", r)
     }
 }
 ```
 
-#### Exit codes
+`db` is created once, at the top, and threaded into the handlers by
+closures. That is the design's grain everywhere.
 
-Three ways a program ends, and they mean different things:
+#### Declarations are order-independent
 
-| How | Exit code | Runs `defer`? |
-|---|---|---|
-| `main` returns `()` or `Ok(())` | 0 | ✓ |
-| `main` returns `Err(e)` | 1, `e` printed to stderr | ✓ |
-| `os.exit(n)` | `n` | **✗ skipped** |
-| A panic | 1, message to stderr | ✓ |
+Module-level declarations are a **set**. Call a function declared
+below; reference a type declared later. File order is *narrative*
+order, and the formatter deliberately does not reorder declarations
+(Chapter 3).
 
-`os.exit` skipping defers is deliberate — it is an *immediate* exit,
-and that is what it is for. If you need cleanup, return an `Err`
-instead.
+#### Unused imports
 
-#### Stream discipline
+Dev builds warn; release builds and `glide test` error (Chapter 2). And
+in the designed toolchain the **formatter owns the import block** —
+save the file and the imports are correct. Humans do not curate
+imports.
 
-```glide
-println(data)         // stdout — the program's output
-eprintln(diagnostic)  // stderr — everything else
-```
+#### Shadowing an import
 
-Usage messages, warnings, progress, and errors go to stderr. The
-program's actual result goes to stdout. That is what makes a program
-composable:
-
-```bash
-$ wordfreq notes.txt | sort -rn | head
-```
-
-gets word counts in the pipe and complaints on the terminal.
-
-Both are unbuffered (Chapter 6), so a prompt appears before the read
-and a debug print survives a crash on the next line.
-
-#### The designed surface ○
-
-`STDLIB-GOALS.md` and `DESIGN.md` commit to: full `fs` (write, create,
-remove, rename, directory walking, metadata), `process` (spawn, pipes,
-exit status), `flag` for CLI parsing, `embed` for build-time file
-embedding, and environment variable access.
-
-Two designed details worth knowing now:
-
-**`embed` is declarative grammar, not Go's magic comment:**
+A local named after an imported module is **legal**:
 
 ```glide
-embed "static/**" as assets      // ○
+import sql
+
+fn build(sql: String) -> String {     // fine — no module use here
+    "prepared: {sql}"
+}
 ```
 
-The build system provides the bytes; comptime never does IO, so
-hermeticity survives. Embedded trees serve through the same `fs`
-interface as disk, so dev-from-disk versus prod-from-binary is one
-constructor swap.
-
-**Cross-compilation is a flag**, not a project:
-
-```bash
-glide build -target linux/arm64      # ○
-```
-
-Any host to any target, no sysroots, static by default,
-`FROM scratch`-ready. This stays trivial *because* C FFI was exiled to
-the margins — cgo is what collapses Go's cross-compilation story.
+What is an error (○, checker era) is using the module *through* a live
+shadow — binding `sql` and calling `sql.open()` in the same function
+produces a diagnostic naming both parties.
 
 ---
 
 ### 2. Under the Hood
 
-#### Host shims
+#### Load order
 
-Every module in the interpreter era is Go code behind a Glide-shaped
-interface. `fs.read_string` calls `os.ReadFile`; `os.args()` reads
-`os.Args`.
+The interpreter collects all module-level declarations first —
+functions, types, `impl` blocks — then evaluates `const` initialisers
+in declaration order, then calls `main`.
 
-That has a designed consequence worth knowing: **stdlib shims are
-injectable per host** (○). Because they are already Go code behind an
-interface, making the provided set *chosen by the embedder* buys
-capability-style sandboxing for free — an untrusted script embedded in
-a Go program is simply never handed `fs` or `net`.
+That is the entire startup sequence. There is no dependency graph to
+walk, no initialisation order to reason about, and no way for one
+module's setup to depend on another's having run.
 
-`DESIGN.md` calls this "the one embedding requirement worth honouring
-while building the interpreter, because it is painful to retrofit."
+#### What `const` will be ○
 
-#### `os.exit` is a sentinel panic
+A `const` binding is evaluated at **comptime**: the same functions that
+run at runtime, executed by the compiler, with three discipline rules
+(Chapter 36): no IO, fuel-limited evaluation, deterministic by
+construction.
 
-The interpreter implements `os.exit` by panicking with a sentinel that
-becomes an `ExitError`, recovered in `Run`. That is why tests can
-intercept exits instead of the test process dying — a `test` block
-whose code calls `os.exit` reports a failure rather than killing the
-runner.
+The results land in **read-only data** — shared across all uses, zero
+startup cost, immutable by memory protection.
 
-It is also why `os.exit` skips defers: the unwind is caught at the top
-rather than running the normal cleanup path.
+`const re = regex.compile("…")` is the example worth holding onto: a
+bad pattern becomes a *compile error*, and the compiled automaton ships
+in rodata. Compare Go's `regexp.MustCompile` in a `var`, which is a
+runtime panic during `init()`.
 
-#### Errors carry the OS message
+#### The designed package model ○
 
-`fs.read_string` returns the underlying error text:
+- **Imports are URLs; there is no central registry.**
+  `import "github.com/…"` resolves via git. Registries are
+  infrastructure to run and a supply-chain single point of failure;
+  decentralised imports plus lockfile hashes give integrity without a
+  middleman. (Go added a proxy a decade in; that is a later scaling
+  concern.)
+- **Vendoring by default.** The manifest names dependencies,
+  `vendor/` contains them, and builds read only from `vendor/`. No
+  network at build time, and the vendored tree is the auditable
+  artifact — what you read is what links.
+- **`glide.mod` is data, not a program.** Module name, toolchain pin,
+  dependencies with hashes. No scripts, hooks, profiles, or feature
+  flags.
+- **Toolchain pinning** from day one: the manifest pins the Glide
+  version, and newer toolchains build *as* the pinned one or refuse.
 
-```
-error: open /nonexistent: no such file or directory
-```
+#### The `x/` porch ○
 
-`.context("reading input")` prepends a breadcrumb (Chapter 19):
+A designed middle tier: `glide.x/smtp`, `glide.x/mail` — first-party
+code with the same authorship, review bar, tooling, and `glide doc`,
+sitting **outside** the toolchain distribution and its stability
+promise, versioned independently, allowed to churn.
 
-```
-error: reading input: open /nonexistent: no such file or directory
-```
-
-#### IO is a cancellation point
-
-File and network operations are cancellation points (Chapter 26), so a
-read inside a dying scope unwinds rather than completing.
+The reasoning is a specific Go post-mortem. `net/smtp` rotted *inside*
+the standard library, frozen at 2011's assumptions. Its pain was never
+the four-verb protocol; it was the living periphery — XOAUTH2, TLS
+posture changes, provider quirks. **Location does not preserve
+batteries; maintenance cadence does.**
 
 ---
 
 ### 3. Why This Design?
 
-#### Why the surface is so small
+#### Why `pub` instead of Go's capitalisation
 
-The **dogfood rule**: a stdlib function exists because a program needed
-it, not because it might be useful.
+Go's capitalisation trick works because nothing else competes for the
+case distinction. Here, **pattern matching needs it**:
 
-This is not minimalism for its own sake — the designed standard library
-is explicitly **batteries-included** (HTTP, TLS, crypto, JSON, time,
-regex, structured logging, templating, compression, a `database/sql`-
-style interface). `DESIGN.md`'s three-way argument:
-
-- **Rust's minimal std** → 300 transitive dependencies per web service,
-  each a supply-chain surface. The opposite of auditable.
-- **Python froze its batteries and they died on the shelf.** `urllib`
-  is stdlib; everyone installs `requests`. PEP 594 hauled out corpses.
-- **Go proved the upside** — stdlib `net/http` made `Handler` the
-  ecosystem's shared currency — but v1 chains it to fossils.
-
-The synthesis: **stdlib versions with the language**, `glide fix`
-migrates callers mechanically, and wrong modules get fixed rather than
-embalmed beside their replacements. Python's disease was not batteries;
-it was batteries plus immortality.
-
-So the small surface today is a *sequencing* decision, not a
-philosophy. The philosophy is that what ships must be right, and what
-ships gets built when a real program forces the question.
-
-#### Why argument parsing is a pattern, not a library
-
-Because the list pattern is *already* a complete check.
-
-`let [_, path] = os.args() else { usage() }` validates arity in both
-directions, binds the argument, and handles the failure — in one line,
-with no dependency and no framework. Compare Go:
-
-```go
-if len(os.Args) != 2 {
-    fmt.Fprintln(os.Stderr, "usage: linecount <file>")
-    os.Exit(2)
+```glide
+match shape {
+    Circle(r) => …
+    point     => …
 }
-path := os.Args[1]
 ```
 
-Five lines, and the index and the length check can disagree.
+Capitalised tests, lowercase binds (Chapter 3). Go never hit this
+conflict because Go has no pattern matching. The case axis is spent, so
+visibility needs a keyword.
 
-A real flag parser (`--verbose`, `-o file`, subcommands) is genuinely
-a library and is on the committed list. Positional arguments are not.
+And the keyword turns out to be better anyway, for a reason unrelated
+to patterns: **a visibility change is a one-line diff that says "this
+became public."** Reviewable. With capitalisation it is a
+whole-codebase rename, and the diff shows a hundred call sites with the
+actual decision buried among them.
 
-#### Why `os.exit` skips defers
+The accepted cost: no exported-ness signal at use sites. Small in
+practice — cross-module calls are already qualified (`http.get`), and
+within a module everything is accessible anyway.
 
-Because it is the "get out now" primitive, and a primitive that
-sometimes runs arbitrary user code is not that.
+#### Why exactly two levels
 
-The consequence is a rule: **use `os.exit` only where there is nothing
-to clean up.** Argument validation at the top of `main`, before
-anything is opened, is the canonical place. Everywhere else, return an
-`Err` — which unwinds normally, runs defers, prints the error, and
-exits 1.
+Because `pub(crate)`, `internal`, `protected`, and friend declarations
+are all answers to "this module is too big" that let you avoid fixing
+it.
 
-This is also why `log.Fatal` is banned in the designed logging module:
-it is a hidden `os.Exit` inside a logging call — control flow disguised
-as observability, skipping defers. Log, then exit, in two honest lines.
+If you want something visible to *some* outside code but not all,
+either the boundary is in the wrong place or you have two modules that
+should be one. `DESIGN.md`: wanting a third level usually means the
+module boundary is drawn wrong.
 
-#### Why no build scripts, restated here
+Field-level `pub` covers the case that actually matters — a public type
+with private internals — without a level.
 
-Chapter 2 covered it; it belongs in a chapter about files because that
-is where the temptation lives. `glide build` executes no user code,
-reads nothing outside the module tree and `vendor/`, and touches no
-network. Code generation is a step you run, visibly, with output
-committed.
+#### Why imports are inert
 
-Cargo's `build.rs` and npm's lifecycle scripts mean compiling someone's
-code runs their program on your machine. Most supply-chain attacks in
-both ecosystems ride exactly that.
+This is the decision with the longest causal chain in the language, and
+it is worth tracing.
 
-#### Why `embed` is grammar
+**Go's `const` can only hold scalars.** So anything structured —
+a lookup table, a compiled regex, a map — has to be a `var`. A `var`
+is a mutable global built at runtime. Building it needs somewhere to
+run, which is `init()`. And once `init()` exists, importing a package
+runs code, which enables `import _ "github.com/lib/pq"` — importing a
+package purely so its `init()` registers a driver in a global.
 
-Go's `//go:embed` is a magic comment — invisible to the formatter,
-invisible to `grep` for anything but the literal string, and dependent
-on an import of a package you never call.
+All of it is downstream pressure from one limitation.
 
-`embed "static/**" as assets` is a declaration. The build system reads
-the files (comptime never does IO, so hermeticity survives), and the
-result serves through the same `fs` interface as disk. Content hashes
-at build time give the immutable-URL caching story for free.
+Glide's `const` is comptime-evaluated and can hold anything, so the
+pressure never arises. With that in place:
+
+- Module level can be `const` only.
+- Imports can be inert.
+- **There is no initialisation-order fiasco** — no C++ static-init
+  order problem, no Go init graph.
+- `main` is line one of runtime.
+
+The cost is real and is the design's grain: runtime state is created in
+`main` and passed down. A database handle, a logger, a clock. Nothing
+materialises behind your back.
+
+For the rare genuinely-lazy global, the designed answer is a stdlib
+`Lazy<T>`, chosen by name — the same doctrine as `BigInt` and
+`StringBuilder`.
+
+#### Why a directory is a module
+
+Go got this right. The alternatives:
+
+**Rust's module tree** — `mod` declarations, `mod.rs` or `foo/mod.rs`,
+`pub(super)`, `use` paths, `#[path]` attributes. The file system and
+the module tree are separate structures you must keep in sync, and the
+sync is manual.
+
+**Java's package-per-directory with a declaration in every file** —
+the same information in two places.
+
+**Python's per-file modules** — so splitting a file changes the API,
+which means files are load-bearing and you cannot reorganise freely.
+
+Directory-is-a-module means splitting a module across files is a purely
+editorial decision with no API consequence. That is a genuine freedom
+and it is why Go files are often organised by "what a reader wants to
+find" rather than by dependency.
+
+#### Why no central registry
+
+npm, PyPI, crates.io, and RubyGems are all infrastructure someone must
+run and a single point of failure for the entire ecosystem's integrity.
+Every one of them has had a supply-chain incident.
+
+URL imports plus lockfile hashes plus vendoring give integrity without
+a middleman: the dependency is a git repository you can read, the hash
+is in the manifest, and the vendored tree is what actually compiles.
+
+#### Why vendoring by default
+
+`DESIGN.md`: **a dependency is a liability to justify.** Vendoring
+makes the liability visible — the code is in your tree, in your diffs,
+readable in review, and a new dependency shows up as thousands of added
+lines rather than one manifest line.
+
+It also means no network at build time, which is a hermeticity
+requirement.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `os.Args`, `flag`, `os`, `io/fs`, `os/exec`, `//go:embed`. The
-model for most of the designed surface. Go's `flag` package is
-deliberately limited (no short/long pairs, no subcommands), which is
-why every serious Go CLI uses `cobra` or `urfave/cli` — a case where
-the stdlib's minimalism lost.
+**Go.** Directory-is-a-package, qualified imports, capitalisation for
+visibility, `init()` and import-for-side-effect, module proxy and
+checksum database. Glide keeps the first two, replaces the third,
+removes the fourth, and defers the fifth.
 
-**Rust.** `std::fs`, `std::env::args`, `std::process`, and `clap` for
-CLI parsing as a near-universal dependency. Rust's `Path`/`PathBuf` vs
-`OsString` vs `String` split is the ceremony Glide declines by treating
-strings as UTF-8 bytes (Chapter 6).
+**Rust.** Crates and a module tree, `pub`/`pub(crate)`/`pub(super)`,
+`use` for unqualified imports, crates.io as a central registry,
+`build.rs`. Glide takes `pub` and the orphan rule; it declines the
+module tree, the visibility zoo, `use`, the registry, and build
+scripts.
 
-**Python.** `sys.argv`, `argparse`, `pathlib`, `subprocess`,
-`os`/`shutil`. Batteries-included and showing its age — three
-overlapping filesystem APIs, and `subprocess` with a security-relevant
-`shell=True` footgun.
+**Python.** File-is-a-module, packages via `__init__.py`, imports that
+execute the module body, `from x import *`, no visibility at all
+(a leading underscore is a convention). Executing imports is the source
+of Python's startup-order bugs and of import cycles that are runtime
+errors.
 
-**Zig.** `std.fs`, `std.process`, explicit allocators everywhere, and
-the best cross-compilation in the industry (it ships a C compiler and
-libc for every target). Glide's cross-compilation is trivial by
-*avoidance* — no C FFI — rather than by Zig's heroics.
+**Java.** Package declarations in every file, four visibility levels
+(`public`, `protected`, package-private, `private`), Maven Central,
+static initialisers with an order that surprises people. Java's
+`static { }` blocks are `init()` with the same problems.
 
-**C.** `argc`/`argv`, `open`/`read`/`write`, `errno`. The baseline, and
-the source of the exit-code conventions everything else inherits.
+**JavaScript.** ES modules with named and default exports, `import`
+executing the module, npm with lifecycle scripts (the supply-chain
+door), and a resolution algorithm complex enough to need its own
+specification.
 
-**Node.** `process.argv` (with two leading entries, not one),
-`fs` with three parallel APIs (callback, promise, sync), and npm
-lifecycle scripts as the supply-chain door.
+**Zig.** `@import` returning a struct, `pub` for visibility, no
+registry (URLs plus hashes in `build.zig.zon`), and `build.zig` as a
+build script. Very close to Glide on imports and visibility; the build
+script is the divergence.
 
 ---
 
 ### 5. Common Mistakes
 
-**Forgetting that `os.args()[0]` is the program name.** A one-argument
-program matches `[_, path]`, not `[path]`.
+**Looking for a way to import a name unqualified.** There is none.
+`http.get(url)`, always. This is deliberate: a qualified call tells you
+where the function came from without scrolling to the imports.
 
-**Indexing instead of pattern matching.**
-
-```glide
-// Bad — panics with no arguments
-let path = os.args()[1]
-
-// Good
-let [_, path] = os.args() else {
-    eprintln("usage: prog <file>")
-    os.exit(2)
-}
-```
-
-**Using `os.exit` where cleanup matters.**
+**Reaching for a module-level `let`.**
 
 ```glide
-// Bad — the defer never runs
-fn main() {
-    let db = sql.open(dsn) ?? { os.exit(1) }
-    defer { _ = db.close() }
-    if bad_config() {
-        os.exit(1)              // db is never closed
-    }
-}
+// Bad — does not exist
+let db = sql.open(dsn)
 
-// Good
+// Good — create in main, pass down
 fn main() -> Result<(), Error> {
     let db = sql.open(dsn)?
-    defer { _ = db.close() }
-    if bad_config() {
-        return Err(.BadConfig)  // unwinds; the defer runs
-    }
-    Ok(())
+    …
 }
 ```
 
-**Sending diagnostics to stdout.** It breaks pipelines. `eprintln` for
-anything that is not the program's output.
+The absence is the feature. A mutable global is a thing that can change
+under any caller, and a global initialised at load is a thing that runs
+before `main`.
 
-**Expecting a flag parser.** There is none yet. Positional arguments
-are patterns; flags are ○.
+**Expecting `init()`.** There is none, permanently. If you want
+something to happen at startup, it goes in `main` — where a reader can
+find it.
 
-**Expecting `fs` to do more than read.** One function today. Writing,
-listing, and metadata are ○.
+**Expecting an import to register something.** Imports are inert.
+Driver registration, plugin discovery, and `metrics.MustRegister` all
+have to be explicit calls.
 
-**Reading a whole file when you want to stream it.**
-`fs.read_string` loads the entire file into memory. For a
-multi-gigabyte log that is a problem, and streaming IO is ○. Until then
-this is a real limitation, not a style choice.
+**Putting a function call in a `const` today.**
 
-**Forgetting `.context()` on file errors.** `open /tmp/x: no such file`
-tells you what failed; `loading config: open /tmp/x: no such file`
-tells you why you cared.
+```glide
+// ○ — will work when comptime lands
+const table = make_table()
+
+// ✓ today
+const max_retries = 3
+```
+
+**Making everything `pub` reflexively.** The default is module-private
+for a reason, and a non-`pub` declaration is one you can change freely.
+
+**Splitting a module because a file got long.** Files within a module
+share one namespace, so splitting is free and changes nothing. Split
+when a *reader* would find it easier, not when a compiler demands it.
+
+**Assuming module boundaries are cheap to move later.** They are the
+one thing `pub` makes visible in a diff, and moving a boundary is the
+one refactor `glide fix` cannot do for you.
 
 ---
 
 ### 6. Performance Considerations
 
-**`fs.read_string` reads the whole file into memory** in one
-allocation. Fine for configuration files and source code; not fine for
-arbitrary user input of unknown size.
+**Startup is nothing.** No init graph to walk, no static constructors,
+no module bodies to execute. A Glide binary's startup cost is the
+runtime's own initialisation.
 
-**Printing is one syscall per call** and unbuffered (Chapter 6). For
-bulk output — a million lines — that is seconds rather than
-milliseconds, and the designed answer is an explicit buffered writer
-(○) whose `flush`/`close` is visible via `defer`.
+This is a real difference from Go at scale: a Go program with a deep
+dependency tree can spend milliseconds in `init()` before reaching
+`main`, and that cost is invisible and hard to attribute.
 
-Until it lands, the mitigation is to build the output and print once:
+**`const` costs nothing at runtime** (○). Comptime evaluation happens
+at build time, and the result lands in read-only data — shared, zero
+startup cost, immutable by memory protection. A `const` lookup table is
+strictly better than Go's `var` equivalent, which is built at startup
+in every process.
 
-```glide
-// Bad — a million syscalls
-for line in lines { println(line) }
+**Comptime evaluation costs build time**, bounded by the fuel limit.
 
-// Better today — one syscall
-println(lines.join("\n"))
-```
+**Qualified calls cost nothing.** `http.get` resolves statically.
 
-**IO is a cancellation point**, so a read inside a `scope(timeout:)`
-can be aborted. That costs a context per call in the interpreter.
+**Vendoring costs disk and repository size**, which is the price of the
+audit trail.
 
-**`os.args()` allocates a list per call.** Call it once.
-
-**Startup is nothing** (Chapter 29) — no init graph, no static
-constructors.
+**Monomorphisation interacts with module boundaries** (○): a generic
+function used across modules is instantiated per concrete type in the
+using module, so binary size grows with usage rather than with
+definition.
 
 ---
 
 ### 7. Best Practices
 
-**Validate arguments with a pattern, at the top of `main`, before
-anything is open.**
-
-```glide
-fn main() -> Result<(), Error> {
-    let [_, src, dst] = os.args() else {
-        eprintln("usage: copy <src> <dst>")
-        os.exit(2)
-    }
-    // nothing is open yet, so os.exit above is safe
-    …
-}
-```
-
-**Return `Err` from `main` for anything that happens after a resource
-is open.** It prints the error, exits 1, and runs your defers.
-
-**Use `os.exit(2)` for usage errors** and let everything else be an
-`Err`. That is the Unix convention (`2` = misuse) and it distinguishes
-"you called me wrong" from "something went wrong".
-
-**Add context to every file error.**
+**Create dependencies in `main` and pass them down.**
 
 ```glide
 // Good
-let text = fs.read_string(path).context("reading {path}")?
-```
-
-**Keep the happy path unindented with `let … else`.**
-
-```glide
 fn main() -> Result<(), Error> {
-    let [_, path] = os.args() else { usage() }
-    let text = fs.read_string(path).context("reading {path}")?
-    let Some(config) = parse(text) else {
-        return Err(.BadConfig{ path: path })
+    let db = sql.open(dsn)?
+    defer { _ = db.close() }
+
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+    r.post(`/notes`, |req| create_note(db, req))
+
+    scope s {
+        _ = s.spawn(|| sweeper(db))
+        http.serve("127.0.0.1:8080", r)
     }
-    run(config)
 }
 ```
 
-Three possible failures, zero nesting.
+Every dependency is visible in one place, the handlers are ordinary
+testable functions, and there is no global to reach for in a test.
 
-**Write to stdout only what a downstream program should consume.** If
-you would not want it in a `| sort`, it goes to stderr.
+The closures adapting `|req| get_note(db, req)` are the idiomatic
+dependency-injection shape, and they cost one line each.
 
-**Do not build a flag parser.** Wait for `flag`, or use positional
-arguments — which for a tool with one or two inputs is better anyway.
+**Keep the public surface small.** A module's `pub` items are its
+contract. Everything else you can change without breaking anyone.
+
+```glide
+// Good
+pub type Store = struct { db: Db }          // opaque: no pub fields
+
+pub fn open(dsn: String) -> Result<Store, Error>
+pub fn get(s: Store, id: NoteId) -> Result<Note?, Error>
+
+fn build_query(id: NoteId) -> String        // private helper
+```
+
+**Name modules after the domain, not the pattern.** `notes`, `billing`,
+`auth` — not `services`, `helpers`, `utils`. A `utils` module is a
+module with no boundary, and it grows until it depends on everything.
+
+**Put the important declaration first.** File order is narrative order,
+and the formatter will not touch it.
+
+**Let the formatter own imports** (○). Do not hand-curate the list.
+
+**Use `const` for things that are genuinely constant** — and note that
+in the designed language that includes compiled regexes, lookup tables,
+and embedded data, not just scalars.
+
+**Do not create a module per type.** A module is a boundary with a
+contract, not a namespace for one struct. If a module's public surface
+is one type and its methods, it probably belongs with its neighbours.
+
+**Treat a new dependency as a decision to justify.** Vendoring makes
+this concrete: adding one puts its source in your repository and your
+diffs. That friction is deliberate.
 
 ---
 
 ### 8. Examples
 
-**`wc`, complete:**
+**The dependency-injection shape, complete:**
 
 ```glide
-// wc.gld — count lines, words, and bytes.
-import fs
-import os
+import http
+import sql
+import time
+
+type Store = struct { db: Db }
+
+fn get_note(store: Store, req: Request) -> Result<Response, Error> {
+    let Some(raw) = req.path_param("id") else {
+        return Ok(http.bad_request("missing id"))
+    }
+    let Some(id) = raw.parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let found = store.db.query_one(
+        "select id, title from notes where id = :id",
+        ["id": id],
+    )?
+    match found {
+        Some(row) => Ok(http.json(row))
+        None      => Ok(http.not_found())
+    }
+}
+
+fn sweeper(store: Store) {
+    for {
+        time.sleep(10.mins)
+        _ = store.db.exec("delete from stale") ?? 0
+    }
+}
 
 fn main() -> Result<(), Error> {
-    let [_, path] = os.args() else {
-        eprintln("usage: wc <file>")
-        os.exit(2)
+    // Every dependency is created here, once, visibly.
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    let store = Store{ db: db }
+
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(store, req))
+
+    scope s {
+        _ = s.spawn(|| sweeper(store))
+        http.serve("127.0.0.1:8080", r)
     }
-
-    let text = fs.read_string(path).context("reading input")?
-
-    let lines = text.lines().len()
-    let words = text.split_whitespace().len()
-    let bytes = text.len()
-
-    println("{lines:8}{words:8}{bytes:8} {path}")
-    Ok(())
 }
 ```
 
-```bash
-$ glide run wc.gld testdata/sample.txt
-       1       7      33 testdata/sample.txt
-$ glide run wc.gld
-usage: wc <file>
-$ echo $?
-2
-$ glide run wc.gld /nonexistent
-error: reading input: open /nonexistent: no such file or directory
-$ echo $?
-1
-```
+Notice what is *not* here: no global `db`, no `init()` opening a
+connection pool, no service locator, no dependency-injection framework,
+and no `sync.Once`. The handler functions take their dependencies as
+parameters, which makes them ordinary functions you can call from a
+test with a test store.
 
-Three exit paths, three exit codes, and each failure message says
-something useful. Note the contrast between exit 2 (you called me
-wrong) and exit 1 (something went wrong).
-
-**`wordfreq` — the repository's own example:**
+**Visibility doing real work:**
 
 ```glide
-// wordfreq counts word frequencies in a file.
-import fs
-import os
+// --- module `ids` ---
 
-fn main() -> Result<(), Error> {
-    let [_, path] = os.args() else {
-        eprintln("usage: wordfreq <file>")
-        os.exit(2)
+pub type NoteId = distinct Int
+
+impl NoteId {
+    // The only way to make one from untrusted input.
+    pub fn parse(raw: String) -> NoteId? {
+        let Some(n) = raw.parse_int() else { return None }
+        if n <= 0 { return None }
+        Some(NoteId(n))
     }
 
-    let text = fs.read_string(path).context("reading input")?
+    // Note: `.value()` is the builtin unwrap for a distinct type,
+    // so do NOT define a method called `value` — it would shadow the
+    // builtin and `self.value()` inside it would recurse forever.
+    pub fn render(self) -> String { "note-{self.value()}" }
 
-    let mut counts: Map<String, Int> = [:]
-    for word in text.split_whitespace() {
-        counts[word] = (counts[word] ?? 0) + 1
-    }
-
-    let mut entries = counts.entries()
-    entries.sort_by(|a, b| b.1.cmp(a.1))
-
-    for (word, n) in entries.iter().take(20) {
-        println("{n:6}  {word}")
-    }
-    Ok(())
+    // Private: used by the module's own query builder.
+    fn as_param(self) -> Int { self.value() }
 }
+
+pub fn next_id(current: NoteId) -> NoteId { … }
+
+fn checksum(id: NoteId) -> Int { … }      // private helper
 ```
 
-```bash
-$ glide run examples/wordfreq.gld testdata/sample.txt
-     3  the
-     2  quick
-     1  lazy
-     1  dog
-```
+Outside the module you can `parse`, `render`, and unwrap with the
+builtin `.value()`. You cannot call `as_param` or `checksum`, and —
+because those are not `pub` — the module's author can rename or delete
+them without breaking anyone.
 
-Twenty lines, no dependencies, and every failure path handled. This is
-the program `GRAMMAR.md` used to find the language's ugly corners, and
-it is worth noting how much of the book it exercises: list patterns,
-`let … else`, divergence, `?`, `.context`, map indexing returning an
-Option, `??`, a comparator closure, lazy `take`, and a format spec.
-
-**Optional arguments, without a flag parser:**
+**Bad versus good: the global**
 
 ```glide
-// head.gld — print the first N lines (default 10).
-import fs
-import os
+// Bad — does not compile; there is no module-level `let`
+let db = sql.open("sqlite:app.db")
 
-fn main() -> Result<(), Error> {
-    let args = os.args()
-    let (path, n) = match args {
-        [_, p]      => (p, 10)
-        [_, p, raw] => (p, raw.parse_int() ?? 10)
-        _           => {
-            eprintln("usage: head <file> [lines]")
-            os.exit(2)
-        }
-    }
-
-    let text = fs.read_string(path).context("reading {path}")?
-    for line in text.lines().iter().take(n) {
-        println(line)
-    }
-    Ok(())
+fn get_note(id: Int) -> Result<Note, Error> {
+    db.query_one(…)        // reaches for a global
 }
 ```
 
-The `match` over `os.args()` handles all three shapes exhaustively, and
-the `_` arm diverges so the `match` type-checks.
-
-**Bad versus good: the exit that loses data**
-
-```glide
-// Bad
-fn main() {
-    let f = fs.create("out.txt") ?? { os.exit(1) }     // ○ fs.create
-    defer { _ = f.close() }                             // never runs
-    write_report(f)
-    if verify_failed() {
-        eprintln("verification failed")
-        os.exit(1)          // the buffered write is lost
-    }
-}
-```
-
-`os.exit` skips defers, so `f.close()` — which is where a buffered
-write is flushed — never happens. The file is truncated and the program
-exits 1, looking like a clean failure.
+Even setting aside that it does not parse, the shape is the problem:
+`get_note` has a hidden dependency that no signature mentions, cannot
+be tested without a real database, and cannot be used with a second
+database.
 
 ```glide
 // Good
-type AppError = VerificationFailed
-
-fn main() -> Result<(), AppError> {
-    let f = fs.create("out.txt")?
-    defer { _ = f.close() }
-    write_report(f)
-    if verify_failed() {
-        return Err(.VerificationFailed)     // unwinds; the defer runs
-    }
-    Ok(())
+fn get_note(db: Db, id: Int) -> Result<Note, Error> {
+    db.query_one(…)
 }
 ```
 
-The rule in one line: **`os.exit` before you open anything; `Err` after.**
+The dependency is in the signature. A test passes an in-memory
+database. A migration tool passes a different one. Nothing is hidden.
+
+This is the same argument as Chapter 27's against `ctx` parameters,
+running in the *opposite* direction — and the difference is
+instructive. Cancellation is **observation-adjacent**: it does not
+change what a function computes, only whether it finishes, so it can be
+ambient. A database handle is **behaviour-affecting**: which database
+you query changes the answer, so it travels in a parameter.
+
+`DESIGN.md` calls this **the droppability razor**: could program output
+change if this ambient value were dropped? No → observation, ambient is
+fine. Yes → parameter.
+
+The closed set of things allowed to be ambient is exactly three:
+cancellation and deadlines (scopes), observation (log fields, trace
+context), and the clock. Everything else — auth principal, tenant,
+transaction, request config — travels visibly.
 
 ---
 
@@ -641,52 +672,54 @@ The rule in one line: **`os.exit` before you open anything; `Err` after.**
 
 **Summary**
 
-- The surface is deliberately tiny today: `os.args()`, `os.exit(code)`,
-  and `fs.read_string(path)`. Everything else is ○ and arrives under
-  the **dogfood rule** — a stdlib function exists because a program
-  needed it.
-- The *designed* standard library is batteries-included; the small
-  surface is a sequencing decision. `DESIGN.md`'s synthesis: stdlib
-  versions with the language and `glide fix` migrates callers, so
-  wrong modules get fixed rather than embalmed. Python's disease was
-  not batteries; it was batteries plus immortality.
-- **`os.args()[0]` is the program name.** Argument handling is a **list
-  pattern** — `let [_, path] = os.args() else { … }` validates arity
-  in both directions, binds, and handles failure in one line.
-- **Exit codes:** `Ok(())` → 0, `Err(e)` → 1 with the error on stderr,
-  `os.exit(n)` → n, panic → 1. **`os.exit` skips `defer`s.**
-- The rule: **`os.exit` before you open anything; `Err` after.** Same
-  reasoning bans `log.Fatal` in the designed logging module — a hidden
-  exit inside a logging call, skipping defers.
-- **Stream discipline:** stdout is the program's output, stderr is
-  everything else. Both unbuffered.
-- ○: full `fs`, `process`, `flag`, environment variables, streaming IO,
-  a buffered writer, `embed` as declarative grammar, and
-  `glide build -target` cross-compilation that stays trivial because C
-  FFI was exiled.
-- Host shims are **injectable per embedder** (○), which buys
-  capability-style sandboxing for free — an untrusted embedded script
-  is simply never handed `fs`.
+- **A directory is a module.** All `.gld` files in it share one
+  namespace; splitting across files is editorial and has no API
+  consequence. No `mod` declarations, no module tree.
+- **Imports are qualified and inert.** `import http`, then
+  `http.get(…)`. Importing executes nothing — no `init()`, no
+  registration magic, no import-for-side-effect.
+- **`pub` is the visibility system, and there are exactly two levels.**
+  Module-private by default, `pub` outside. Fields take `pub`
+  individually. No `pub(crate)` zoo.
+- `pub` exists rather than Go's capitalisation because **pattern
+  matching needs the case axis** — and it turns out to be better
+  anyway, because a visibility change becomes a reviewable one-line
+  diff.
+- **Module level is `const` only.** No module-level `let`, no mutable
+  globals, no `init()`, **no life before `main`**. The whole chain
+  traces back to Go's scalar-only `const` forcing structured data into
+  `var`, which forced `init()`, which enabled import-for-side-effect.
+- `const` is comptime-evaluated (○), lands in read-only data, and can
+  hold compiled regexes and lookup tables. M2 shim: pure expressions
+  only.
+- **Runtime state is created in `main` and passed down.** That is the
+  design's grain, and it is why handlers take `db` as a parameter.
+- **The droppability razor** decides ambient versus parameter: could
+  output change if the value were dropped? No → ambient (cancellation,
+  logging, clock — a closed set of three). Yes → parameter.
+- ○: URL imports with no central registry, vendoring by default,
+  `glide.mod` as data, toolchain pinning, and the `x/` porch for
+  first-party code that must churn at the speed of the outside world.
 
 **Exercises**
 
-1. **Write `cat` with three failure modes.** Handle no arguments (exit
-   2, usage on stderr), a missing file (exit 1, error propagated from
-   `main`), and success. Then add a `-n` line-numbering flag using only
-   pattern matching, and note exactly where a real flag parser would
-   start earning its place.
+1. **Trace an `init()`.** In a Go codebase, find an `init()` function
+   or an `import _`. Work out what it does and what would break if it
+   ran at a different time. Then write the Glide version — which means
+   deciding where in `main` it goes and who holds the resulting state.
+   In most cases the answer is clearer than the original.
 
-2. **Find the lost write.** In a codebase you know, find a call to
-   `os.Exit`, `sys.exit`, `System.exit`, or `process.exit` that happens
-   after a file or connection is opened. Trace whether the cleanup runs.
-   In Go this is a known trap that `go vet` does not catch; in Glide it
-   is the same trap, which is why the rule is worth internalising
-   rather than relying on the language.
+2. **Apply the razor.** List everything your current service carries
+   implicitly — through globals, thread-locals, `ctx.Value`, or a DI
+   container. For each, ask: could program *output* change if it were
+   silently dropped? Sort them into ambient and parameter. Anything in
+   the ambient column that is not cancellation, logging, or the clock
+   is something the design says should be a parameter — check whether
+   you agree.
 
-3. **Design the `flag` module.** Given that Go's `flag` was too limited
-   and every serious Go CLI uses `cobra`, write the signature for a
-   Glide `flag` API that handles short and long options, subcommands,
-   and required arguments — using named parameters and sum types rather
-   than a builder. Then check it against the "no DSL" principle: if
-   your design has a fluent chain of `.Flag().Short().Required()`, it
-   has become the thing `DESIGN.md` declines.
+3. **Draw a module boundary.** Take a package you maintain and list its
+   exported symbols. For each, ask whether an external caller genuinely
+   needs it or whether it is exported because something else in the
+   same repository needed it. The second category is what `pub(crate)`
+   exists to serve, and `DESIGN.md` claims it means the boundary is
+   wrong — see whether the claim survives contact with your codebase.

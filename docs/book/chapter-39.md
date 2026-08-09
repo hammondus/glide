@@ -1,681 +1,612 @@
-# Chapter 39: Case Study — A Complete Service
+# Chapter 39: Common Anti-Patterns
 
-This chapter builds one program from requirements to running code: a
-URL shortener with a database, an HTTP API, typed errors, background
-capability, and tests. About 160 lines.
+Every language acquires anti-patterns from the languages its users came
+from. Glide is unusual in that its likely users come from *three*
+directions — Go, Rust, and the C-lineage mainstream — and each brings a
+different set of habits that are locally reasonable and globally wrong
+here.
 
-Everything here **runs** — the final program was executed against the
-interpreter and its output pasted back in, including the tests.
-
-The value is not the program. It is watching the decisions from
-thirty-eight chapters get made in sequence, and seeing which of them
-turn out to matter.
+This chapter is organised by origin, because that is how you will
+recognise them in your own code.
 
 ---
 
-### 1. Basic Usage: Requirements
+### 1. Basic Usage: The Catalogue
 
-**The service:**
+#### Go-in-Glide
 
-- `POST /links` with `{"code": "gl", "url": "https://example.com"}`
-  creates a short link.
-- `GET /links/{code}` returns the link and increments a hit counter.
-- Codes are 1–16 characters, lowercase, no slashes.
-- URLs must be absolute.
-- A duplicate code is rejected.
-- A missing code is a 404.
+**The functional-options pattern.** Thirty lines of ceremony to express
+what a signature should have said (Chapter 7).
 
-**Non-functional:**
+```glide
+// Bad
+type Option = fn(Config) -> Config
+fn with_timeout(d: Duration) -> Option { |c| Config{ timeout: d, ..c } }
+fn with_tls(b: Bool) -> Option { |c| Config{ tls: b, ..c } }
+fn connect(host: String, opts: List<Option>) -> Conn { … }
 
-- SQLite storage.
-- Errors distinguishable by the caller, mapped to HTTP statuses in one
-  place.
-- Tested, including a property.
-- No shutdown code.
+connect("db.local", [with_tls(false)])
+
+// Good
+fn connect(host: String, port: Int = 5432, tls: Bool = true) -> Conn
+connect("db.local", tls: false)
+```
+
+The pattern exists in Go because Go has no defaults and no named
+arguments. Transplanting it costs a closure and a list allocation per
+call and produces a worse call site.
+
+**The `kind` field.** A struct with a discriminator string and
+mostly-unused pointers (Chapter 13).
+
+```glide
+// Bad
+type Node = struct {
+    kind: String
+    value: Int
+    left: Node?
+    right: Node?
+}
+
+// Good
+type Node = Leaf(Int) | Branch(Node, Node)
+```
+
+Tells: a `kind`/`type`/`tag` field; several `Option` fields where only
+certain combinations are valid; a comment explaining which fields apply
+when.
+
+**Boolean flag soup.** Two booleans is four states; if only three are
+meaningful, it is a three-variant sum type (Chapter 12).
+
+**Sentinel returns.** `-1` for not-found, `""` for absent, `0` for
+unset. The Option exists (Chapter 14).
+
+**The `ctx` parameter.** Cancellation is ambient (Chapter 27). A
+`timeout: Duration` parameter spreading through your call graph is
+`ctx` rebuilt by hand — and it is also *wrong*, because passing the
+same timeout to two sequential calls doubles the budget.
+
+**Shutdown ceremony.** A stop channel, a `done` flag, a `shutting_down`
+boolean, a signal handler. The scope does all of it (Chapter 26).
+
+```glide
+// Bad
+let (stop_tx, stop_rx) = channel()
+_ = s.spawn(|| sweeper(db, stop_rx))
+…
+stop_tx.close()
+
+// Good
+_ = s.spawn(|| sweeper(db))
+```
+
+**Reaching for a global.** There is no module-level `let`, and the
+reflex to want one is the tell (Chapter 30).
+
+**`interface{}`-shaped thinking.** There is no top type. A
+`Map<String, Any>` is a struct that has not been written.
+
+#### Rust-in-Glide
+
+**Combinator chains.** Rust's `Option` and `Result` have a large
+combinator surface, and Glide deliberately does not.
+
+```glide
+// Rust-in-Glide (and most of these do not exist)
+config.get("port").and_then(|s| s.parse_int()).unwrap_or(8080)
+
+// Glide
+let port = (config["port"] ?? "8080").parse_int() ?? 8080
+```
+
+`DESIGN.md` prefers three readable constructs (`??`, `if let`,
+`let … else`) plus `match` over twenty methods.
+
+**Excessive `distinct` wrapping.** Rust's newtype pattern is cheap and
+idiomatic, and over-applied here it produces `.value()` noise —
+especially since operator traits are ○ (Chapter 15). Wrap identifiers;
+do not wrap counts, indexes, and lengths that the domain freely mixes.
+
+**Fighting for value semantics.** Collections are references and `let`
+does not freeze (Chapter 4). Writing defensive copies everywhere is
+paying for a guarantee the language did not promise. Either do not hand
+out the reference, or wait for persistent collections (○).
+
+**Expecting `?` on `Option`.** Not adopted (Chapter 14).
+
+**Trait objects everywhere.** `any Trait` (○) boxes and dispatches
+dynamically, and it is spelled differently *so that the cost is
+visible*. Generic bounds are the default.
+
+**Premature lifetimes-thinking.** There is a GC. A closure can capture
+whatever it likes and return it; a struct can hold a reference to
+anything; nothing needs to be `'static`.
+
+#### Java/C#-in-Glide
+
+**Interface-per-class.** A trait with one implementation is a type with
+extra steps (Chapter 17). Introduce the seam when a second
+implementation or a test substitution actually exists.
+
+**Getter/setter ceremony.**
+
+```glide
+// Bad
+type User = struct { name: String }
+impl User {
+    pub fn get_name(self) -> String { self.name }
+    pub fn set_name(mut self, n: String) { self.name = n }
+}
+
+// Good
+type User = struct { pub name: String }
+```
+
+Field-level `pub` is the encapsulation mechanism (Chapter 12). Make a
+field public or do not; a getter that returns the field unchanged is
+noise.
+
+**Reaching for inheritance.** There is none, and there is no embedding
+either (Chapter 16). Composition holds data; traits hold behaviour.
+
+**Exception-shaped error handling.** Wanting a `try`/`catch` at the top
+of `main` that handles everything. Errors are values with types; handle
+them where the decision belongs.
+
+**Looking for `recover`.** Permanently absent (Chapter 21). If you want
+a containment boundary, that is a scope.
+
+**Layer cake architecture.** `NoteController` → `NoteService` →
+`NoteRepository` → `NoteEntity`, where each layer is a thin pass-through
+and the interfaces exist for a dependency-injection framework that does
+not exist here. Chapter 40 covers this properly.
+
+#### Python/JavaScript-in-Glide
+
+**Stringly-typed everything.** A `Map<String, String>` config that
+every consumer re-parses (Chapter 11).
+
+**Truthiness habits.** `if xs` does not compile. That is the point
+(Chapter 5).
+
+**Dynamic dispatch on a string.**
+
+```glide
+// Bad
+fn handle(kind: String, body: String) -> Result<(), Error> {
+    if kind == "created" { … } else if kind == "deleted" { … } else { … }
+}
+
+// Good
+type Event = Created{ id: Int } | Deleted{ id: Int }
+fn handle(e: Event) -> Result<(), Error> {
+    match e {
+        Created{ id } => …
+        Deleted{ id } => …
+    }
+}
+```
+
+**Side effects in comprehension-shaped code.** An adapter chain used
+for effects does nothing (it is lazy) or is a loop in disguise
+(Chapter 24).
+
+#### Glide-native anti-patterns
+
+These are not imported; they are ways to misuse features this language
+actually has.
+
+**`_ =>` as a habit.** The single most damaging one. Every `_ =>` on a
+closed type converts a future compile-time work list into a silent
+default. Write it only when "anything else" is genuinely the meaning —
+an HTTP method string, an integer.
+
+**`??` as an error silencer.**
+
+```glide
+// Bad — three failures vanish and the function returns a plausible number
+fn sync(db: Db) -> Int {
+    let a = db.exec("delete from stale") ?? 0
+    let b = db.exec("vacuum") ?? 0
+    _ = db.close()
+    a + b
+}
+```
+
+Each discard is *visible*, which is the design working — and a reader
+can see three places where a failure disappears.
+
+**`mut` creep.** Six mutable bindings where one is needed devalues the
+marker everywhere else (Chapter 4).
+
+**Sum-type explosion.** Beyond seven or eight variants, ask whether two
+dimensions have been flattened into one. `HttpGet | HttpPost | GrpcUnary
+| GrpcStream` is probably `Protocol` × `Method`.
+
+**Generator abuse.** A generator whose body has side effects runs them
+at unpredictable times, or never (Chapter 25). Generators produce
+values.
+
+**Scope-per-call.** A scope with one child that you immediately join is
+a function call with extra steps (Chapter 26).
+
+**Channel-for-one-value.** `join()` returns what the closure returned;
+channels are for streams (Chapter 28).
+
+**Interpolation in a query string.** SQL injection, and the one place
+in the book where nothing structural stops you (Chapter 35).
+
+**Interpolated log messages** (○). The one place interpolation is an
+antipattern: an infinite-cardinality message cannot be grouped,
+counted, or alerted on.
+
+```glide
+// Bad
+log.info("user {id} logged in from {ip}")
+
+// Good
+log.info("user logged in", { user_id: id, ip: ip })
+```
 
 ---
 
-### 2. Under the Hood: The Design, Decision by Decision
+### 2. Under the Hood: Why These Persist
 
-#### Step 1 — types before functions
+**Anti-patterns are usually correct code from a different language.**
+None of the above is stupid. The functional-options pattern is
+excellent Go. The newtype-everything reflex is excellent Rust.
+Interface-per-class is defensible Java. They fail here because the
+constraint that motivated them is gone.
 
-The first question is not "what functions do I need" but **what states
-exist**.
+That makes them hard to see: the code looks *good*, by a standard you
+learned honestly.
 
-```glide
-type Code = distinct String
-type LinkId = distinct Int
+**The reliable detection method is to ask what constraint the pattern
+solves, and whether that constraint exists here.**
 
-type Link = struct {
-    pub id: LinkId
-    pub code: Code
-    pub url: String
-    pub hits: Int
-}
-```
+| Pattern | Constraint it solves | Present in Glide? |
+|---|---|---|
+| Functional options | No default parameters | No |
+| `kind` field + type switch | No sum types | No |
+| `sql.NullString` | No `Option` | No |
+| `ctx` threading | No structured cancellation | No |
+| Stop channels | No scoped task lifetime | No |
+| `recover` in handlers | Panics kill the process | No |
+| Getters | No field-level visibility | No |
+| Interface-per-class | DI framework needs a type | No |
+| Combinator chains | No `let … else` | No |
+| Defensive copying | Borrow checker enforces value semantics | **Yes** — this one is real |
 
-Two `distinct` types (Chapter 15) for ten characters each. `Code` and
-`LinkId` are both wrappers over primitives, and neither can be passed
-where the other belongs — nor where a bare `String` or `Int` belongs.
-
-`Link` has no optional fields, because every field is always present.
-Mandatory initialisation (Chapter 12) means a `Link` that exists is
-complete.
-
-#### Step 2 — enumerate the failures
-
-```glide
-type StoreError = Backend{ cause: Error } | Duplicate{ code: Code }
-
-type ApiError =
-    BadInput{ msg: String }
-    | NotFound{ code: Code }
-    | Store{ cause: StoreError }
-
-impl StoreError { fn from(e: Error) -> StoreError { Backend{ cause: e } } }
-impl ApiError   { fn from(e: StoreError) -> ApiError { Store{ cause: e } } }
-```
-
-**Two error types, one per layer** (Chapter 19). The storage layer's
-failures are `Backend` and `Duplicate`; the transport layer's add
-`BadInput` and `NotFound` and *wrap* the storage layer's.
-
-The two `from` implementations are what make `?` work across the
-boundary. A `db.exec` returning `Result<Int, Error>` becomes a
-`StoreError` automatically inside a storage function; a `StoreError`
-becomes an `ApiError` automatically inside a handler. Three error types
-in play, zero `.map_err` calls.
-
-#### Step 3 — parse, don't validate
-
-```glide
-impl Code {
-    pub fn parse(raw: String) -> Code? {
-        let s = raw.trim().to_lower()
-        if s == "" || s.len() > 16 || s.contains("/") { return None }
-        Some(Code(s))
-    }
-}
-```
-
-The rules live here, once (Chapter 12). Every function downstream takes
-a `Code` and does no validation — because it cannot receive an invalid
-one.
-
-`parse` returns `Code?` rather than a `Result` because the failure has
-no information in it beyond "no" (Chapter 14's test: does the absent
-case carry information?).
-
-#### Step 4 — storage, knowing nothing about HTTP
-
-```glide
-fn lookup(db: Db, code: Code) -> Result<Link?, StoreError> {
-    let found = db.query_one(
-        "select id, code, url, hits from links where code = :code",
-        ["code": code])?
-    match found {
-        None    => Ok(None)
-        Some(r) => Ok(Some(Link{
-            id:   LinkId(r["id"] ?? 0),
-            code: Code(r["code"] ?? ""),
-            url:  r["url"] ?? "",
-            hits: r["hits"] ?? 0,
-        }))
-    }
-}
-```
-
-Three chapters visible in nine lines. **Named parameters** (`:code`,
-Chapter 33), with the `Code` binding by unwrapping. **`query_one`
-returning `Option`** rather than a sentinel — "no row" is an ordinary
-outcome. And **maps at the boundary, structs inside** (Chapter 11): the
-row map lives for four lines and becomes a `Link`.
-
-Note the return type: `Result<Link?, StoreError>`. Two different
-"nothing" cases, distinguished — the query might *fail*, or it might
-*succeed and find nothing*. In Go that is `(*Link, error)` with the
-nil-and-nil case meaning "not found", which is a convention rather than
-a type.
-
-#### Step 5 — transport, knowing nothing about SQL
-
-```glide
-fn create(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Ok(v) = json.decode(req.body()) else {
-        return Err(.BadInput{ msg: "invalid JSON" })
-    }
-    let Some(code) = Code.parse(v["code"] ?? "") else {
-        return Err(.BadInput{ msg: "code must be 1-16 chars, no slashes" })
-    }
-    let url = v["url"] ?? ""
-    if !url.starts_with("http") {
-        return Err(.BadInput{ msg: "url must be absolute" })
-    }
-    if lookup(db, code)? != None {
-        return Err(.Store{ cause: .Duplicate{ code: code } })
-    }
-    _ = insert(db, code, url)?
-    Ok(http.created())
-}
-```
-
-Four guard clauses, each `let … else` or `if`, each returning early —
-and **zero nesting** (Chapter 9). The happy path is the last two lines.
-
-The `?` on `lookup` and `insert` converts `StoreError` into `ApiError`
-via `from`. Nothing in this function mentions the conversion.
-
-#### Step 6 — one place maps errors to statuses
-
-```glide
-fn to_response(r: Result<Response, ApiError>) -> Response {
-    match r {
-        Ok(resp)              => resp
-        Err(BadInput{ msg })  => http.bad_request(msg)
-        Err(NotFound{ code }) => http.not_found()
-        Err(Store{ cause })   => {
-            match cause {
-                Duplicate{ code } => http.bad_request("code already taken")
-                Backend{ .. }     => http.text("internal error")
-            }
-        }
-    }
-}
-```
-
-This is the error middleware (Chapter 32), hand-written because
-`fn(Handler) -> Handler` is ○.
-
-The important property: **both `match`es are exhaustive**. Add a
-variant to `ApiError` or `StoreError` and this function stops
-compiling, forcing you to choose a status. Compare Go's `errors.Is`
-ladder, which silently falls through to 500.
-
-#### Step 7 — wiring and lifetime
-
-```glide
-let mut r = http.router()
-r.post(`/links`, |req| to_response(create(db, req)))
-r.get(`/links/{code}`, |req| to_response(resolve(db, req)))
-let r = r
-
-scope s {
-    _ = s.spawn(|| http.serve("127.0.0.1:17699", r))
-    …
-}
-```
-
-Raw strings for route patterns (Chapter 6). One-line closures injecting
-`db` and applying the error mapping (Chapter 29). `let r = r` seals the
-router after registration (Chapter 4). The scope owns the server's
-lifetime (Chapter 25).
-
-#### Step 8 — tests
-
-```glide
-test "Code.parse rejects junk" {
-    expect(Code.parse("") == None)
-    expect(Code.parse("a/b") == None)
-    expect(Code.parse("  Hi  ") == Some(Code("hi")))
-}
-
-test "Code.parse is idempotent" (s: String) {
-    match Code.parse(s) {
-        None    => expect(true)
-        Some(c) => expect(Code.parse(c.value()) == Some(c))
-    }
-}
-```
-
-An example test for the shape, a property for the contract
-(Chapter 22). Idempotence is one of the four property shapes, and it is
-the right one here: `parse` normalises, so parsing a normalised value
-must be a fixed point.
+Note the last row. Not every imported instinct is wrong: Glide *does*
+have reference semantics without a borrow checker, so caring about
+aliasing is legitimate. The habit to keep is "know who can mutate
+this"; the habit to drop is "copy everywhere just in case".
 
 ---
 
 ### 3. Why This Design?
 
-#### Why types came first
+#### Why the language cannot prevent most of these
 
-Because every later decision followed from them.
+It prevents some. `interface{}`, `nil`, zero values, `recover`,
+inheritance, embedding, and `init()` are all unwritable. A `kind` field
+compiles but the sum type is easier. `ctx` threading compiles but the
+scope is shorter.
 
-`Code` being `distinct` meant `lookup(db, code)` could not accidentally
-be called with a URL. `Link` having no optional fields meant no
-downstream function checks for absence. `StoreError` and `ApiError`
-being separate sum types meant the `?` conversions were three lines
-total and the status mapping was exhaustive.
+What the language *does* is make the good version cheaper than the bad
+one, which is the only lever that works at scale. Nobody writes thirty
+lines of options pattern when one signature does it.
 
-Had the types been `String`, `Int`, and `Error`, none of that would
-have been available, and every function would have needed defensive
-checks.
+`DESIGN.md`'s recurring phrase is **culture follows cost**. Go never
+grew a map/filter culture because closures cost forty characters.
+Property testing never went mainstream because setup cost an
+afternoon. Small interfaces are Go culture because they cost nothing.
 
-#### Why two error types rather than one
+#### Why `_ =>` is singled out
 
-Because they answer different questions.
+Because it is the one anti-pattern that *removes a guarantee the
+language was built to provide*, and it does so silently.
 
-`StoreError` says what can go wrong *in storage* — the backend failed,
-or the code is taken. A caller inside the service can handle those
-differently.
+Exhaustiveness is the reason sum types are worth having (Chapter 13).
+The value is not "I can express one-of-N" — it is "when I add a sixth
+variant, the compiler hands me every place that needs updating". A
+`_ =>` arm opts that site out, permanently, and nothing ever tells you.
 
-`ApiError` says what can go wrong *in a request* — including everything
-storage can do, wrapped.
+`DESIGN.md`: a `_ =>` arm is legal but **spends the guarantee**.
 
-One combined type would leak SQL concerns into the transport layer's
-vocabulary. Separate types with a `from` conversion cost three lines
-and keep the layers honest — and that conversion is exactly what
-Chapter 19's `?`-conversion machinery exists for.
+#### Why over-abstraction is worse here than in Java
 
-#### Why `Result<Link?, StoreError>` rather than an error for not-found
+Because Glide's cheap abstractions are *very* cheap and its expensive
+ones are visibly expensive.
 
-Chapter 14's test: **does the absent case carry information?**
+A `distinct` type is ten characters and zero runtime cost. A sum type
+is one line. A nested `fn` is free. These do not need justification.
 
-A missing link carries none — the code just is not there. So it is an
-`Option`. A failed query carries plenty — connection lost, syntax
-error, permissions — so it is a `Result`.
+A trait with one implementation, a generic parameter that never varies,
+a four-layer architecture — these cost indirection, binary size,
+compile time, and reader effort, and they buy flexibility you have not
+yet needed. In Java the ceremony is unavoidable so you stop noticing
+it; here it stands out.
 
-Nesting them is precise: `Result<Link?, StoreError>` says "this might
-fail, and if it succeeds it might find nothing", which is three
-outcomes, distinguished.
+#### Why the "Go-in-Glide" section is the longest
 
-#### Where the interpreter's rough edges showed
+Because Glide is a Go-tradition language and Go instincts mostly
+transfer — which makes the ones that do not transfer harder to spot.
 
-Two, and both are recorded in earlier chapters. It is worth seeing them
-in a real program rather than in a minimal repro.
-
-**The duplicate-code check is defensive.** The natural implementation
-lets the database's `UNIQUE` constraint reject the insert and catches
-the error. That does not work at this tier — Chapter 33's recorded bug
-means a driver-level failure panics with an internal `cancelUnwind`
-instead of returning `Err`. So the code checks first:
-
-```glide
-// Check first: a UNIQUE-violation Err cannot be caught at this tier
-// (Chapter 33's recorded interpreter bug), so we avoid provoking one.
-if lookup(db, code)? != None {
-    return Err(.Store{ cause: .Duplicate{ code: code } })
-}
-```
-
-This is a real workaround with a real cost: check-then-insert is a race
-under concurrency, where let-the-constraint-fail is not. The comment
-says why, and it comes out when the bug is fixed.
-
-**The scope body ends with `return`, not a tail expression.** Chapter
-27's sharpest edge: `http.serve` blocks forever, and a *normal* scope
-exit joins children without cancelling them. Falling off the end would
-deadlock. `return Ok(out.join("\n"))` is an early exit, which cancels
-the server first.
-
-That is rule 1 from Chapter 25 doing exactly what it says, and it is
-the kind of thing you learn once.
-
-#### What did not need writing
-
-Worth listing, because absence is the point:
-
-- No shutdown handler, stop channel, or `done` flag.
-- No `context.Context` in any signature.
-- No null checks anywhere.
-- No `sql.NullString` or equivalent.
-- No struct tags.
-- No `if err != nil` — eleven `?` operators instead.
-- No DI container, repository interface, or service layer.
-- No assertion library.
-- No mocks.
+A Rust programmer writing `.and_then().unwrap_or()` gets a compile
+error, because the methods do not exist. A Go programmer writing a
+functional-options pattern gets working code that a reviewer might
+approve.
 
 ---
 
 ### 4. Competing Approaches
 
-The same service in other languages, by rough line count and by what
-the extra lines *do*:
+Every ecosystem has this chapter, and the interesting thing is what
+each one's list is *about*:
 
-**Go** — roughly 250 lines. The additions: `if err != nil` blocks
-(about 40 lines), `context.Context` threading, graceful-shutdown
-ceremony (about 15 lines), `sql.NullString` handling or pointer fields,
-struct tags, and either sentinel errors plus `errors.Is` or a custom
-error type per case. Go's version is genuinely readable; it is just
-longer, and the error-to-status mapping has no exhaustiveness check.
+**Go's** anti-patterns are mostly about **over-abstraction** —
+interface pollution, premature generics, Java-style layering. Go's
+sparseness makes adding structure the temptation.
 
-**Rust (axum + sqlx)** — comparable length, with `async fn` throughout
-and `.await` at every IO point. `thiserror` for the error types,
-`serde` for JSON, and `sqlx::query_as!` giving *stronger* guarantees
-than Glide's (compile-time schema validation) at the cost of a database
-during the build.
+**Rust's** are mostly about **fighting the borrow checker** —
+`clone()` everywhere, `Rc<RefCell<T>>` as a habit, `unsafe` to avoid
+learning lifetimes. Rust's strictness makes escaping it the
+temptation.
 
-**Python (FastAPI)** — shortest of the four, with Pydantic doing the
-parsing and validation that `Code.parse` does here. No compile-time
-guarantees; the error-to-status mapping is exception handlers, and
-nothing checks it is complete.
+**Java's** are mostly about **ceremony** — anaemic domain models,
+`AbstractSingletonProxyFactoryBean`, getters on everything. Java's
+verbosity makes patterns-as-substitutes-for-features the temptation.
 
-**Java (Spring Boot)** — longest by a distance, and most of the extra
-is annotations, a repository interface, an entity, a DTO, and a mapper.
+**Python's** are mostly about **dynamism** — monkey-patching,
+`**kwargs` soup, mutable default arguments. Python's flexibility makes
+cleverness the temptation.
 
-The interesting comparison is not length. It is **which mistakes each
-version permits**: a Go version can forget a `return` after
-`http.Error`; a Python version can add an error case with no handler; a
-Java version can pass the wrong `Long` for the wrong entity. The Glide
-version makes all three unwritable, and the cost is the type
-declarations at the top.
+**Glide's** list is mostly about **imported habits**, which is what a
+young language's list looks like. The native ones — `_ =>`, `??` as a
+silencer, `mut` creep — are all about *spending guarantees the language
+provides*, which is probably what a mature Glide list will look like
+too.
 
 ---
 
-### 5. Common Mistakes (Found While Writing This)
+### 5. Common Mistakes (About Anti-Patterns)
 
-These are real, from building the program.
+**Treating this list as a style guide.** Every item here has a
+legitimate use. `_ =>` is right for genuinely open sets. `??` is right
+when the error truly does not matter. A trait with one implementation
+is right when the second is arriving next week. The anti-pattern is
+doing it *by reflex*.
 
-**Forgetting `return` at the end of a scope body containing a
-server.** Deadlock, and the failure is loud but the cause is not
-obvious the first time.
+**Rewriting working code to remove them.** A functional-options
+pattern that works is not an emergency. Change it when you touch it.
 
-**Reaching for `Err` on a client error.** `Err(.NotFound{ … })` from a
-handler maps to 500 (Chapter 32's one default mapping) unless something
-converts it. Here `to_response` does the conversion, which is why the
-handlers *can* return `Err` — without it they would need
-`Ok(http.not_found())`.
+**Cargo-culting the fixes.** Applying `distinct` to every integer
+produces `.value()` noise; applying sum types to open sets makes them
+unextensible; applying "parse, don't validate" to values with no
+invariant is a wrapper around nothing.
 
-**Assuming a database constraint violation is catchable.** It is not,
-at this tier.
-
-**Writing `Some(Code("hi"))` in a test and expecting it to fail.** The
-`Option` unboxing wart (Chapter 14) means `Some(x)` is the identity
-function, so the comparison works — and will still work when Options
-are boxed. Fine here, but do not build on unboxing.
-
-**Putting the status mapping in each handler.** The first draft did.
-Extracting `to_response` made the exhaustiveness check work in one
-place instead of three, which is the whole benefit.
+**Missing that some instincts are still right.** Reference semantics
+without a borrow checker means aliasing is real (Chapter 4). Caring
+about who can mutate a shared collection is correct here.
 
 ---
 
 ### 6. Performance Considerations
 
-Nothing here is tuned, and the interesting costs are structural rather
-than measured:
+Most anti-patterns in this chapter cost clarity rather than speed. Four
+cost both:
 
-**`check-then-insert` is two round trips** where let-the-constraint-fail
-is one — and it is racy. That is the cost of the interpreter
-workaround, and it is documented in the code.
+**Functional options** allocate a closure per option and a list per
+call. A defaulted parameter allocates nothing.
 
-**`bump` is a second query per read.** A real service would batch hit
-counts or write them asynchronously; here it is a query per request.
-The point is that it is *visible* — there is no ORM doing it behind a
-property access.
+**Trait objects by reflex** (`any Trait`, ○) box and dispatch
+dynamically where a generic bound would monomorphise. This is the
+biggest one — Go pays it invisibly on every interface value, and
+Glide's `any` keyword exists so you can see the bill.
 
-**Row maps allocate per query** (Chapter 33). `derive Row` (○) would
-write directly into a `Link`.
+**Adapter chains used for effects** either do nothing (lazy) or add
+per-element closure dispatch where a loop would not.
 
-**`http.json(link)` walks the struct structurally** (Chapter 31).
-`derive Json` (○) would generate the encoder.
+**Defensive copying** copies. If the copy is not buying a guarantee you
+need, it is pure cost.
 
-**One green thread per request**, a few kilobytes each.
-
-**The interpreter is the bottleneck by two orders of magnitude.** The
-network path is Go's `net/http` and the database is real SQLite; the
-handler bodies are tree-walked.
+And one that costs *only* clarity, and is worth calling out for that
+reason: **`_ =>`** has zero runtime cost and removes a compile-time
+guarantee. It is the cheapest possible way to make a codebase worse.
 
 ---
 
-### 7. Best Practices Demonstrated
+### 7. Best Practices
 
-The chapter checklist, as applied:
+**Ask what constraint the pattern solves.** The detection method from
+section 2, applied continuously. If the constraint is gone, so is the
+pattern.
 
-| Practice | Where | Chapter |
-|---|---|---|
-| Types before functions | `Code`, `LinkId`, `Link` | 12–15 |
-| `distinct` for identifiers | `Code`, `LinkId` | 15 |
-| Parse, don't validate | `Code.parse` | 12 |
-| Option when absence carries no information | `Code?`, `Link?` | 14 |
-| Enumerate failures per layer | `StoreError`, `ApiError` | 19 |
-| `from` for cross-layer `?` | two impls | 19 |
-| Maps at the boundary, structs inside | `lookup` | 11, 31, 33 |
-| Guard clauses, no nesting | `create`, `resolve` | 9 |
-| Exhaustive error-to-status mapping | `to_response` | 10, 32 |
-| Raw strings for routes and JSON | `` `/links/{code}` `` | 6 |
-| Named SQL parameters | `:code` | 33 |
-| Seal after construction | `let r = r` | 4 |
-| Dependencies in `main`, passed down | `run` | 29 |
-| Scope owns the lifetime | `scope s { … }` | 25 |
-| `defer` on the line after acquisition | `db.close()` | 21 |
-| Example test plus property test | both `test` blocks | 22 |
-| Document the workaround, not just the fix | the duplicate-check comment | 36 |
+**Watch for these in review, in this order:**
 
-Zero `mut` bindings except the router and the report list — both
-genuine accumulators, both sealed or returned immediately.
+1. A new `_ =>` on a closed type.
+2. A new `mut` that is assigned in every branch.
+3. A `??` swallowing an error someone would want.
+4. A `kind`/`type`/`tag` field.
+5. A trait with one implementation.
+6. A parameter that is really ambient (`timeout`, `logger`) or really
+   a global (`db` threaded through five layers that do not use it).
+7. Interpolation inside a query.
+
+**Prefer the cheap abstractions and be suspicious of the expensive
+ones.**
+
+| Cheap — use freely | Expensive — justify |
+|---|---|
+| `distinct` types | Traits with one implementation |
+| Sum types | Generic parameters that never vary |
+| Nested `fn`s | Architectural layers |
+| Block expressions | Trait objects (`any T`) |
+| Small structs | Modules per type |
+
+**When you catch yourself writing ceremony, look for the feature.**
+Almost every ceremonial pattern in this chapter has a one-line
+replacement, because the language was designed by cataloguing exactly
+these patterns and asking what feature would delete each one.
+
+That is, in a sense, what `DESIGN.md` *is*.
 
 ---
 
-### 8. The Complete Program
+### 8. Examples
+
+**The full Go-in-Glide translation, and its fix.**
+
+A faithful port of a Go service, using every Go pattern:
 
 ```glide
-// links.gld — a URL shortener.
-import http
-import json
-import sql
-import time
+// Bad — everything here is idiomatic Go and wrong here
+type ServerOption = fn(ServerConfig) -> ServerConfig
 
-// ---------------------------------------------------------------
-// Types: the boundary between transport and storage.
-// ---------------------------------------------------------------
+fn with_timeout(d: Int) -> ServerOption { |c| ServerConfig{ timeout: d, ..c } }
+fn with_tls(b: Bool) -> ServerOption { |c| ServerConfig{ tls: b, ..c } }
 
-type Code = distinct String
-type LinkId = distinct Int
-
-type Link = struct {
-    pub id: LinkId
-    pub code: Code
-    pub url: String
-    pub hits: Int
+type Job = struct {
+    kind: String            // "email" | "sms" | "push"
+    recipient: String
+    subject: String?        // only for email
+    body: String
+    sent: Bool
+    failed: Bool
+    error: String
 }
 
-type StoreError = Backend{ cause: Error } | Duplicate{ code: Code }
-
-type ApiError =
-    BadInput{ msg: String }
-    | NotFound{ code: Code }
-    | Store{ cause: StoreError }
-
-impl StoreError { fn from(e: Error) -> StoreError { Backend{ cause: e } } }
-impl ApiError   { fn from(e: StoreError) -> ApiError { Store{ cause: e } } }
-
-impl Code {
-    pub fn parse(raw: String) -> Code? {
-        let s = raw.trim().to_lower()
-        if s == "" || s.len() > 16 || s.contains("/") { return None }
-        Some(Code(s))
-    }
-}
-
-// ---------------------------------------------------------------
-// Storage: knows SQL, knows nothing about HTTP.
-// ---------------------------------------------------------------
-
-fn schema(db: Db) -> Result<(), StoreError> {
-    _ = db.exec(`create table links (
-        id integer primary key,
-        code text not null unique,
-        url text not null,
-        hits integer not null default 0
-    )`)?
-    Ok(())
-}
-
-fn insert(db: Db, code: Code, url: String) -> Result<LinkId, StoreError> {
-    _ = db.exec("insert into links (code, url) values (:code, :url)",
-                ["code": code, "url": url])?
-    let row = db.query_one("select id from links where code = :code",
-                           ["code": code])?
-    match row {
-        Some(r) => Ok(LinkId(r["id"] ?? 0))
-        None    => Err(.Duplicate{ code: code })
-    }
-}
-
-fn lookup(db: Db, code: Code) -> Result<Link?, StoreError> {
-    let found = db.query_one(
-        "select id, code, url, hits from links where code = :code",
-        ["code": code])?
-    match found {
-        None    => Ok(None)
-        Some(r) => Ok(Some(Link{
-            id:   LinkId(r["id"] ?? 0),
-            code: Code(r["code"] ?? ""),
-            url:  r["url"] ?? "",
-            hits: r["hits"] ?? 0,
-        }))
-    }
-}
-
-fn bump(db: Db, code: Code) -> Result<(), StoreError> {
-    _ = db.exec("update links set hits = hits + 1 where code = :code",
-                ["code": code])?
-    Ok(())
-}
-
-// ---------------------------------------------------------------
-// Transport: knows HTTP, knows nothing about SQL.
-// ---------------------------------------------------------------
-
-fn create(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Ok(v) = json.decode(req.body()) else {
-        return Err(.BadInput{ msg: "invalid JSON" })
-    }
-    let Some(code) = Code.parse(v["code"] ?? "") else {
-        return Err(.BadInput{ msg: "code must be 1-16 chars, no slashes" })
-    }
-    let url = v["url"] ?? ""
-    if !url.starts_with("http") {
-        return Err(.BadInput{ msg: "url must be absolute" })
-    }
-    // Check first: a UNIQUE-violation Err cannot be caught at this tier
-    // (Chapter 33's recorded interpreter bug), so we avoid provoking one.
-    if lookup(db, code)? != None {
-        return Err(.Store{ cause: .Duplicate{ code: code } })
-    }
-    _ = insert(db, code, url)?
-    Ok(http.created())
-}
-
-fn resolve(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Some(code) = Code.parse(req.path_param("code") ?? "") else {
-        return Err(.BadInput{ msg: "bad code" })
-    }
-    let Some(link) = lookup(db, code)? else {
-        return Err(.NotFound{ code: code })
-    }
-    bump(db, code)?
-    Ok(http.json(link))
-}
-
-// The error middleware, hand-written. Both matches are exhaustive,
-// so a new error variant breaks this function and forces a status.
-fn to_response(r: Result<Response, ApiError>) -> Response {
-    match r {
-        Ok(resp)              => resp
-        Err(BadInput{ msg })  => http.bad_request(msg)
-        Err(NotFound{ code }) => http.not_found()
-        Err(Store{ cause })   => {
-            match cause {
-                Duplicate{ code } => http.bad_request("code already taken")
-                Backend{ .. }     => http.text("internal error")
-            }
+fn process(db: Db, j: Job, timeout: Int, verbose: Bool) -> Int {
+    let mut result = 0
+    if j.kind == "email" {
+        if j.subject == None {
+            result = 400
+        } else {
+            _ = send_email(j.recipient, j.subject ?? "", j.body) ?? false
+            result = 200
         }
+    } else if j.kind == "sms" {
+        _ = send_sms(j.recipient, j.body) ?? false
+        result = 200
+    } else {
+        result = 400
     }
+    result
+}
+```
+
+Six anti-patterns, all imported, all individually defensible in Go:
+
+1. **Functional options** — three declarations and a closure per call.
+2. **`kind` string** with fields that apply to some kinds only.
+3. **`sent`/`failed`/`error`** — flag soup, eight states, three
+   meaningful.
+4. **`timeout: Int`** — a `ctx` parameter in disguise, and unitless.
+5. **`verbose: Bool`** positional — a boolean trap, and unused.
+6. **`Int` return** encoding HTTP statuses, plus a `mut` return slot,
+   plus two `?? false` silencing failures.
+
+The fix, feature by feature:
+
+```glide
+// Good
+type Recipient = distinct String
+
+type Delivery =
+    Email{ to: Recipient, subject: String, body: String }
+    | Sms{ to: Recipient, body: String }
+    | Push{ device: String, body: String }
+
+type Outcome =
+    Pending
+    | Sent{ at: Instant }
+    | Failed{ reason: String }
+
+type Job = struct {
+    pub id: JobId
+    pub delivery: Delivery
+    pub outcome: Outcome
 }
 
-// ---------------------------------------------------------------
-// Tests.
-// ---------------------------------------------------------------
+type SendError =
+    Transport{ cause: Error }
+    | Rejected{ reason: String }
 
-test "Code.parse rejects junk" {
-    expect(Code.parse("") == None)
-    expect(Code.parse("a/b") == None)
-    expect(Code.parse("  Hi  ") == Some(Code("hi")))
+impl SendError {
+    fn from(e: Error) -> SendError { Transport{ cause: e } }
 }
 
-test "Code.parse is idempotent" (s: String) {
-    match Code.parse(s) {
-        None    => expect(true)
-        Some(c) => expect(Code.parse(c.value()) == Some(c))
+fn process(db: Db, job: Job) -> Result<(), SendError> {
+    match job.delivery {
+        Email{ to, subject, body } => send_email(to, subject, body)?
+        Sms{ to, body }            => send_sms(to, body)?
+        Push{ device, body }       => send_push(device, body)?
     }
+    Ok(())
 }
+```
 
-// ---------------------------------------------------------------
-// main: dependencies, wiring, lifetime. The program serves, drives
-// its own API over real HTTP, and returns — which cancels the server.
-// ---------------------------------------------------------------
+And the caller sets the budget rather than passing it:
 
-fn run() -> Result<String, Error> {
-    let db = sql.open("sqlite::memory:")?
-    defer { _ = db.close() }
-    schema(db)?
-
-    let mut r = http.router()
-    r.post(`/links`, |req| to_response(create(db, req)))
-    r.get(`/links/{code}`, |req| to_response(resolve(db, req)))
-    let r = r
-
-    scope s {
-        _ = s.spawn(|| http.serve("127.0.0.1:17699", r))
-        time.sleep(80.ms)
-
-        let mut out = []
-        out.push(post(`{"code": "gl", "url": "https://example.com"}`))
-        out.push(post(`{"code": "gl", "url": "https://dupe.com"}`))
-        out.push(post(`{"code": "", "url": "https://x.com"}`))
-        out.push(post(`{"code": "ok", "url": "notaurl"}`))
-        out.push(get("gl"))
-        out.push(get("gl"))
-        out.push(get("nope"))
-        return Ok(out.join("\n"))
-    }
+```glide
+scope(timeout: 5.s) {
+    process(db, job)?
 }
+```
 
-fn post(body: String) -> String {
-    match http.post("http://127.0.0.1:17699/links", body) {
-        Ok(resp) => "POST -> {resp.status()} {resp.body().trim()}"
-        Err(e)   => "POST failed: {e}"
-    }
-}
+What changed:
 
-fn get(code: String) -> String {
-    match http.get("http://127.0.0.1:17699/links/" + code) {
-        Ok(resp) => "GET {code:5} -> {resp.status()} {resp.body().trim()}"
-        Err(e)   => "GET failed: {e}"
-    }
-}
+| Anti-pattern | Feature that deleted it |
+|---|---|
+| Functional options | Default parameters (7) |
+| `kind` string | Sum type (13) |
+| Fields that apply to some kinds | Payloads on variants (13) |
+| Flag soup | `Outcome` sum type (13) |
+| `timeout` parameter | `scope(timeout:)` (26) |
+| Positional bool | Named arguments (7) |
+| `Int` status return | `Result<(), SendError>` (19) |
+| `?? false` | `?` with conversion (19) |
+| `mut result` | `match` as an expression (10) |
+| Untyped `String` recipient | `distinct` (15) |
 
-fn main() {
-    match run() {
-        Ok(report) => println(report)
-        Err(e)     => eprintln("failed: {e}")
+Ten anti-patterns, ten features, and the second version is shorter.
+
+**The native anti-pattern, in isolation.** This one is worth its own
+example because it is the one you will commit after you are fluent:
+
+```glide
+// Bad — added six months in, when a fourth variant appeared and
+// this match would not compile
+fn describe(s: Shape) -> String {
+    match s {
+        Circle(r)  => "circle r={r}"
+        Rect(w, h) => "rect {w}x{h}"
+        _          => "shape"
     }
 }
 ```
 
-**Running it:**
+The `_` was added to make an error go away. The error was the compiler
+telling you that a new variant needed a description here, and now it
+never will again — this function will silently print `"shape"` for
+every future variant.
 
-```
-$ glide run links.gld
-POST -> 201 created
-POST -> 400 code already taken
-POST -> 400 code must be 1-16 chars, no slashes
-POST -> 400 url must be absolute
-GET    gl -> 200 {"id":1,"code":"gl","url":"https://example.com","hits":0}
-GET    gl -> 200 {"id":1,"code":"gl","url":"https://example.com","hits":1}
-GET  nope -> 404 not found
-```
-
-```
-$ glide test links.gld
-ok    Code.parse rejects junk
-ok    Code.parse is idempotent  (100 cases)
+```glide
+// Good
+fn describe(s: Shape) -> String {
+    match s {
+        Circle(r)  => "circle r={r}"
+        Rect(w, h) => "rect {w}x{h}"
+        Point      => "point"
+        Line(a, b) => "line {a}..{b}"
+    }
+}
 ```
 
-Seven requests, five distinct outcomes, and the hit counter
-incrementing between the two `GET`s. The program starts a server,
-exercises it over real HTTP, and shuts everything down by returning.
+Four arms, and adding a fifth variant breaks this function — which is
+the entire reason the type is a sum type.
 
 ---
 
@@ -683,51 +614,53 @@ exercises it over real HTTP, and shuts everything down by returning.
 
 **Summary**
 
-- The whole service is **one module, one file, about 160 lines**, and
-  it needs no framework, no DI container, no repository layer, and no
-  shutdown code.
-- **Types came first, and every later decision followed.** Two
-  `distinct` types for twenty characters; a struct with no optional
-  fields; two error sum types with `from` conversions between them.
-- **Two error types, one per layer.** `StoreError` for storage,
-  `ApiError` wrapping it for transport, and `?` bridging them with zero
-  `.map_err` calls.
-- **`Result<Link?, StoreError>` is precise**: the query might fail, and
-  if it succeeds it might find nothing. Three outcomes, distinguished
-  by the type rather than by a nil-and-nil convention.
-- **`Code.parse` is the only validation in the program.** Everything
-  downstream takes a `Code` and cannot receive an invalid one.
-- **`to_response` is the error middleware**, hand-written because
-  `fn(Handler) -> Handler` is ○ — and both its matches are exhaustive,
-  so a new error variant forces a status choice at compile time.
-- **The scope owns the server's lifetime**, and the body ends with
-  `return` because a normal exit would join the blocked server forever
-  (Chapter 25's rule 1, Chapter 27's sharpest edge).
-- **Two interpreter rough edges showed up in real code**: the
-  SQL-error `cancelUnwind` bug forced a check-then-insert workaround
-  (documented in a comment, with its race cost acknowledged), and the
-  scope-exit rule required an early `return`.
-- What did not need writing: null checks, `sql.NullString`, struct
-  tags, `if err != nil`, `context.Context`, a shutdown handler, an
-  assertion library, or a single mock.
+- Most Glide anti-patterns are **correct code from another language**,
+  which is what makes them hard to see: they look good by a standard
+  you learned honestly.
+- **The detection method:** ask what constraint the pattern solves, and
+  whether that constraint exists here. Functional options solve "no
+  default parameters"; `kind` fields solve "no sum types"; `ctx`
+  threading solves "no structured cancellation". None of those
+  constraints exists.
+- **Go-in-Glide** is the longest list, because Go instincts mostly
+  transfer and the exceptions are therefore camouflaged: functional
+  options, `kind` fields, flag soup, sentinel returns, `ctx`
+  parameters, shutdown ceremony, globals.
+- **Rust-in-Glide:** combinator chains, over-wrapping with `distinct`,
+  defensive copying, expecting `?` on `Option`, trait objects by
+  reflex, lifetimes-thinking.
+- **Java-in-Glide:** interface-per-class, getter ceremony, inheritance
+  reflexes, exception-shaped handling, layer cake.
+- **Native anti-patterns** — the ones you will commit once fluent —
+  are all about **spending guarantees**: `_ =>` on closed types, `??`
+  as an error silencer, `mut` creep, generator side effects,
+  scope-per-call, channels for single values.
+- **`_ =>` is the worst**, because it silently removes the guarantee
+  that makes sum types worth having, and it has zero runtime cost. It
+  is the cheapest possible way to make a codebase worse.
+- **Not every imported instinct is wrong.** Reference semantics without
+  a borrow checker means aliasing is real, so caring about who can
+  mutate a shared collection is correct here.
+- The language cannot prevent most of these; it makes the good version
+  cheaper. **Culture follows cost.**
 
 **Exercises**
 
-1. **Add a feature and count the compile errors.** Add a `Expired{ at:
-   Instant }` variant to `ApiError`. Before running anything, predict
-   which functions break. Then check. The list should be exactly one —
-   `to_response` — and that is the exhaustiveness guarantee delivering
-   the work list that Chapter 13 promised.
+1. **Audit an imported pattern.** Take a design pattern you use
+   reflexively — options, builders, repositories, factories, DI
+   containers — and write down the language constraint it exists to
+   work around. Then check whether Glide has that constraint. Roughly
+   half of the Gang of Four catalogue is missing-language-feature
+   compensation, and it is instructive to work out which half.
 
-2. **Remove the workaround.** Rewrite `create` to let the `UNIQUE`
-   constraint reject the duplicate, and observe the `cancelUnwind`
-   panic. Then fix the interpreter bug (the release is deferred before
-   the cancellation check in `sqlmod.go`) and confirm both versions
-   work. This is a real, small, well-specified contribution.
+2. **Find your `_ =>` arms.** In a codebase with sum types, tagged
+   unions, or sealed classes, find every default/wildcard branch. For
+   each, decide whether "anything else" is genuinely the meaning or
+   whether it was added to silence an error. Then add a variant and see
+   which ones silently do the wrong thing.
 
-3. **Port it.** Write the same service in a language you know well.
-   Count the lines, and — more usefully — count the places where a
-   mistake would compile: a forgotten status mapping, a transposed ID,
-   a missing null check, a leaked goroutine, an unhandled error case.
-   That count, not the line count, is what this book has been arguing
-   about for thirty-nine chapters.
+3. **Grade the ten-anti-pattern example.** Take the "Bad" version from
+   section 8 and, without looking at the fix, list every problem you
+   can find and the feature that solves it. Then compare with the
+   table. Anything you missed is a habit you still have; anything you
+   found that is not in the table is worth arguing about.

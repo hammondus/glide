@@ -1,551 +1,796 @@
-# Chapter 34: Comptime, `derive`, and Metaprogramming
+# Chapter 34: HTTP
 
-Everything in this chapter is **○**. None of it runs. It is the design
-for how Glide does the things other languages use macros or reflection
-for, and it is worth a chapter because three features you have already
-met — `derive Json`, `derive Row`, and flexible `const` — are waiting
-on it, and because the *fences* around it are as important as the
-feature.
+Glide's HTTP design changes one thing about Go's, and everything else
+follows from it: **handlers return values.**
 
-The one-line summary: **comptime is ordinary language code executed at
-compile time**, it exists for exactly two purposes, and there is a hard
-rule that it is **not a second generics system**.
+```glide
+fn(Request) -> Result<Response, Error>
+```
+
+Go's `func(w http.ResponseWriter, r *http.Request)` cannot return an
+error, and that single limitation is the root of reinvented
+error-middleware, the forgotten-`return`-after-`http.Error` bug class,
+and the difficulty of composing handlers.
+
+The second change is that **cancellation is ambient** — an HTTP request
+inside a `scope(timeout:)` is aborted when the scope dies, with no
+`ctx` in any signature.
+
+The M2 shim (✓) is deliberately small: a Go-1.22-level router, a
+handful of response constructors, and a client with real defaults.
 
 ---
 
 ### 1. Basic Usage
 
-#### Const evaluation
-
-An ordinary function, run at compile time because a `const` position
-demands it:
+#### A server
 
 ```glide
-fn make_crc_table() -> List<Int> {
-    let mut t = []
-    for i in 0..256 {
-        let mut c = i
-        for _ in 0..8 {
-            c = if c % 2 == 1 { 0xEDB88320 ^ (c / 2) } else { c / 2 }
-        }
-        t.push(c)
+import http
+
+fn main() -> Result<(), Error> {
+    let mut r = http.router()
+    r.get(`/health`, |req| http.text("ok"))
+
+    scope s {
+        http.serve("127.0.0.1:8080", r)
     }
-    t
+}
+```
+
+`http.router()` returns a `Router`. `r.get/post/put/delete(pattern,
+handler)` registers a route and requires a `mut` path.
+`http.serve(addr, r)` blocks, serving a green thread per request.
+
+**Route patterns want raw strings.** `` `/notes/{id}` `` — in a regular
+string, `{id}` interpolates.
+
+#### Handlers return values
+
+```glide
+fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Some(raw) = req.path_param("id") else {
+        return Ok(http.bad_request("missing id"))
+    }
+    let Some(id) = raw.parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let found = db.query_one(
+        "select id, title from notes where id = :id",
+        ["id": id],
+    )?
+    match found {
+        Some(row) => Ok(http.json(row))
+        None      => Ok(http.not_found())
+    }
+}
+```
+
+A handler returns a `Response` or a `Result<Response, E>`. An `Err`
+maps to 500 plus the rendered error — **the one default mapping** until
+middleware is designed. A handler panic is 500 plus a stderr trace.
+
+Note the `?` on the database call: it propagates through the handler
+signature, converting into `ApiError` via `from` (Chapter 20). No
+error-handling middleware, no forgotten return.
+
+#### Registering handlers with dependencies
+
+```glide
+let mut r = http.router()
+r.get(`/notes/{id}`, |req| get_note(db, req))
+r.post(`/notes`, |req| create_note(db, req))
+```
+
+The closure adapts the handler signature and supplies the dependency.
+That one-line closure is Glide's dependency injection (Chapter 30) —
+no container, no globals, no framework.
+
+#### Request and response surfaces
+
+| Request | Returns |
+|---|---|
+| `req.path_param(name)` | `String?` — `None` when absent |
+| `req.body()` | `String` |
+| `req.method()` | `String` |
+| `req.path()` | `String` |
+
+| Constructor | Produces |
+|---|---|
+| `http.text(s)` | 200 with a text body |
+| `http.json(v)` | 200 with a JSON body |
+| `http.created()` | 201 |
+| `http.bad_request(msg)` | 400 |
+| `http.not_found()` | 404 |
+
+That constructor set is **closed** for now — it grows under the
+dogfood rule.
+
+#### A client with real defaults
+
+```glide-run
+import http
+
+fn main() {
+    match http.get("http://example.com/") {
+        Ok(resp) => println("{resp.status()} {resp.body().len()} bytes")
+        Err(e)   => println("failed: {e}")
+    }
+}
+```
+
+| Client call | Notes |
+|---|---|
+| `http.get(url)` | 30s timeout **out of the box** |
+| `http.post(url, body)` | body sent as `application/json` |
+| `resp.status()` | `Int` |
+| `resp.body()` | `String` |
+
+**The default client has a timeout.** Go's does not, and an infinite
+hang out of the box is an incident generator.
+
+#### Cancellation is ambient
+
+```glide
+scope(timeout: 5.s) {
+    let resp = http.get(url)?
+    …
+}
+```
+
+`http.get` is a **cancellation point**, so the scope's deadline aborts
+the in-flight request. Nothing in the signature mentions a timeout.
+
+`http.serve` is a cancellation point too: **the enclosing scope's death
+gracefully shuts the server down.**
+
+```glide
+scope s {
+    _ = s.spawn(|| sweeper(db))
+    http.serve("127.0.0.1:8080", r)
+}
+```
+
+When `serve` returns, the sweeper is cancelled and joined. When the
+scope dies for any other reason, `serve` shuts down. **There is no
+shutdown code anywhere.**
+
+#### A complete, self-driving service
+
+This is the repository's own `notes.gld`, reduced. It serves, exercises
+its own API over real HTTP, and returns — which cancels the server.
+
+```glide
+import http
+import sql
+import time
+
+fn get_note(db: Db, req: Request) -> Result<Response, Error> {
+    let Some(raw) = req.path_param("id") else {
+        return Ok(http.bad_request("missing id"))
+    }
+    let Some(id) = raw.parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let found = db.query_one(
+        "select id, title from notes where id = :id",
+        ["id": id],
+    )?
+    match found {
+        Some(row) => Ok(http.json(row))
+        None      => Ok(http.not_found())
+    }
 }
 
-const crc_table = make_crc_table()          // ○ evaluated at build time
+fn run() -> Result<String, Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    _ = db.exec(`create table notes (id integer primary key, title text)`)?
+    _ = db.exec("insert into notes (title) values (:t)", ["t": "hello"])?
+
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+
+    scope s {
+        _ = s.spawn(|| http.serve("127.0.0.1:17651", r))
+        time.sleep(80.ms)
+        let resp = http.get("http://127.0.0.1:17651/notes/1")?
+        return Ok("{resp.status()} {resp.body().trim()}")
+    }
+}
+
+fn main() {
+    match run() {
+        Ok(s)  => println(s)
+        Err(e) => eprintln("failed: {e}")
+    }
+}
 ```
 
-**Same function, either phase.** There is no `constexpr` sub-language
-and no separate const-evaluable dialect.
-
-The result lands in **read-only data**: shared across the program, zero
-startup cost, immutable by memory protection.
-
-The example that shows why this matters:
-
-```glide
-const re = regex.compile("^[a-z][a-z0-9_]*$")        // ○
+```
+200 {"id":1,"title":"hello"}
 ```
 
-A bad pattern is a **compile error**, and the compiled automaton ships
-in rodata. Compare Go's `regexp.MustCompile` in a `var`, which is a
-runtime panic during `init()`.
+Note the `return` inside the scope — an early exit, which cancels the
+spawned server (Chapter 28's sharpest edge). A tail expression would
+join the server forever.
 
-#### `derive`
+#### The designed surface ○
 
-```glide
-type Note = struct {
-    pub id: NoteId
-    pub title: String
-    pub created: Instant
-    pub body: String?
-} derive(Json, Row, Debug)                   // ○
-```
-
-`derive` asks the compiler to generate implementations by walking the
-type's structure at compile time. `derive(Json)` writes the encoder and
-decoder you would have hand-written; `derive(Row)` writes the
-column-name mapping; `derive(Debug)` writes the structural printer.
-
-It looks like magic. It is ordinary code generation, and the output is
-ordinary code.
-
-Options are **typed comptime arguments**, never string tags:
-
-```glide
-type User = struct { … } derive(Json(rename_all: camel))     // ○
-```
-
-A typo'd option is a compile error. Compare `json:"nmae"`, which
-compiles and ships.
-
-#### The `derive` roster
-
-| Derive | Generates | Chapter |
-|---|---|---|
-| `Json` | encoder + decoder | 31 |
-| `Row` | database column mapping | 33 |
-| `Debug` | structural `{x:?}` rendering | 6 |
-| `Enum` | `all()`, `name()`, `from_name()` | 13 |
-| `Arbitrary` | property-test generators | 22 |
-
-#### The reflection API
-
-Comptime code can inspect a type's structure — fields, names, types,
-variants. That API is what `derive` implementations are written
-against, and `DESIGN.md` calls it "the genuinely hard design problem"
-with prior art in Zig's `@typeInfo` and C# source generators, "neither
-fully right".
-
-It is explicitly to be proven **in the interpreter, before any backend
-exists**.
-
-#### The discipline rules
-
-Three, and they are load-bearing:
-
-**No IO at comptime.** Builds stay hermetic and reproducible.
-Code-generation-from-a-schema is a build step you run, not a comptime
-trick.
-
-**Fuel-limited evaluation.** An instruction quota; exceeding it is a
-compile error, explicitly raisable. This is the halting-problem answer:
-comptime cannot hang your build indefinitely.
-
-**Deterministic by construction**, which follows from the first two —
-and which makes caching comptime results always sound. The fast dev
-backend leans on this.
-
-#### What comptime is not
-
-**Not macros.** No AST manipulation, no new syntax, no token trees.
-
-**Not a generics system.** No user-written functions that take or
-return types.
-
-**Not runtime reflection.** There is none, at all, anywhere.
+- **Middleware is `fn(Handler) -> Handler`.** Because handlers return
+  values, composition is function composition.
+- **`?` propagates to one error-to-status mapping**, configurable
+  rather than reinvented per project.
+- **Streaming**: a `Response` body can be a reader or a generator —
+  iterators paying off.
+- **HTTP/2 in; HTTP/3 when it earns entry.**
+- TLS, connection pooling, and retries.
 
 ---
 
 ### 2. Under the Hood
 
-#### How a `derive` works
+#### Green thread per request
 
-`derive Json` is an ordinary comptime function. It receives the type's
-structure through the reflection API, walks the fields, and emits code:
+Each request runs in its own task. Because tasks are cheap and
+stackful, a handler is ordinary blocking code — no callbacks, no
+`async`, no colouring.
 
-```
-for each field:
-    emit: write the key
-    emit: write the value via its Json impl
-```
+That is the Go model, and it is the reason Go took over backend
+services. Glide adds the scope: a request's task is a child of the
+server's scope, so a request that is still running when the scope dies
+is cancelled.
 
-The emitted code is a straight-line encoder — no loop over field
-metadata at runtime, no string parsing, no boxing. It is what you would
-write by hand, generated.
+#### Why `serve` being a cancellation point matters
 
-That is the whole mechanism, and it is why the performance claim
-("serde-class speed") is credible: the generated code has no
-abstraction left in it.
+`http.serve` blocks. Making it a cancellation point means the *scope*
+controls the server's lifetime rather than the server controlling the
+program's.
 
-#### Why this is not runtime reflection
+Compare Go, where graceful shutdown is:
 
-Go's `json.Marshal` does the *same walk*, at runtime, on every call:
-look up the type descriptor, iterate the fields, parse each struct tag
-string, switch on the kind, box the value. Per call.
+```go
+srv := &http.Server{Addr: ":8080", Handler: r}
+go func() { srv.ListenAndServe() }()
 
-Comptime does the walk **once, at build time**, and the runtime sees
-only the result. Same information, different phase.
+stop := make(chan os.Signal, 1)
+signal.Notify(stop, os.Interrupt)
+<-stop
 
-#### Why this is not proc macros
-
-Rust's `serde` derives are procedural macros: they receive a token
-stream and produce a token stream, executed by a compiler plugin
-compiled as a separate crate.
-
-The costs `DESIGN.md` names: **a second compiler** (proc-macro crates
-build first, and they build for the host, which complicates
-cross-compilation), **slow** (macro expansion is a significant fraction
-of Rust build times), and **opaque** (the formatter, LSP, and `grep`
-cannot see through the expansion).
-
-Comptime functions are just functions. The same tooling sees them.
-
-#### The `const` M2 shim
-
-Today, `const` initialisers are restricted to **pure expressions** — no
-function or module calls:
-
-```glide
-const max_retries = 3            // ✓
-const table = make_table()       // ○
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+srv.Shutdown(ctx)
 ```
 
-Full comptime evaluation arrives with the compiler.
+Roughly ten lines, present in every Go service, written slightly
+differently each time. In Glide the scope already does it.
 
-#### Literals are arbitrary-precision until they land in a type
+#### The one default error mapping
 
-This falls out of comptime, and it is Go's untyped constants / Zig's
-`comptime_int`:
+`Err(e)` from a handler becomes 500 plus the rendered error. That is
+the *only* mapping in M2, recorded in `DESIGN-DECISIONS.md` as "until
+middleware is designed".
 
-```glide
-const k = 1 << 100               // ○ fine in constant math
-let x: u8 = 300                  // ○ compile error, not a wrap
-```
+It is deliberately crude. A real service wants `NotFound` → 404,
+`BadInput` → 400, `Db` → 500, and that mapping is exactly what
+middleware is for — one function, applied once, that matches the
+error sum type and picks a status.
+
+Today you write it inline by returning `Ok(http.not_found())` rather
+than `Err(.NotFound)`, which is why the examples above do that.
+
+#### Client defaults are production defaults
+
+`http.get` has a 30-second timeout out of the box. `DESIGN.md` is
+pointed about this: **Go's default client has no timeout — an infinite
+hang out of the box, an incident generator.**
+
+Every Go codebase eventually learns to construct its own
+`http.Client{Timeout: …}`, usually after an outage. A default that is
+wrong for production is not a default.
+
+#### Route patterns are Go-1.22 level
+
+Methods plus `{wildcards}`. Not a DSL, not a framework. `DESIGN.md`:
+routing is part of the shared currency a standard library provides —
+the same reasoning that made Go's `Handler` interface the ecosystem's
+common language.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why comptime instead of macros
+#### Why handlers return values
 
-Zig's insight, adopted: **run ordinary language code at compile time**.
+Go's signature is `func(w http.ResponseWriter, r *http.Request)`. It
+returns nothing, and three problems follow.
 
-`DESIGN.md`'s claim is that this covers roughly 90% of macro use cases
-without creating a second language that tooling cannot see through.
+**Errors have nowhere to go.** A handler that fails must write the
+response itself:
 
-The 10% it does not cover is named honestly as a **known gap, accepted
-forever**: DSL-style macros — `html!` templates, embedded SQL syntax,
-new syntactic forms. Comptime functions over string constants get you
-compile-checked SQL; they do not get you new syntax.
-
-And that is the point. Embedded custom-syntax DSLs are exactly the
-"second language tooling cannot see" that macros were banned for. `//
-AST macros, ever. They're how ecosystems become unreadable.`
-
-#### Why the "comptime is not generics" fence matters more than the feature
-
-This is the most important paragraph in the chapter.
-
-Zig uses comptime *as* its generics system: `fn List(comptime T: type)
-type` returns a type. It is elegant and it has a specific consequence —
-**C++-template-tier error messages, deep inside the callee.**
-
-When a generic is checked at its *use* site rather than its
-declaration, a mismatch surfaces as a failure inside the library's
-body, with a stack of instantiation frames. That is why C++ template
-errors are legendary, and why C++20 added Concepts.
-
-Zig had no choice; comptime is all they have. Glide has trait-bounded
-generics (Chapter 18), where bounds are checked **at the declaration**,
-so:
-
-- The library author gets an error in their own code if they use
-  something the bound does not provide.
-- The caller gets "your `T` does not implement `Ord`" at the call site.
-
-`DESIGN.md` states the danger of removing the fence precisely:
-
-> Without the fence, hard generic bounds get "solved" by escaping to
-> comptime and the ecosystem ends up duck-typed and undiagnosable.
-
-That is a prediction about *ecosystem behaviour*, not about the
-feature. Given an escape hatch from a hard bound, people take it, and
-the resulting libraries have no checkable contracts.
-
-So: **no user-written functions that take or return types.** `List<T>`
-comes from generics, never from a comptime function.
-
-#### Why no runtime reflection — absent, not discouraged
-
-Everything Go uses `reflect` for happens at comptime here, against
-static types.
-
-The costs of runtime reflection, from `DESIGN.md`: it is "an
-interpretive loop per call, unauditable", "the biggest hole in Go's
-auditability story", and "a permanent performance tax".
-
-The auditability point is the interesting one. You cannot tell by
-reading a function what it will do to a value if it decides at runtime
-by inspecting the value's type. Reflection defeats the whole
-"skim a function and know what it can do" property that Chapter 1
-listed as a pillar.
-
-The real cost is named: **no deserialising into a type named by a
-runtime string.** The rare dynamic case hand-rolls a registry, visibly:
-
-```glide
-// The escape hatch, written out rather than provided
-let decoders: Map<String, fn(String) -> Result<Event, Error>> = [
-    "created": decode_created,
-    "deleted": decode_deleted,
-]
+```go
+if err != nil {
+    http.Error(w, err.Error(), 500)
+    return          // ← forget this and execution continues
+}
 ```
 
-Explicit, greppable, and typed.
+That missing `return` is a real, recurring Go bug: `http.Error` writes
+a response and the function keeps going, writing a second one.
 
-#### Why no IO at comptime
+**Error handling cannot be centralised.** Every Go web framework
+reinvents an error-returning handler type and an adapter:
 
-Hermetic, reproducible builds. If comptime could read a file or hit the
-network, a build's output would depend on the machine it ran on and the
-day it ran.
+```go
+type HandlerFunc func(w http.ResponseWriter, r *http.Request) error
 
-The legitimate use case — generating code from a schema file — is a
-**build step you run, visibly, with the output committed**. That is the
-same position as "no build scripts" (Chapter 2), and the same position
-as `sqlc`-style schema codegen (Chapter 33). The schema becomes a
-versioned artifact.
+func wrap(h HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if err := h(w, r); err != nil { … }
+    }
+}
+```
 
-`embed` is the designed exception, and it is not really one: `embed
-"static/**" as assets` is *declarative grammar*, and the **build
-system** provides the bytes. Comptime never does the IO.
+Echo, Gin, Chi, and every in-house framework has this. It exists purely
+to work around the signature.
 
-#### Why fuel-limited evaluation
+**Composition is awkward.** With a returned `Response`, middleware is
+`fn(Handler) -> Handler` — plain function composition. With a
+`ResponseWriter`, middleware must wrap the writer to inspect what a
+handler did, which is why Go middleware that needs the status code
+implements a `responseWriter` shim.
 
-Because comptime is Turing-complete and a compiler that can hang is
-hostile.
+Returning `Result<Response, E>` fixes all three. `?` propagates,
+one mapping turns errors into statuses, and middleware composes.
 
-An instruction quota with an explicit way to raise it means a runaway
-comptime computation is a compile error with a clear cause, not a build
-that never finishes.
+#### Why cancellation is ambient here
 
-#### Why determinism makes caching sound
+Chapter 27 made the general argument. HTTP is where it pays the most,
+because HTTP is where Go's `ctx` is most viral: every handler takes
+one, every function a handler calls takes one, every database call
+takes one, and Go duplicated its entire `database/sql` API
+(`Query`/`QueryContext`) to retrofit it.
 
-If comptime is deterministic — no IO, no clock, no randomness — then
-the result of evaluating a `const` or expanding a `derive` depends only
-on its inputs. So the fast dev backend can cache those results across
-builds without any invalidation logic beyond hashing the input.
+`scope(timeout: 5.s) { http.get(url)? }` cancels the request when the
+scope dies, and no signature changed. `DESIGN.md`: "the ctx-replacement
+covers HTTP for free."
 
-That is a real compile-speed lever, and it is only available because of
-the discipline rules.
+#### Why a router in the standard library
+
+Because **routing is shared currency**.
+
+Go's `net/http` made `Handler` the ecosystem's common interface, and
+that is why Go middleware from different authors composes. But Go's
+router was too weak until 1.22 (no method matching, no path
+parameters), so every project imported `gorilla/mux` or `chi` — and
+those routers have incompatible parameter-extraction APIs, which
+fragmented the middleware ecosystem after all.
+
+Shipping a Go-1.22-level router — methods plus wildcards — from day one
+means the shared currency includes routing. Not a DSL, not a
+framework.
+
+#### Why the response constructor set is closed (for now)
+
+`http.text`, `http.json`, `http.created`, `http.bad_request`,
+`http.not_found`. Five constructors.
+
+That is the dogfood rule (Chapter 31): the set grows when a program
+needs a member. A closed set also keeps the API from becoming a status
+code enumeration with a function per code, which is what happens when
+you start (`http.conflict()`, `http.teapot()`, …).
+
+#### Why green thread per request rather than async
+
+Chapter 26's argument, applied. A handler is ordinary blocking code
+that can call any function, use `?`, hold a database transaction across
+an await-shaped boundary that does not exist, and be tested by calling
+it.
+
+Node's and Python's async ecosystems both split their libraries in two
+over this. Java spent fifteen years on reactive HTTP and shipped
+virtual threads.
 
 ---
 
 ### 4. Competing Approaches
 
-**Zig.** Comptime as the whole metaprogramming story, including
-generics. The direct inspiration for the *mechanism* and the direct
-counterexample for the *scope* — Glide takes comptime and fences it
-away from generics.
+**Go.** `net/http` — the model, and genuinely excellent: `Handler` as
+shared currency, green thread per request, a standard library server
+you can run in production. Its three weaknesses that Glide targets: the
+handler signature cannot return an error, the default client has no
+timeout, and `ctx` must be threaded manually.
 
-**Rust.** Declarative macros (`macro_rules!`) and procedural macros.
-Enormously powerful — `serde`, `tokio::select!`, `sqlx::query!` — and
-the costs are a second compiler, significant build time, and opacity to
-tooling. Rust's `const fn` is the closest thing to Glide's const
-evaluation and is deliberately restricted.
+**Rust.** `axum`, `actix-web`, `hyper` — async, so handlers are
+`async fn` and everything they call must be async-aware. Excellent
+performance and the function-colouring cost. Axum's handler return type
+(`impl IntoResponse`) is close in spirit to Glide's returned
+`Response`.
 
-**C++.** Templates (accidentally Turing-complete), `constexpr`,
-`consteval`, and Concepts. The cautionary tale for use-site checking,
-and `constexpr` is a genuine success — C++ arrived at
-"run ordinary code at compile time" from the other direction.
+**Python.** Flask/Django (sync, WSGI) and FastAPI/Starlette (async,
+ASGI) — the two parallel ecosystems the async decision produced.
+FastAPI's typed request/response models via Pydantic are the closest
+thing to what `derive Json` plus typed handlers will give.
 
-**C#.** Source generators — compile-time code generation with access to
-the semantic model. `DESIGN.md` cites them as prior art for the
-reflection API, "neither fully right" alongside Zig's `@typeInfo`. C#
-also has full runtime reflection, which is how most of its
-serialisation works.
+**Node.** Express with `(req, res, next)` — the same
+no-return-value problem as Go, plus `next()` for error propagation and
+a middleware chain that is a list rather than a composition.
+`async`/`await` on top means an unhandled promise rejection can hang a
+request silently.
 
-**Go.** Runtime reflection plus `go generate` (a comment that runs a
-command — a build step by convention). `stringer` exists as an external
-tool because Go's enums cannot enumerate themselves, which is exactly
-the `derive Enum` use case.
+**Java.** Servlets (`doGet(req, resp)` — the same shape as Go's) and
+Spring MVC, where a handler returns a value and an
+`@ExceptionHandler` maps errors to statuses. Spring got the returned-
+value design right decades ago, at the cost of the rest of Spring.
 
-**Java.** Annotation processors (compile-time, verbose) plus runtime
-reflection (used by everything). Lombok is the annotation processor
-that rewrites your AST, and its relationship with IDEs is the standard
-argument against tooling-opaque codegen.
-
-**Lisp.** Macros that operate on the language's own data structures,
-with no syntax barrier. The most powerful version, and the source of
-the "every codebase becomes its own dialect" critique that `DESIGN.md`
-invokes when it bans AST macros.
+**Elixir/Phoenix.** `Plug` — a function `conn -> conn`, so middleware
+composes cleanly. Different shape from Glide's, same insight: make the
+handler a function that returns something.
 
 ---
 
 ### 5. Common Mistakes
 
-*(Anticipated — none of this runs yet.)*
+**Using a regular string for a route pattern.**
 
-**Reaching for comptime to solve a generics problem.** If you find
-yourself wanting a function that takes a type and returns a type, stop:
-the answer is a trait bound. That instinct is exactly what the fence
-exists to catch.
+```glide
+// Bad — {id} interpolates
+r.get("/notes/{id}", handler)
 
-**Expecting IO at comptime.** Reading a schema file at compile time is
-the thing that is banned. It is a build step with committed output.
+// Good
+r.get(`/notes/{id}`, handler)
+```
 
-**Expecting new syntax.** Comptime gives you code generation, not
-grammar extension. `html!{ <div>…</div> }` will never exist.
+The single most common HTTP mistake in Glide, and it was discovered the
+hour the shim landed.
 
-**Putting expensive computation in a `const` without thinking about
-build time.** Comptime evaluation costs build time, bounded by fuel. A
-`const` that computes a million-entry table costs that computation on
-every clean build.
+**Forgetting `mut` on the router.**
 
-**Assuming `derive` output is invisible.** It is ordinary generated
-code. The designed tooling can show it to you — which is the difference
-from a proc macro whose expansion you must ask a special tool to
-reveal.
+```glide
+// Bad
+let r = http.router()
+r.get(`/health`, h)        // registration requires a mut path
 
-**Using a runtime string to select a type.** There is no runtime
-reflection, so there is no `decode_into(typeName)`. Write the registry.
+// Good
+let mut r = http.router()
+r.get(`/health`, h)
+```
+
+**Letting a tail expression join the server forever.**
+
+```glide
+// Bad — normal scope exit joins the blocked server
+scope s {
+    _ = s.spawn(|| http.serve(addr, r))
+    do_something()
+}
+
+// Good — early exit cancels first
+scope s {
+    _ = s.spawn(|| http.serve(addr, r))
+    do_something()
+    return
+}
+```
+
+Chapter 28's sharpest edge, and it bites hardest here because
+`http.serve` blocks forever by design.
+
+**Returning `Err` for a client error.** Today, `Err(e)` maps to 500 —
+the one default mapping. A 404 or a 400 must be `Ok(http.not_found())`
+or `Ok(http.bad_request(msg))` until error middleware exists.
+
+```glide
+// Bad today — a missing note becomes a 500
+None => Err(.NotFound{ id: id })
+
+// Good today
+None => Ok(http.not_found())
+```
+
+**Expecting a `ctx` parameter.** There is none. Timeouts come from an
+enclosing scope.
+
+**Blocking the server's task with setup.** `http.serve` blocks, so
+anything after it in the same task never runs. Spawn it, or make it the
+last statement.
+
+**Assuming the client has no timeout.** It has 30 seconds. That is
+usually right and occasionally wrong — for a long-poll endpoint, wrap
+it in a scope with the deadline you want.
+
+**Reaching for middleware.** It is ○. Today, compose by wrapping the
+closure at registration:
+
+```glide
+r.get(`/notes/{id}`, |req| with_logging(|r| get_note(db, r), req))
+```
+
+Workable, and clearly a placeholder for `fn(Handler) -> Handler`.
 
 ---
 
 ### 6. Performance Considerations
 
-**Comptime shifts cost from runtime to build time.** That is the entire
-trade, and it is almost always the right one — a program runs many
-times and builds fewer times.
+**Green thread per request** costs a few kilobytes of stack per
+in-flight request. At tens of thousands of concurrent connections that
+is tens to hundreds of megabytes — fine on a server, and the workload
+`DESIGN.md` concedes to async is a million connections on small
+hardware.
 
-**`const` values cost nothing at runtime.** They land in read-only
-data: no startup construction, shared across the process, immutable by
-memory protection. A `const` lookup table strictly beats Go's `var`
-equivalent, which is built in every process at startup.
+**A handler returning a `Response`** is a value return, not a write to
+a shared writer. That means the framework can inspect, wrap, and
+transform it — which is what makes middleware cheap — at the cost of
+holding the body in memory until it is written.
 
-**`derive`d code is straight-line.** No metadata loop, no string
-parsing, no boxing. That is the "serde-class speed" claim, and it is
-what separates comptime derive from reflection.
+For large bodies that matters, and the designed answer is a
+**streaming body**: a reader or a generator, so the response is
+produced lazily (Chapter 24's laziness paying off in a third place).
 
-**Comptime evaluation costs build time**, bounded by the fuel limit and
-mitigated by caching (which determinism makes sound).
+**`http.get` has a 30-second timeout** and connection pooling.
+Cancellation adds a context per call.
 
-**Monomorphisation and comptime interact** (Chapter 18): each is a
-build-time cost that buys runtime speed, and together they are why
-"compile speed is a feature" needs to be a stated principle rather than
-an aspiration.
+**In the interpreter**, everything above sits on Go's `net/http`, so
+the network path is production-grade and the *handler* is
+tree-walked — which is where the time goes.
 
-**No runtime reflection means no reflection tax.** Every Go program
-that encodes JSON pays an interpretive loop per field per call. That
-cost is simply absent.
+**`http.json(v)` walks the value structurally** (Chapter 33). With
+`derive Json` (○) it becomes a generated encoder.
 
 ---
 
 ### 7. Best Practices
 
-*(Anticipated, from the design's own guidance.)*
+**Let the scope own the server's lifetime.**
 
-**Use `const` for anything computable at build time.** Lookup tables,
-compiled regexes, parsed configuration schemas, precomputed constants.
-The rule of thumb: if it does not depend on runtime input, it is a
-`const`.
+```glide
+fn run() -> Result<(), Error> {
+    let db = sql.open(dsn)?
+    defer { _ = db.close() }
 
-**Prefer `derive` to hand-written boilerplate, and hand-written code to
-a clever derive.** A derive is right when the mapping is mechanical
-(JSON, database rows, debug output). When the mapping has real
-decisions in it — a wire format that differs from your domain model —
-write the conversion function (Chapter 31's "keep the wire type
-separate").
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+    let r = r                                     // seal after registration
 
-**Do not write a derive for something used once.** A derive is a code
-generator; a code generator with one customer is a function.
+    scope s {
+        _ = s.spawn(|| sweeper(db))
+        http.serve("127.0.0.1:8080", r)
+    }
+}
+```
 
-**Respect the fence in your own designs.** If your library's ergonomics
-would improve with a comptime function that returns a type, the design
-document's prediction is that the ecosystem cost outweighs your
-convenience. Find the trait bound.
+Everything dies together, in the right order, with no shutdown code.
+Note the `let r = r` seal (Chapter 4) — registration is over.
 
-**Keep comptime computations cheap.** Build time is a shared resource
-and "compile speed is a feature" is principle three.
+**Keep handlers as named functions; use closures only to inject.**
 
-**Reach for a build step when you need IO.** Schema codegen, protocol
-buffers, embedded asset manifests. Run it, commit the output, and the
-build stays hermetic.
+```glide
+// Good
+r.get(`/notes/{id}`, |req| get_note(db, req))
+
+fn get_note(db: Db, req: Request) -> Result<Response, ApiError> { … }
+```
+
+The handler is now an ordinary function you can call from a test with a
+constructed `Request` — no server, no port, no HTTP.
+
+**Validate at the boundary and convert to types immediately.**
+
+```glide
+fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Some(raw) = req.path_param("id") else {
+        return Ok(http.bad_request("missing id"))
+    }
+    let Some(n) = raw.parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let id = NoteId(n)              // typed from here on
+    …
+}
+```
+
+Two guard clauses, then everything downstream has a `NoteId`
+(Chapter 15).
+
+**Distinguish client errors from server errors deliberately.** Client
+errors (400, 404) are `Ok(…)` responses; server errors are `Err`. That
+mapping is temporary but the *distinction* is permanent, and getting it
+right now means the middleware migration is mechanical.
+
+**Set a scope timeout per request boundary** rather than per call:
+
+```glide
+fn handle(req: Request) -> Result<Response, ApiError> {
+    scope(timeout: 2.s) {
+        let user = load_user(req)?
+        let prefs = load_prefs(user)?
+        Ok(http.json(render(user, prefs)))
+    }
+}
+```
+
+**Do not reach for a framework.** The standard library is the shared
+currency, and the whole reason it ships a router is so that the
+ecosystem does not fragment into incompatible middleware conventions.
 
 ---
 
 ### 8. Examples
 
-*(All ○ — illustrative of the design.)*
-
-**The three derives on one type:**
+**Hello, server:**
 
 ```glide
-type NoteId = distinct Int
+import http
 
-type Note = struct {
-    pub id: NoteId
-    pub title: String
-    pub created: Instant
-    pub body: String?
-} derive(Json, Row, Debug)
-```
+fn main() -> Result<(), Error> {
+    let mut r = http.router()
+    r.get(`/health`, |req| http.text("ok"))
+    r.get(`/hello/{name}`, |req| {
+        let name = req.path_param("name") ?? "world"
+        http.text("hello, {name}")
+    })
 
-Four lines of declaration, and you get:
-
-- A JSON encoder and decoder where `body` is optional because it is
-  `String?`, `id` unwraps because it is `distinct`, and `created`
-  serialises as RFC 3339 — all falling out of the type, with no tags.
-- A database row mapper keyed by **column name**, so reordering a
-  SELECT is harmless.
-- Structural debug output for `{note:?}`.
-
-The equivalent Go needs struct tags on every field (unchecked strings),
-`sql.NullString` for the optional column, positional `rows.Scan`, and
-`%+v` that prints struct guts at users.
-
-**Const evaluation earning its keep:**
-
-```glide
-// A compiled regex, validated at build time, shipped in rodata.
-const slug_pattern = regex.compile("^[a-z][a-z0-9-]*$")
-
-// A lookup table, computed once, at build time.
-const crc_table = make_crc_table()
-
-// Configuration derived from other constants.
-const max_body = 1024 * 1024
-const chunk_size = max_body / 16
-```
-
-Every one of these is `var` plus `init()` in Go, which means: built at
-startup in every process, mutable in principle, and — for the regex —
-a runtime panic if the pattern is wrong.
-
-**Compile-checked SQL, the shape comptime enables:**
-
-```glide
-// The placeholder check (Chapter 33) is a pure comptime parse of a
-// literal string: no database, no network, hermetic.
-db.query<Note>(
-    "select id, title, created, body from notes where org = :org",
-    ["org": org],
-)
-```
-
-At compile time: parse the query for `:name` placeholders, compare
-against the parameter map's keys, and error on a mismatch naming the
-parameter. At runtime: nothing.
-
-This is the "unoccupied sweet spot" from Chapter 33 — schema checking
-needs a database, but placeholder checking needs only the string.
-
-**The known gap, stated:**
-
-```glide
-// This will never exist.
-let page = html! {
-    <div class="note">
-        <h1>{note.title}</h1>
-    </div>
-}
-```
-
-Templates go through the standard library's templating engine with
-contextual auto-escaping, not through a macro that invents syntax.
-`DESIGN.md` accepts this gap forever, because the alternative is a
-second language the formatter, LSP, and `grep` cannot see through.
-
-**The escape hatch, written out:**
-
-```glide
-// No runtime reflection means no decode-by-type-name. Write the
-// registry — it is explicit, typed, and greppable.
-type Event = Created{ id: Int } | Deleted{ id: Int }
-
-fn decode_event(kind: String, body: String) -> Result<Event, Error> {
-    match kind {
-        "created" => decode_created(body)
-        "deleted" => decode_deleted(body)
-        _         => Err(.UnknownKind{ kind: kind })
+    scope s {
+        http.serve("127.0.0.1:8080", r)
     }
 }
 ```
 
-Compare Go, where this would be a `map[string]reflect.Type` and a
-`reflect.New` call. Six lines instead of three, and every possible
-event type is visible in the source.
+Two routes, a path parameter with a default, and a server whose
+lifetime is the scope.
+
+**The self-driving service — server and client in one program:**
+
+```glide
+import http
+import sql
+import time
+
+fn get_note(db: Db, req: Request) -> Result<Response, Error> {
+    let Some(raw) = req.path_param("id") else {
+        return Ok(http.bad_request("missing id"))
+    }
+    let Some(id) = raw.parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let found = db.query_one(
+        "select id, title from notes where id = :id",
+        ["id": id],
+    )?
+    match found {
+        Some(row) => Ok(http.json(row))
+        None      => Ok(http.not_found())
+    }
+}
+
+fn run() -> Result<String, Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    _ = db.exec(`create table notes (id integer primary key, title text)`)?
+    _ = db.exec("insert into notes (title) values (:t)", ["t": "hello"])?
+
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+
+    scope s {
+        _ = s.spawn(|| http.serve("127.0.0.1:17651", r))
+        time.sleep(80.ms)
+
+        let mut report = []
+        for id in ["1", "999", "abc"] {
+            let resp = http.get("http://127.0.0.1:17651/notes/" + id)?
+            report.push("{id:4} -> {resp.status()} {resp.body().trim()}")
+        }
+        return Ok(report.join("\n"))
+    }
+}
+
+fn main() {
+    match run() {
+        Ok(s)  => println(s)
+        Err(e) => eprintln("failed: {e}")
+    }
+}
+```
+
+```
+   1 -> 200 {"id":1,"title":"hello"}
+ 999 -> 404 not found
+ abc -> 400 bad id
+```
+
+Three requests, three status codes, one program. Worth counting what is
+absent: no `context.Context`, no `WaitGroup`, no shutdown handler, no
+signal trapping, no `errgroup`, and no `defer srv.Shutdown(ctx)`. The
+`return` cancels the server, the scope joins it, and the `defer` closes
+the database.
+
+**Side by side with Go, on the error path:**
+
+```go
+// Go — the missing `return` is a real, recurring bug
+func GetNote(db *sql.DB) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id, err := strconv.Atoi(r.PathValue("id"))
+        if err != nil {
+            http.Error(w, "bad id", 400)
+            return                              // ← forget this…
+        }
+        note, err := queryNote(r.Context(), db, id)
+        if err != nil {
+            http.Error(w, err.Error(), 500)
+            return                              // ← …or this
+        }
+        if note == nil {
+            http.NotFound(w, r)
+            return                              // ← …or this
+        }
+        json.NewEncoder(w).Encode(note)
+    }
+}
+```
+
+Three `return`s that must not be forgotten, and forgetting one produces
+a superimposed double response rather than a compile error.
+
+```glide
+// Glide — every exit is a value, so there is nothing to forget
+fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
+    let Some(raw) = req.path_param("id") else {
+        return Ok(http.bad_request("missing id"))
+    }
+    let Some(id) = raw.parse_int() else {
+        return Ok(http.bad_request("bad id"))
+    }
+    let found = db.query_one(sql, ["id": id])?
+    match found {
+        Some(row) => Ok(http.json(row))
+        None      => Ok(http.not_found())
+    }
+}
+```
+
+The function must produce a `Result<Response, ApiError>` on every path,
+and the compiler checks that. A forgotten exit is a type error rather
+than a runtime double-write.
+
+**Bad versus good: the shutdown ceremony**
+
+```glide
+// Bad — Go habits transplanted
+fn main() -> Result<(), Error> {
+    let (stop_tx, stop_rx) = channel()
+    let mut shutting_down = false
+
+    scope s {
+        _ = s.spawn(|| {
+            for v in stop_rx { shutting_down = true }
+        })
+        _ = s.spawn(|| sweeper(db, stop_rx))     // takes a stop channel
+        http.serve(addr, r)
+        stop_tx.close()
+        return
+    }
+}
+```
+
+A stop channel, a flag, and a sweeper that has to poll it. Every piece
+of this is reconstructing what the scope already does — and the
+`mut shutting_down` captured across a task boundary is the exact
+pattern the ○ compile rule will reject.
+
+```glide
+// Good
+fn main() -> Result<(), Error> {
+    scope s {
+        _ = s.spawn(|| sweeper(db))
+        http.serve(addr, r)
+    }
+}
+```
+
+`sweeper` has no stop channel, no flag, and no `ctx`. Its
+`time.sleep` is a cancellation point, so it stops when the scope dies.
 
 ---
 
@@ -553,57 +798,55 @@ event type is visible in the source.
 
 **Summary**
 
-- **Everything in this chapter is ○.** It is the design behind
-  `derive Json`, `derive Row`, `derive Debug`, and flexible `const`.
-- **Comptime is ordinary language code executed at compile time** —
-  Zig's insight. Same function, either phase; no `constexpr`
-  sub-language.
-- It exists for exactly **two things**: **const evaluation** (functions
-  running in const positions, results landing in read-only data) and
-  **derive via comptime reflection** (walking a type's structure to
-  emit plain code).
-- **The fence matters more than the feature: comptime is not a second
-  generics system.** No user functions taking or returning types.
-  `List<T>` comes from trait-bounded generics, checked at the
-  *declaration*, so errors point at your code rather than deep inside a
-  callee — the C++/Zig failure mode, avoided.
-- **No AST macros, ever.** Comptime covers ~90% of macro use cases
-  without a second language tooling cannot see through. The accepted
-  permanent gap is DSL-style macros — `html!` will never exist.
-- **No runtime reflection. Absent, not discouraged.** It is an
-  interpretive loop per call, a permanent performance tax, and the
-  biggest hole in Go's auditability story. The real cost — no
-  deserialising into a type named by a runtime string — is paid by
-  hand-rolling a visible registry.
-- **Three discipline rules:** no IO at comptime (hermetic builds);
-  fuel-limited evaluation (a compile error, not a hung build);
-  deterministic by construction (so caching comptime results is always
-  sound).
-- **`derive` options are typed comptime arguments**, not string tags —
-  a typo is a compile error rather than a shipped bug.
-- The **reflection API is the genuinely hard design problem**, with
-  Zig's `@typeInfo` and C# source generators as imperfect prior art,
-  and it is to be proven in the interpreter before any backend exists.
-- M2 shim: `const` initialisers are restricted to pure expressions.
+- **Handlers return values**: `fn(Request) -> Result<Response, E>`.
+  This single change fixes Go's three handler problems — errors have
+  nowhere to go, error handling cannot be centralised, and composition
+  requires wrapping the `ResponseWriter`.
+- The forgotten-`return`-after-`http.Error` bug class becomes a **type
+  error**: every path must produce a `Result<Response, E>`.
+- **`Err(e)` maps to 500** — the one default mapping until middleware
+  is designed. Client errors are `Ok(http.bad_request(…))` and
+  `Ok(http.not_found())` today.
+- **Route patterns want raw strings**: `` r.get(`/notes/{id}`, h) ``.
+  Registration requires a `mut` router.
+- **Dependency injection is a one-line closure**:
+  `r.get(pat, |req| get_note(db, req))`. No container, no globals.
+- **Cancellation is ambient.** `http.get` and `http.serve` are
+  cancellation points, so `scope(timeout:)` bounds a request and the
+  scope's death gracefully shuts the server down. **There is no
+  shutdown code** — Go's ten-line signal-trap-and-`Shutdown(ctx)`
+  ritual is deleted.
+- **The client has a 30-second timeout by default.** Go's has none,
+  which is an infinite hang out of the box.
+- **Green thread per request**, so handlers are ordinary blocking code
+  with no function colouring.
+- **A router in the standard library** because routing is shared
+  currency — Go's weak pre-1.22 router fragmented the middleware
+  ecosystem it had otherwise unified.
+- Response constructors are a **closed set of five**, growing under the
+  dogfood rule.
+- ○: middleware as `fn(Handler) -> Handler`, a configurable
+  error-to-status mapping, streaming response bodies (a reader or
+  generator), TLS, retries, HTTP/2.
 
 **Exercises**
 
-1. **Cost the reflection tax.** Benchmark Go's `encoding/json` against
-   a hand-written encoder for the same struct. The ratio is what
-   comptime derive is claiming to recover. Then benchmark Rust's
-   `serde` against the same hand-written encoder — that ratio is the
-   target.
+1. **Count the shutdown code.** In a Go service, find every line
+   involved in graceful shutdown: signal handling, the `Shutdown`
+   call, its timeout context, the `errgroup`, and every `ctx.Done()`
+   arm in a background loop. Then write the Glide equivalent and count
+   again. The difference is one scope.
 
-2. **Find the escape to comptime.** In a Zig codebase (or a C++ one
-   using templates), find a generic function whose error message, when
-   misused, points inside the library rather than at the call site.
-   Write down what the declaration-site-checked version would have
-   said. That difference is what the fence buys.
+2. **Find the missing return.** In a Go or Express codebase, search for
+   `http.Error(`, `res.status(`, or equivalent, and check that every
+   one is immediately followed by a `return` or `next()`. In a codebase
+   of any size you will find at least one that is not, and it will
+   either be a latent double-write or a case where the author knew
+   something the code does not say.
 
-3. **Design a derive.** Pick a mechanical mapping you write by hand
-   today — a builder, an equality function, a CLI flag parser from a
-   struct, a fixture generator. Write the comptime function's outline:
-   what it reads from the reflection API, what it emits, and what its
-   typed options are. Then ask whether the mapping is genuinely
-   mechanical or whether it has decisions in it — if it has decisions,
-   it wanted a function, not a derive.
+3. **Design the error middleware.** Write the `fn(Handler) -> Handler`
+   that maps an `ApiError` sum type to statuses — `NotFound` → 404,
+   `BadInput` → 400, `Db` → 500 — and note that the `match` is
+   exhaustive, so adding a variant breaks the middleware at compile
+   time and forces you to choose a status. Then compare with Go's
+   `errors.Is` ladder, which does not.

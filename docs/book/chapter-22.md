@@ -1,715 +1,695 @@
-# Chapter 22: Testing
+# Chapter 22: `defer` and `errdefer`
 
-Tests are a **language construct** in Glide, not a naming convention.
-There is exactly one assertion, and it is known to the compiler. And
-property-based testing — thirty years proven, never mainstream because
-the setup friction was always a dependency and an afternoon — ships in
-the box with generation and shrinking.
+`defer` schedules a block to run when the enclosing scope exits — on
+success, on error, and during a panic — so that acquisition and cleanup
+sit together on adjacent lines.
 
-`DESIGN.md` starts from the position that Go's testing model is the
-best mainstream one, for precise reasons, and then applies three
-upgrades.
+Glide takes Go's construct with **three defects fixed** and adds a
+sibling Go lacks. The fixes are not speculative: Swift and Zig already
+shipped them, and Glide takes theirs.
 
-Everything in this chapter is ✓ except `require`, benchmark execution,
-and the deterministic-scheduler mode.
+Everything here is ✓.
 
 ---
 
 ### 1. Basic Usage
 
-#### A test
+#### `defer`
 
 ```glide
-fn add(a: Int, b: Int) -> Int { a + b }
-
-test "add works" {
-    expect(add(2, 2) == 4)
-}
+let db = sql.open("sqlite:notes.db")?
+defer { _ = db.close() }
 ```
 
-```bash
-$ glide test math.gld
-ok    add works
-```
+The block runs when the enclosing block exits. Acquisition and release
+are two adjacent lines, so a reader never has to scan to the bottom of
+the function to check that the file gets closed.
 
-`test "name" { … }` is legal in **any** `.gld` file. There is no magic
-prefix, no `_test` filename requirement, no `t *testing.T` parameter to
-thread, and no framework to import.
+Multiple defers run **LIFO** — last registered, first run — which is
+what you want, because resources acquired later usually depend on ones
+acquired earlier.
 
-Placement is style, not semantics: inline next to a small invariant
-reads as documentation; a separate `_test.gld` file suits larger
-suites. Tests see module internals; black-box API testing is what a
-separate test module is for.
-
-#### `expect` — the only assertion
+#### `defer` takes a block, only a block
 
 ```glide
-test "this one fails" {
-    expect(add(2, 2) == 5)
-}
+defer { conn.close() }        // right
+defer conn.close()            // does not parse
 ```
 
+This is Swift's form, and it means Go's argument-evaluation puzzle
+cannot be written. In Go, `defer f(x)` evaluates `x` **now** and calls
+`f` **later**, which is a genuine source of bugs:
+
+```go
+// Go — logs the value of `status` at the defer line, not at return
+defer log.Printf("finished with %s", status)
 ```
-FAIL  this one fails
-      line 13: expect failed: left == right
-        left:  4
-        right: 5
-```
 
-`expect` is **compiler-known**. It does not receive a boolean; it
-receives the *expression*, and on failure it reports both sides. That
-is why there is no `assertEqual`, `assertGreater`, `assertContains`, or
-any of the forty matchers a typical assertion library ships.
+A block closes over variables like any closure, so everything is
+evaluated at scope exit. There is no second rule to remember.
 
-`expect` **fails and continues** — the rest of the test body runs.
-`require` (fail and stop) is ○.
+#### `defer` is **block**-scoped, not function-scoped
 
-#### Property-based tests
+This is the big one:
 
-Give the test block parameters and it becomes a **property test**:
-
-```glide
-fn reverse(xs: List<Int>) -> List<Int> {
-    let mut out = []
-    for i in 0..xs.len() {
-        out.push(xs[xs.len() - 1 - i])
+```glide-run
+fn main() {
+    for i in 0..2 {
+        defer { println("  cleanup {i}") }
+        println("  body {i}")
     }
-    out
-}
-
-test "reverse twice is identity" (xs: List<Int>) {
-    expect(reverse(reverse(xs)) == xs)
 }
 ```
 
 ```
-ok    reverse twice is identity  (100 cases)
+  body 0
+  cleanup 0
+  body 1
+  cleanup 1
 ```
 
-You do not choose the inputs. You state a **property** that should hold
-for all of them, and the runner generates 100 cases trying to falsify
-it.
+The defer runs at the end of **each iteration**. In Go, a `defer`
+inside a loop accumulates until the *function* returns:
 
-If example-based testing is all you have used, this is the feature to
-sit with. It is a different activity: instead of asking "does it work
-for the cases I thought of", you ask "is this statement true", and the
-machine hunts for counterexamples in the space you would never have
-enumerated — empty lists, duplicates, negatives, orderings.
+```go
+// Go — every file stays open until the function ends
+for _, path := range paths {
+    f, _ := os.Open(path)
+    defer f.Close()          // fd exhaustion on a long list
+    process(f)
+}
+```
 
-#### Shrinking
+That is the classic file-descriptor-exhaustion bug, and it is invisible
+because the code looks correct. In Glide the shape is not reproducible.
 
-When the runner finds a failure, it does not hand you the 27-element
-monster it found first. It **shrinks** — re-running with structurally
-smaller variants until the failure is minimal:
+Function-end cleanup is a defer at function scope, where it reads as
+what it is.
+
+#### `errdefer`
+
+Runs **only when the scope exits on the error path** — a `return`
+carrying an `Err` (including what `?` propagates), or a panic. Not a
+plain return, not loop control.
+
+```glide-run
+type E = Boom
+
+fn work(fail: Bool) -> Result<Int, E> {
+    defer { println("  always") }
+    errdefer { println("  on error only") }
+
+    if fail { return Err(.Boom) }
+    Ok(1)
+}
+
+fn main() {
+    println("success:")
+    println("{work(false):?}")
+    println("failure:")
+    println("{work(true):?}")
+}
+```
+
+```
+success:
+  always
+Ok(1)
+failure:
+  on error only
+  always
+Err(Boom)
+```
+
+Note the ordering on the error path: `errdefer` ran before `defer`,
+because they run LIFO and `errdefer` was registered second.
+
+The canonical use is compensation — undo a partial effect:
 
 ```glide
-test "broken property" (xs: List<Int>) {
-    expect(reverse(xs) == xs)
+fn store(path: String, data: String) -> Result<(), Error> {
+    let f = fs.create(path)?
+    errdefer { _ = fs.remove(path) }     // no partial files on failure
+    f.write(data)?
+    f.close()?                            // success: error propagates
+    Ok(())
 }
 ```
 
-```
-FAIL  broken property
-      input: xs = [0, 1]
-      line 21: expect failed: left == right
-        left:  [1, 0]
-        right: [0, 1]
-```
+`defer` = always. `errdefer` = only on failure. They are not two ways to
+do one thing.
 
-`[0, 1]` is the smallest input that breaks the property. That tells you
-something precise: reversal differs from identity as soon as there are
-two distinct elements. A random 27-element failure would have told you
-nothing.
+#### Errors inside a defer must be visible
 
-The runner uses a **fixed seed** per test, so a failure is reproducible
-and a fix stays fixed. Case 0 is always the type's simplest value
-(empty list, `0`, `""`) because empty-case bugs dominate.
-
-#### Benchmarks ○
+The unused-`Result` rule applies inside defer blocks:
 
 ```glide
-bench "insert 10k" {
-    let mut t = Tree.new()
-    for x in 0..10_000 { t.insert(x) }
-}
+defer { _ = db.close() }        // the discard is explicit
 ```
 
-```
-skip  bench "insert 10k" (benchmarks not implemented yet)
-```
+You cannot silently drop the error, which is Go's worst `defer` defect
+— `defer f.Close()` discards the error that surfaces buffered-write
+failures, and that is silent data loss.
 
-Benchmarks parse and are skipped today. The designed model: **the
-runner owns the timing loop.** There is no `b.N` to get wrong, and
-setup before the body is naturally excluded.
+#### What `defer` may not do
 
-#### Running
-
-```bash
-glide test file.gld
+```glide
+defer { return 5 }              // runtime error
+defer { break }                 // parse error
+defer { continue }              // parse error
 ```
 
-Exit code reflects failures, so it slots into CI without a wrapper.
+A defer block runs during unwinding. Letting it `return` or redirect a
+loop would make the control flow of the enclosing function depend on
+cleanup code, which is exactly the confusion the construct exists to
+remove.
 
-In the designed toolchain, `glide test` is also the **enforcement
-boundary**: format check, lints, unused-code errors, doc-link
-validation, and the race detector all run here (Chapter 2).
+#### When defers run
 
-#### `test` is a contextual keyword
+| Exit path | `defer` | `errdefer` |
+|---|---|---|
+| Normal fall-through | ✓ | |
+| `return` with a value | ✓ | |
+| `return Err(…)` / `?` propagating | ✓ | ✓ |
+| `break` / `continue` | ✓ | |
+| Panic unwind | ✓ | ✓ |
+| Cancellation (Chapter 27) | ✓ | ✓ |
+| `os.exit` | **skipped** | **skipped** |
 
-`test` and `bench` are only special at top level when followed by a
-string literal. `let test = 5` is perfectly legal — they are too good
-as variable names to reserve.
+`os.exit` skips everything, by design — it is an immediate exit, and
+that is what it is for.
 
 ---
 
 ### 2. Under the Hood
 
-#### How `expect` reports both sides
+#### Implementation
 
-The compiler (interpreter, today) inspects the expression passed to
-`expect`. When it is a comparison, it evaluates both operands
-separately and reports them on failure.
+Each block maintains a stack of registered defer blocks. On exit —
+whatever the exit path — the evaluator pops and runs them in LIFO
+order.
 
-This is **power-assert semantics as a builtin**. Swift needed macros to
-get `#expect`; Glide banned macros, and `DESIGN.md` says builtins are
-for exactly this.
+`glide/DESIGN-DECISIONS.md` records a nice consequence: the panic path
+in `evalBlockDeferred` already runs both `defer` and `errdefer` on the
+way out, which turned out to be **exactly** the ratified cancellation
+behaviour. So when cancellation was implemented as a Go panic
+(`cancelUnwind`), the cleanup semantics came for free.
 
-The consequence worth noticing: `expect` cannot be a library function,
-because a library function receives a `Bool` and the operands are
-already gone. That is why the testify war is dissolved rather than
-won — there is nothing for a library to add.
+#### Error-path detection
 
-#### How generation works
+`errdefer` fires when the block is exiting with an `Err`-carrying
+return or a panic. The evaluator knows which signal is propagating, so
+this is a check on the exit path rather than an inspection of the
+returned value.
 
-The runner inspects the test's parameter types and generates values.
-`List<Int>` produces lists of varying lengths with varying elements;
-`Int` produces integers biased toward small values and boundaries;
-`String` produces strings.
+#### In the designed compiler
 
-100 cases, fixed per-test seed. Case 0 is always the simplest value.
-
-The designed extension is `derive Arbitrary` (○) via comptime, so a
-user struct becomes generatable with one annotation. That is the piece
-that deletes the last of the setup friction — in QuickCheck-descended
-libraries, writing generators for your own types is the work that stops
-people adopting it.
-
-#### How shrinking works
-
-Greedy: structurally smaller first (shorter lists), then simpler values
-(integers toward zero), re-running the test body at each step and
-keeping any variant that still fails. It stops when no smaller variant
-fails.
-
-This is not the most sophisticated shrinking algorithm — integrated
-shrinking, as in Hedgehog, produces better results for generated
-structures — but it is simple, it has no false positives (every
-reported case genuinely fails), and it handles the common cases.
-
-#### Serial by default
-
-Tests within a module run **serially** by default, with parallelism
-opt-in. `DESIGN.md` is explicit about why: default-parallel breaks
-every suite that touches a port or a file, and the race detector in
-`glide test` catches sharing bugs without making the default flaky.
-
-#### Deterministic scheduling ○
-
-The most differentiating designed capability, and worth knowing about
-even though it does not exist yet.
-
-Because Glide owns the scheduler, the clock, and the build hermeticity,
-`glide test` can run a **seeded deterministic scheduler**: a failing
-concurrent interleaving becomes a rerunnable seed, and the runner can
-fuzz schedules hunting for races.
-
-This is the FoundationDB / TigerBeetle lineage. Go and Rust cannot do
-it without heroic external simulation, because they do not own all
-three pieces. `DESIGN.md` calls it "possibly Glide's most
-differentiating capability", and it composes with property testing —
-generated inputs *and* generated schedules.
+Defers with statically known registration compile to inline cleanup
+code in the block's epilogue, duplicated across exit paths. Defers in a
+loop or behind a conditional need a small runtime record. This is Go's
+post-1.13 optimisation, and it makes the common case roughly the cost
+of the cleanup call itself.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why tests are a language construct
+#### Why `defer` and not RAII
 
-Go's model is a naming convention: a function named `TestFoo(t
-*testing.T)` in a file named `*_test.go`. It works, and it has three
-costs a language construct avoids.
+RAII — cleanup attached to a value's destruction, as in C++ and Rust's
+`Drop` — is the obvious alternative and it does not work here.
 
-**The `t` parameter threads everywhere.** Every helper takes `t
-*testing.T`, so test utilities have a different signature from real
-code.
+RAII needs **deterministic destruction**: the runtime must know exactly
+when the last reference dies. C++ gets that from scope-based lifetimes;
+Rust gets it from the borrow checker. A tracing garbage collector gives
+neither — objects are collected eventually, at a time nobody chooses.
 
-**"Excluded from release builds" is a statement about filenames.** With
-`test "…" { }`, it is a statement about a language construct — the
-compiler knows what a test is.
+Finalizers running "eventually" is precisely how file descriptors leak.
+Java's `finalize()` was deprecated for this reason; C#'s `IDisposable`
+plus `using` is the admission that the GC cannot handle resources.
 
-**Tooling has to guess.** An LSP listing tests, a coverage tool, or a
-build system determining what to rebuild all have to implement the
-naming convention. When tests are syntax, they are in the AST.
+`DESIGN.md` names it directly: **`Drop` is a borrow-checker dividend we
+declined.** Having declined the borrow checker, `defer` is the right
+primitive.
 
-Zig demonstrated the construct form works. Glide takes it.
+#### Why not `with`/`using` blocks
 
-#### Why exactly one assertion
+Python's `with`, C#'s `using`, and Java's try-with-resources are the
+other alternative, and they **nest**:
 
-Go refused an assertion DSL — the right instinct — and landed on
-`t.Errorf` boilerplate:
-
-```go
-if got != want {
-    t.Errorf("add(2, 2) = %d, want %d", got, want)
-}
+```python
+with open(a) as fa:
+    with open(b) as fb:
+        with open(c) as fc:
+            ...
 ```
 
-Four lines and a format string per assertion, with the message
-hand-written and frequently out of sync with the code. The community's
-response was `testify`, one of the most-imported Go modules, offering
-`assert.Equal`, `assert.NotNil`, `assert.Contains`, and dozens more.
+Three resources, three indent levels. Python eventually added
+comma-separated forms and parenthesised groups to mitigate it, which is
+a tell.
 
-**The standard library lost that argument.** And the fix is not forty
-matchers — it is one assertion that the compiler understands:
+`defer` is flat:
 
 ```glide
-expect(add(2, 2) == 4)
+let fa = fs.open(a)?
+defer { _ = fa.close() }
+let fb = fs.open(b)?
+defer { _ = fb.close() }
+let fc = fs.open(c)?
+defer { _ = fc.close() }
 ```
 
-On failure you get both sides automatically. `assert.Equal(t, 4,
-add(2,2))` exists only because the language could not see the
-expression; when it can, the matcher zoo has nothing to add.
+And a `with` block would be a second way to do what `defer` already
+does.
 
-The knock-on effect matters: **the ecosystem never grows one.** There
-is no reason to write an assertion library, so there is no fragmentation
-and no "which assertion style does this project use" question.
+#### Why block-scoped
 
-#### Why property testing is in the box
+Because function-scoped `defer` in a loop is a bug generator, and the
+bug is invisible.
 
-QuickCheck was published in 2000. Thirty years of evidence says
-property testing finds bugs example tests miss. It has never gone
-mainstream, and the reason is friction: a dependency, a generator DSL,
-learning shrinking, writing `Arbitrary` instances for your own types.
+Go's rule made sense when `defer` was introduced (functions were the
+only cleanup boundary anyone considered), and the loop case has been
+biting people ever since. The standard Go workaround is to extract the
+loop body into a function purely so the `defer` fires — which is
+extracting a function to work around the language.
 
-`DESIGN.md`'s position is that **culture follows cost**. Go's testing
-culture exists because `go test` needed no setup. Property testing's
-absence is a setup-cost problem, and the fix is to make it
-`test "name" (xs: List<Int>) { … }` — one extra parameter list.
+Zig and Swift both chose block scope. Glide takes theirs.
 
-The composition is where it gets interesting: property tests plus
-`derive Arbitrary` (○) plus deterministic schedule fuzzing (○) means
-generated inputs *and* generated interleavings, reproducible from a
-seed.
+The cost: a `defer` inside an `if` block runs at the end of that `if`,
+which occasionally surprises someone expecting function scope. That is
+a smaller and more visible surprise than fd exhaustion.
 
-#### Why shrinking is not optional
+#### Why a block and not a call
 
-Because an unshrunk counterexample is nearly useless.
+Go's `defer f(x)` evaluates the arguments immediately and calls later.
+That is a defensible choice (it captures the value at registration
+time, which is sometimes what you want) and it is a rule you must know,
+and people do not.
 
-`xs = [83, -12, 0, 7, 7, 99, -4, …]` tells you the property is false.
-`xs = [0, 0]` tells you the property is false *when there are exactly
-two equal elements*, which is a diagnosis. Shrinking converts a failure
-into information.
+Taking only a block means there is nothing to explain: it is a closure,
+it runs at scope exit, and everything inside is evaluated then. If you
+*want* registration-time capture, bind a variable first — which is
+visible.
 
-It also means the printed case is stable across runs, so it can go into
-a bug report and into a regression test.
+#### Why `errdefer` exists
 
-#### Why benchmarks let the runner own the loop
-
-Go's `b.N` protocol hands the user the measurement loop:
+Because `defer` = always and "only on failure" is a genuinely different
+operation that Go programmers hand-write constantly:
 
 ```go
-func BenchmarkFoo(b *testing.B) {
-    for i := 0; i < b.N; i++ {
-        Foo()
+// Go — the rollback-if-failed pattern, written out
+tx, err := db.Begin()
+if err != nil { return err }
+committed := false
+defer func() {
+    if !committed {
+        tx.Rollback()
+    }
+}()
+… work …
+if err := tx.Commit(); err != nil { return err }
+committed = true
+```
+
+The `committed` flag is the tell. Zig noticed and added `errdefer`;
+Glide takes it.
+
+The canonical uses: rollback a transaction, delete a partially written
+file, release a half-acquired resource, undo a registration.
+
+Crucially, this is **not** two ways to do one thing. The success path
+still does explicit work — `f.close()?`, `tx.commit()?` — so no error
+is discarded on either route. `defer` handles what must happen
+regardless; `errdefer` handles compensation.
+
+#### Why the discarded-error rule
+
+Go's `defer f.Close()` silently drops the error. For a write-buffered
+file that error is *the* signal that your data did not reach the disk —
+silent data loss, and the folklore workaround is a named return plus a
+closure that assigns to it.
+
+Making the discard visible (`_ = db.close()`) costs four characters and
+makes the decision reviewable. And if you actually care, handle it:
+
+```glide
+defer {
+    match db.close() {
+        Ok(())  => {}
+        Err(e)  => eprintln("closing db: {e}")
     }
 }
 ```
 
-People get it wrong — setup inside the loop, results not consumed so
-the compiler eliminates the work, timer not reset after setup. Go
-conceded the point in 1.24 by adding `b.Loop()`.
+#### Why linear "must-close" types were rejected
 
-`bench "name" { … }` gives the runner control of timing and count, and
-setup sits before the body where it is naturally excluded.
-
-#### Why serial by default
-
-Because default-parallel breaks every suite that touches a port, a
-file, a database, or a global. Go made tests serial within a package
-and parallel across packages, with `t.Parallel()` opt-in, and that
-balance has held up.
-
-The usual argument *for* default-parallel is that it forces you to
-write isolated tests. In practice it forces you to write flaky tests
-and then debug them. The race detector running inside `glide test`
-catches actual sharing bugs, which is the underlying concern, without
-making the default unreliable.
+A type system that *proves* every resource is closed is possible —
+linear or affine types. `DESIGN.md` calls it heavier than the problem
+in a GC language, and notes that a vet-tier "resource never closed on
+some path" lint retrofits most of the value at a fraction of the
+conceptual cost.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `func TestX(t *testing.T)` in `*_test.go`, table-driven tests
-as the idiom, no assertions, built-in coverage, fuzzing since 1.18,
-test caching. The model Glide starts from. Its three weaknesses —
-naming convention, no assertion, `b.N` — are the three upgrades.
+**Go.** Function-scoped `defer` taking a call with immediately
+evaluated arguments, LIFO, runs on panic. Glide's three fixes — block
+scope, block-only form, visible error discard — plus `errdefer`. Go's
+`defer` is otherwise the direct model and a genuinely good idea.
 
-**Zig.** `test "name" { … }` as a language construct, `std.testing.
-expect`, tests run with `zig test`. The direct source of the construct
-form.
+**Zig.** `defer` and `errdefer`, both block-scoped. The direct source
+of both of Glide's additions. Zig's `errdefer` can bind the error
+(`errdefer |e|`), which Glide does not currently provide.
 
-**Rust.** `#[test]` attribute, `assert!`/`assert_eq!` macros (which do
-report both sides, via macros), `cargo test`, doc-tests. Rust's
-doc-tests are explicitly **rejected** by `DESIGN.md`: runnable code
-inside comments is code invisible to the formatter, LSP, refactoring
-tools, and grep — a second place code lives, which is the exact thing
-macros were banned for. Glide uses Go-style Example functions instead:
-real compiled, output-checked code in test files, rendered into docs.
+**Swift.** `defer { … }`, block-scoped, block-only. The source of the
+block-only form. No `errdefer` — Swift's `do`/`catch` covers the error
+path differently.
 
-**Python.** `unittest` (xUnit, verbose), then `pytest` (the community
-standard, with assertion rewriting that reports both sides — the same
-insight as `expect`, implemented by rewriting bytecode). `hypothesis`
-is the property-testing library, and it is excellent and is a
-dependency.
+**Rust.** `Drop`, plus the `scopeguard` crate for defer-like behaviour.
+RAII works because ownership is tracked; the cost is the borrow
+checker. Rust's `?` interacting with `Drop` gives you `errdefer`
+semantics for free, since the value is dropped on the early return —
+which is elegant and is downstream of the ownership system.
 
-**Java / C#.** JUnit / NUnit plus AssertJ / FluentAssertions plus
-Mockito. Four dependencies before you write a test. The matcher-DSL
-arms race in this ecosystem is the strongest argument for the
-one-compiler-known-assertion approach.
+**C++.** RAII destructors, and `std::unique_ptr` / `std::lock_guard`
+as the idiomatic wrappers. Deterministic and excellent when it works;
+the exception-safety rules around destructors (never throw from one)
+are the sharp edge.
 
-**JavaScript.** Jest, Mocha, Vitest, Chai, Sinon, and a configuration
-file each. The fragmentation is total, and choosing is a project-level
-decision made once and regretted continuously.
+**Python / C# / Java.** `with` / `using` / try-with-resources —
+block-structured, nesting, and requiring the resource type to implement
+an interface. The nesting is the problem; all three languages added
+mitigations for it.
 
-**Haskell / Erlang.** QuickCheck (the origin of property testing) and
-PropEr. Thirty years of evidence that the technique works and that
-adoption is gated on friction.
+**C.** `goto fail`. Glide's `defer` plus `?` is the direct replacement,
+and it is why `goto` could be removed entirely (Chapter 9).
 
 ---
 
 ### 5. Common Mistakes
 
-**Writing example tests where a property fits.**
+**Writing `defer f.close()` without the block.** Does not parse. It is
+`defer { f.close() }` — or, since `close` returns a `Result`,
+`defer { _ = f.close() }`.
+
+**Forgetting the `_ =`.** The tail-value rule applies inside defer
+blocks, so a bare `db.close()` in a defer is an error. That is the
+feature.
+
+**Expecting a loop defer to run at function end.** It runs each
+iteration. If you genuinely want to accumulate cleanup until the end,
+hoist the acquisition out of the loop.
+
+**Putting a `return` in a defer.**
 
 ```glide
-// Weak — three cases you thought of
-test "reverse works" {
-    expect(reverse([1, 2, 3]) == [3, 2, 1])
-    expect(reverse([]) == [])
-    expect(reverse([1]) == [1])
-}
-
-// Strong — a statement that must hold for everything
-test "reverse twice is identity" (xs: List<Int>) {
-    expect(reverse(reverse(xs)) == xs)
-}
+// Bad — runtime error
+defer { return 5 }
 ```
 
-Keep both, in fact — the example test documents the shape, the property
-finds the bugs. But if you only write one, write the property.
-
-**Writing a property that is not one.**
+**Using `defer` where the success path should be explicit.**
 
 ```glide
-// Bad — this just reimplements the function in the test
-test "reverse reverses" (xs: List<Int>) {
-    let mut expected = []
-    for i in 0..xs.len() { expected.push(xs[xs.len() - 1 - i]) }
-    expect(reverse(xs) == expected)
-}
+// Bad — the commit error is discarded
+defer { _ = tx.commit() }
+
+// Good
+errdefer { _ = tx.rollback() }
+… work …
+tx.commit()?
 ```
 
-If the test contains the implementation, it tests that you can write
-the same bug twice. Good properties are *relations*: round-trips
-(`decode(encode(x)) == x`), invariants (`sorted(xs).len() == xs.len()`),
-comparisons against a slow-but-obvious reference, and idempotence
-(`f(f(x)) == f(x)`).
+The success path does its own work, visibly, and `errdefer` handles the
+failure. That is the pattern `errdefer` exists for.
 
-**Expecting `expect` to stop the test.** It reports and continues.
-Everything after it still runs, which may cascade into confusing
-follow-on failures. `require` is ○.
+**Assuming `os.exit` runs defers.** It does not. If you need cleanup
+before exit, return an `Err` from `main` instead — that unwinds
+normally.
 
-**Reaching for an assertion library.** There is nothing for one to add.
-If you find yourself wanting `assert.contains`, write
-`expect(xs.contains(x))` — the compiler will report both sides of the
-comparison it can see.
+**Registering a defer conditionally and losing track of the order.**
+Defers run LIFO in *registration* order, so a defer inside an `if` that
+did not execute was never registered.
 
-**Putting a test in a file and running `glide run`.** Tests run with
-`glide test`. `glide run` needs a `main`.
-
-**Assuming a benchmark ran.** They are skipped, and reported as `skip`.
-
-**Relying on test order or shared state.** Tests are serial today,
-which makes shared state *work* — and it will stop working the moment
-anything is parallelised. Each test should set up what it needs.
-
-**Forgetting that tests see module internals.** That is a feature
-(testing a private invariant is legitimate) and a hazard (a test that
-reaches into internals breaks when you refactor). Test through the
-public API by default; reach inside when the invariant is genuinely
-internal.
+**Deferring in a hot loop.** Each iteration registers and runs a block.
+In the interpreter this is cheap but not free; in compiled code the
+optimiser handles the static cases. If a loop body acquires nothing,
+it needs no defer.
 
 ---
 
 ### 6. Performance Considerations
 
-**A property test runs the body 100 times**, plus shrinking steps on
-failure. If your test body is expensive — hitting a database, sleeping
-— 100 cases is 100 times the cost. Property tests want pure, fast
-functions; that is the natural fit anyway.
+**Statically known defers compile to inline epilogue code** (○) —
+roughly the cost of the cleanup call itself, duplicated across exit
+paths. This is Go's post-1.13 optimisation and it removed `defer` from
+the list of things to avoid in hot paths.
 
-**Shrinking re-runs the body per candidate.** A failing property with
-an expensive body and a large counterexample can take a while to
-shrink. This is a good reason to keep property-test bodies cheap.
+**Conditional or looped defers need a runtime record** — a small push
+per registration. Still cheap, and it is why the compiler cannot always
+inline them.
 
-**Fixed seeds mean no flakiness from generation.** The same 100 cases
-run every time, so a passing test does not become a failing test
-because of luck. The trade: the generator explores the same space every
-run, so a bug that needs case 101 is never found. Real QuickCheck
-implementations vary the seed by default; Glide chose reproducibility.
+**Block scope means more, smaller defer frames** than Go's function
+scope. That is a wash on cost and a large win on correctness: the loop
+case that Go defers *accumulates* costs O(n) memory and n open file
+descriptors.
 
-**Test caching** is kept from Go, and `DESIGN.md` notes it is *sounder*
-here: comptime is hermetic and does no IO, so the inputs to a test are
-more completely known than in Go, where a test can read a file the
-cache does not track. (The repository's own `Makefile` uses
-`go test -count=1` for exactly that reason on the Go side.)
+**Defers run during panic and cancellation unwinding**, which is
+required for correctness (locks must be released) and is not a
+performance consideration — it happens once, on the way out.
 
-**In the interpreter**, a property test is 100 tree-walked runs. That
-is slow enough to notice on a heavy body and fine for the pure
-functions properties are best at.
+**In the interpreter**, a defer is a closure appended to the block's
+defer stack. One small allocation per registration.
 
 ---
 
 ### 7. Best Practices
 
-**Write the property, then the examples.** The property states the
-contract; the examples document the shape and catch the case where the
-property itself is wrong.
+**Put the defer on the line after the acquisition. Always.**
 
 ```glide
-// The contract
-test "sorting preserves length" (xs: List<Int>) {
-    expect(xs.sorted().len() == xs.len())
-}
-
-test "sorting is idempotent" (xs: List<Int>) {
-    expect(xs.sorted().sorted() == xs.sorted())
-}
-
-// The documentation
-test "sorted example" {
-    expect([3, 1, 2].sorted() == [1, 2, 3])
-}
-```
-
-**Look for the four property shapes.** Almost every useful property is
-one of:
-
-| Shape | Example |
-|---|---|
-| Round-trip | `decode(encode(x)) == x` |
-| Invariant | `sorted(xs).len() == xs.len()` |
-| Oracle | `fast(x) == slow_but_obvious(x)` |
-| Idempotence | `normalise(normalise(x)) == normalise(x)` |
-
-If you cannot find one of those, the function may be doing too much.
-
-**Put small tests next to the code they test.**
-
-```glide
-pub fn slugify(s: String) -> String { … }
-
-test "slugify lowercases and hyphenates" {
-    expect(slugify("Hello World") == "hello-world")
-}
-
-test "slugify is idempotent" (s: String) {
-    expect(slugify(slugify(s)) == slugify(s))
-}
-```
-
-Inline tests read as executable documentation, and they are right there
-when someone changes the function.
-
-**Use a separate `_test.gld` file for suites.** When tests need
-fixtures, helpers, and setup, they are a program of their own and
-deserve a file.
-
-**Name tests as statements of fact.**
-
-```glide
-// Bad
-test "test slugify" { … }
-test "case 3" { … }
-
 // Good
-test "slugify collapses repeated spaces" { … }
-test "empty input produces empty output" { … }
+let db = sql.open(dsn)?
+defer { _ = db.close() }
+
+let f = fs.create(path)?
+defer { _ = f.close() }
 ```
 
-The name is what you read in a failure report. Make it say what broke.
+This is the whole discipline. A reader checking for leaks scans for
+acquisitions and expects the next line to be the cleanup.
 
-**Do not mock what you can construct.** Glide's mandatory
-initialisation and sum types make real values cheap to build. A test
-with a real `Config` and a real in-memory store is more honest than one
-with three mocks and a verification script.
+**Use `errdefer` for compensation, and do the success path
+explicitly.**
 
 ```glide
-// Good — a real implementation of the trait, for tests
-type MemStore = struct { notes: List<Note> }
-impl NoteStore for MemStore { … }
+// Good — the canonical shape
+fn write_atomic(path: String, data: String) -> Result<(), Error> {
+    let tmp = "{path}.tmp"
+    let f = fs.create(tmp)?
+    errdefer { _ = fs.remove(tmp) }      // clean up the partial file
+
+    f.write(data)?
+    f.close()?                            // errors propagate, visibly
+    fs.rename(tmp, path)?
+    Ok(())
+}
 ```
 
-That is the consumer-defined-trait pattern from Chapter 17, and it is
-the reason those traits should be small: a small trait is easy to
-implement for real in a test.
+If any `?` fires, the temporary file is removed. On success it is
+renamed. Neither path discards an error.
 
-**Keep `glide test` green as the gate.** It is the enforcement boundary
-in the designed toolchain, not just a test runner.
+**Handle the close error when it matters.**
+
+```glide
+// Fine for a read-only handle
+defer { _ = f.close() }
+
+// Better for a writer, where close() flushes
+defer {
+    match f.close() {
+        Ok(())  => {}
+        Err(e)  => eprintln("closing {path}: {e}")
+    }
+}
+```
+
+For a buffered writer, the close error is the one that tells you the
+data did not land. Do not discard it out of habit.
+
+**Scope the defer to the resource's actual lifetime.**
+
+```glide
+// Good — the lock is held for exactly the critical section
+{
+    let guard = mutex.lock()             // ○
+    defer { guard.release() }
+    critical_section()
+}
+// the lock is free here
+```
+
+Block scope makes this natural. In Go you would extract a function.
+
+**Do not defer what the control flow already guarantees.** A defer
+whose block is the last statement of a short function is noise —
+though if the function grows an early return later, the defer was
+right. Judgement call; err toward the defer.
+
+**Keep defer blocks short and non-failing.** A defer that does real
+work, allocates, or can panic makes the unwind path complicated. Its
+job is to release something.
 
 ---
 
 ### 8. Examples
 
-**A complete tested module:**
+**Block scope, demonstrated:**
 
-```glide
-fn reverse(xs: List<Int>) -> List<Int> {
-    let mut out = []
-    for i in 0..xs.len() {
-        out.push(xs[xs.len() - 1 - i])
+```glide-run
+fn main() {
+    println("loop:")
+    for i in 0..2 {
+        defer { println("  cleanup {i}") }
+        println("  body {i}")
     }
-    out
-}
 
-fn add(a: Int, b: Int) -> Int { a + b }
-
-test "add works" {
-    expect(add(2, 2) == 4)
-}
-
-test "this one fails" {
-    expect(add(2, 2) == 5)
-}
-
-test "reverse twice is identity" (xs: List<Int>) {
-    expect(reverse(reverse(xs)) == xs)
-}
-
-test "broken property" (xs: List<Int>) {
-    expect(reverse(xs) == xs)
-}
-
-bench "adding" {
-    let mut t = 0
-    for i in 0..1000 { t += i }
+    println("nested blocks:")
+    {
+        defer { println("  outer done") }
+        {
+            defer { println("  inner done") }
+            println("  inner body")
+        }
+        println("  outer body")
+    }
 }
 ```
 
 ```
-$ glide test example.gld
-ok    add works
-FAIL  this one fails
-      line 13: expect failed: left == right
-        left:  4
-        right: 5
-ok    reverse twice is identity  (100 cases)
-FAIL  broken property
-      input: xs = [0, 1]
-      line 21: expect failed: left == right
-        left:  [1, 0]
-        right: [0, 1]
-skip  bench "adding" (benchmarks not implemented yet)
-$ echo $?
-1
+loop:
+  body 0
+  cleanup 0
+  body 1
+  cleanup 1
+nested blocks:
+  inner body
+  inner done
+  outer body
+  outer done
 ```
 
-Everything the chapter describes, in one run. Look particularly at the
-two failure reports: the example test names both sides of the
-comparison, and the property test names the **shrunk** input as well.
-`[0, 1]` is not what the generator produced first — it is what survived
-shrinking, and it is the minimal witness that reversal is not identity.
+Each defer fires at the end of *its own* block. In Go, all four of
+those would fire at the end of `main`.
 
-**A property test finding a real bug.** Here is a plausible,
-wrong-looking-correct implementation:
+**`defer` versus `errdefer`, both paths:**
+
+```glide-run
+type E = Boom
+
+fn work(fail: Bool) -> Result<Int, E> {
+    defer { println("  always") }
+    errdefer { println("  on error only") }
+
+    if fail { return Err(.Boom) }
+    Ok(1)
+}
+
+fn main() {
+    println("success:")
+    println("{work(false):?}")
+    println("failure:")
+    println("{work(true):?}")
+}
+```
+
+```
+success:
+  always
+Ok(1)
+failure:
+  on error only
+  always
+Err(Boom)
+```
+
+**The transaction pattern, side by side with Go:**
+
+```go
+// Go — the `committed` flag is the missing construct, hand-written
+func transfer(db *sql.DB, from, to int, amount int) (err error) {
+    tx, err := db.Begin()
+    if err != nil {
+        return err
+    }
+    committed := false
+    defer func() {
+        if !committed {
+            tx.Rollback()
+        }
+    }()
+
+    if _, err = tx.Exec("update accounts set bal = bal - ? where id = ?", amount, from); err != nil {
+        return err
+    }
+    if _, err = tx.Exec("update accounts set bal = bal + ? where id = ?", amount, to); err != nil {
+        return err
+    }
+    if err = tx.Commit(); err != nil {
+        return err
+    }
+    committed = true
+    return nil
+}
+```
 
 ```glide
-// Intended: split a list into two halves.
-fn halves(xs: List<Int>) -> (List<Int>, List<Int>) {
-    let mid = xs.len() / 2
-    let mut a = []
-    let mut b = []
-    for i in 0..mid { a.push(xs[i]) }
-    for i in mid..xs.len() { b.push(xs[i]) }
-    (a, b)
-}
+// Glide — errdefer IS the construct
+fn transfer(db: Db, from: Int, to: Int, amount: Int) -> Result<(), Error> {
+    let tx = db.begin()?                          // ○ transactions
+    errdefer { _ = tx.rollback() }
 
-test "halves example" {
-    let (a, b) = halves([1, 2, 3, 4])
-    expect(a == [1, 2])
-    expect(b == [3, 4])
-}
-
-test "halves preserve everything" (xs: List<Int>) {
-    let (a, b) = halves(xs)
-    let mut joined = a
-    for x in b { joined.push(x) }
-    expect(joined == xs)
-}
-
-test "halves differ by at most one" (xs: List<Int>) {
-    let (a, b) = halves(xs)
-    expect(b.len() - a.len() <= 1)
-    expect(b.len() >= a.len())
+    _ = tx.exec("update accounts set bal = bal - :n where id = :id",
+                ["n": amount, "id": from])?
+    _ = tx.exec("update accounts set bal = bal + :n where id = :id",
+                ["n": amount, "id": to])?
+    tx.commit()?
+    Ok(())
 }
 ```
 
-```
-ok    halves example
-ok    halves preserve everything  (100 cases)
-ok    halves differ by at most one  (100 cases)
-```
+The flag disappears, the closure disappears, and the Go version's
+subtle bug — `tx.Rollback()` after a successful commit is a silent
+no-op, so forgetting `committed = true` produces code that *works* and
+rolls back nothing — cannot be written.
 
-The example test passes on the case the author thought of. The two
-properties assert the *contract* — nothing is lost, and the split is
-balanced — and they hold for empty lists, single elements, and odd
-lengths, none of which the example covers and all of which the
-generator produces.
+(`db.begin()` is ○; the designed transaction API is
+`db.tx(|tx| { … })`, a closure that commits on `Ok` and rolls back on
+`Err` — Chapter 35. `errdefer` is what makes that implementable.)
 
-**The testing pyramid, in one comparison:**
+**Bad versus good: the accumulating defer**
 
 ```glide
-// Bad — a test that only restates the implementation
-test "slugify" {
-    expect(slugify("Hello") == "hello")
+// Bad in Go, unwritable here — shown for the contrast
+// for path in paths {
+//     f := os.Open(path)
+//     defer f.Close()      // Go: every file stays open until return
+//     process(f)
+// }
+
+// Glide: the same code is correct, because defer is block-scoped
+fn process_all(paths: List<String>) -> Result<Int, Error> {
+    let mut total = 0
+    for path in paths {
+        let text = fs.read_string(path).context("reading {path}")?
+        total += text.lines().len()
+    }
+    Ok(total)
 }
 ```
 
-That passes, and it will keep passing if you break the space handling,
-the punctuation handling, and the empty case.
-
-```glide
-// Good — properties for the contract, examples for the shape
-test "slugify is lowercase" (s: String) {
-    expect(slugify(s) == slugify(s).to_lower())
-}
-
-test "slugify is idempotent" (s: String) {
-    expect(slugify(slugify(s)) == slugify(s))
-}
-
-test "slugify has no spaces" (s: String) {
-    expect(!slugify(s).contains(" "))
-}
-
-test "slugify example" {
-    expect(slugify("  Hello,  World! ") == "hello-world")
-}
-```
-
-Three universal statements and one worked example. The properties will
-catch the input you did not imagine; the example tells the next reader
-what the function is for.
+The point is not that this particular function needs a defer — it is
+that if it did, the naive placement would be correct.
 
 ---
 
@@ -717,52 +697,49 @@ what the function is for.
 
 **Summary**
 
-- Tests are a **language construct**: `test "name" { … }`, legal in any
-  `.gld` file, no framework, no `t` parameter, no naming convention.
-- **`expect` is the only assertion** and is compiler-known: it reports
-  both sides of a comparison on failure. That is why there is no
-  matcher library and why the ecosystem will never grow one. It fails
-  and *continues*; `require` is ○.
-- **A test with parameters is a property test.** 100 generated cases, a
-  fixed per-test seed, and case 0 is always the simplest value because
-  empty-case bugs dominate.
-- **Shrinking** reduces a failure to a minimal input, which converts a
-  counterexample into a diagnosis.
-- Useful properties are round-trips, invariants, oracles, and
-  idempotence. A property that reimplements the function tests nothing.
-- Benchmarks are `bench "name" { … }` and **the runner owns the timing
-  loop** — Go's `b.N` protocol hands users a loop they get wrong. ○
-  (parsed and skipped today).
-- Tests run **serially by default** within a module; default-parallel
-  makes suites flaky, and the race detector covers the real concern.
-- `glide test` is the enforcement boundary: tests plus format check,
-  lints, unused code, doc links, race detector.
-- `test` and `bench` are **contextual keywords** — `let test = 5` is
-  legal.
-- ○: `require`, benchmark execution, `derive Arbitrary` for user types,
-  and seeded deterministic schedule fuzzing — the last of which is
-  possible only because Glide owns the scheduler, the clock, and build
-  hermeticity.
+- `defer { … }` schedules cleanup to run when the **enclosing block**
+  exits — normal fall-through, `return`, `break`/`continue`, `?`
+  propagation, panic, and cancellation. Not `os.exit`.
+- Defers run **LIFO**.
+- **Block-scoped, not function-scoped.** A defer in a loop body runs
+  each iteration, so Go's file-descriptor-exhaustion bug is not
+  reproducible.
+- **A block, only a block.** Go's argument-evaluation puzzle
+  (`defer f(x)` evaluates `x` now) cannot be written.
+- **Discarded errors must be visible** (`_ = db.close()`). Go's
+  `defer f.Close()` silently drops the error that reports failed
+  buffered writes.
+- **`errdefer`** runs only on the error path — an `Err`-carrying return
+  (including `?`) or a panic. It is the construct behind Go's
+  hand-written `committed := false` rollback pattern.
+- `defer` = always, `errdefer` = only on failure. Not two ways to one
+  thing: the success path still does explicit work (`tx.commit()?`), so
+  no error is discarded on either route.
+- A defer block may not `return` (runtime error) or `break`/`continue`
+  an enclosing loop (parse error).
+- Alternatives rejected: **RAII/`Drop`** needs deterministic
+  destruction that a tracing GC cannot provide; **`with`/`using`
+  blocks** nest one indent level per resource and would be a second way
+  to do the same thing; **linear must-close types** are heavier than
+  the problem in a GC language.
 
 **Exercises**
 
-1. **Convert three example tests into one property.** Take a function
-   in your codebase with three or more example tests. Find the
-   statement all three are instances of, and write it as a property.
-   Then check whether the property passes — in perhaps a third of
-   cases, it will not, and you will have found a bug your examples
-   missed.
+1. **Find the accumulating defer.** In a Go codebase, grep for `defer`
+   inside a `for` loop. For each, work out the maximum number of
+   resources that can be simultaneously held. If any of them is
+   unbounded (driven by input size), you have found the bug that block
+   scope prevents.
 
-2. **Find the four shapes.** For a module you know, write down one
-   round-trip property, one invariant, one oracle, and one idempotence
-   property. If any of the four is impossible to state, ask what that
-   says about the module's design — functions without stateable
-   contracts are usually doing more than one thing.
+2. **Write the rollback three ways.** Implement a two-step operation
+   that must undo step one if step two fails: (a) with an `if` at every
+   exit point, (b) with a `committed` flag and a `defer`, (c) with
+   `errdefer`. Count the exit paths each version has to get right. Then
+   introduce a new early return into each and see which one stays
+   correct without being edited.
 
-3. **Design a shrinker.** Given a failing property over
-   `(name: String, age: Int)`, write down the order in which you would
-   try smaller variants and the rule for when to stop. Then compare
-   your answer with the greedy algorithm described in Under the Hood
-   and identify a case where yours does better. That gap is the
-   difference between greedy and integrated shrinking, and it is a real
-   open question in the property-testing literature.
+3. **Decide who closes.** Design an API where a function returns an
+   open resource. Who defers the close — the function or the caller?
+   Write both versions and note what each makes impossible. This is the
+   question RAII answers automatically and `defer` makes you answer
+   deliberately, which is a real cost of the choice.

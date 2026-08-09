@@ -222,5 +222,5 @@ spends a piece of it.
 **3. Structured concurrency deletes an entire category of code.** No
 shutdown handler, no stop channel, no `ctx`, no `WaitGroup`, no
 `errgroup`. A background task's lifetime is a lexical region, and when
-that region ends the task is cancelled and joined. Chapter 26's Go
+that region ends the task is cancelled and joined. Chapter 27's Go
 comparison is the clearest demonstration in the book.

@@ -36,7 +36,7 @@ which is what Python and JavaScript did.
 
 #### Interpolation is always on
 
-```glide
+```glide-run
 fn main() {
     let name = "world"
     let count = 3
@@ -136,7 +136,7 @@ distinguish which of several quotes on the line is at fault.
 
 #### String methods
 
-```glide
+```glide-run
 fn main() {
     let s = "héllo wörld"
 
@@ -546,16 +546,17 @@ for line in lines { sb.push(line); sb.push("\n") }
 let out = sb.build()
 ```
 
-**Putting a string literal inside an interpolation.** The lexer does
-not handle it. Hoist it:
+**Escaping the quotes of a string inside an interpolation.** Do not.
+The lexer tracks the nesting, so the inner quotes open a new string on
+their own:
 
 ```glide
-// Bad
-println("{xs.join(\", \")}")
+// Bad — the backslash makes them the outer string's quotes, and the
+// interpolation never terminates
+println("[{xs.join(\", \")}]")
 
 // Good
-let joined = xs.join(", ")
-println("{joined}")
+println("[{xs.join(", ")}]")
 ```
 
 **Expecting a literal newline inside `"…"`.** Regular strings are
@@ -694,7 +695,7 @@ string helper.
 
 **A word-frequency counter, exercising most of the string surface:**
 
-```glide
+```glide-run
 fn main() {
     let text = `
         the quick brown fox
@@ -731,7 +732,7 @@ Chapter 5, made concrete.
 
 **A safe display truncation, showing bytes-versus-runes:**
 
-```glide
+```glide-run
 fn preview(s: String, max_runes: Int) -> String {
     let rs = s.runes().collect()
     if rs.len() <= max_runes {

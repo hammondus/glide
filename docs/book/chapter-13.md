@@ -265,14 +265,18 @@ That closed three *silent wrong answers*: a present-but-`None` map
 entry read as absent, a `None` sent over a channel ended the stream,
 and `Option<Option<T>>` collapsed a level.
 
-Consequences today:
+Consequences, all of them the ones you want:
 
-- `Some(x)` patterns match any non-`None` value.
-- **`Option<Option<T>>` is unrepresentable.** `Some(None)` collapses.
-- A channel that sends `None` reads as end-of-stream (Chapter 27).
+- **`Option<Option<T>>` is representable**, and `Some(None)` differs
+  from `None`. Spell it long-form (`Option<Int?>`); `T??` cannot lex.
+- **A present-but-`None` map entry reads as present**, not absent.
+- **A `None` sent over a channel is an ordinary element**
+  (Chapter 28), not end-of-stream.
+- `==` reaches inside the box, so `Some(1) == Some(1)`.
 
-The checker era must box. Do not build anything on the current
-behaviour.
+The implicit `T -> T?` promotion is unchanged, because the checker
+knows where the coercion happens and the evaluator boxes exactly there
+— the load-bearing checker of Chapter 19.
 
 #### `Timeout` is a synthetic variant
 
@@ -282,7 +286,7 @@ interpreter synthesises it so that `Err(Timeout)` matches the bare
 pattern `Timeout`, renders as `Timeout`, and converts through a user's
 `fn from(t: Timeout)` — all without any global type declaration the
 program did not write. The checker era makes `Timeout` a real stdlib
-type and nothing about programs changes. Chapter 26 covers this.
+type and nothing about programs changes. Chapter 27 covers this.
 
 #### Exhaustiveness, and why guards are opaque
 
@@ -405,11 +409,11 @@ context to resolve against, so the dot form is required — and where
 there *is* context (a typed parameter, a match arm's expected value),
 the shorthand `.Circle(2.0)` supplies it.
 
-The current interpreter resolves `.Circle` in a global variant
-namespace; the checker era will resolve it in the expected type. That
-is an implementation difference, not a semantic one, except in the rare
-case where two types share a variant name and you rely on the
-shorthand — do not.
+`.Circle` resolves **in the expected type**, as of M4b — the checker
+records which type each shorthand landed in and the evaluator
+constructs that variant. Where there is no expected type to resolve in,
+a file-wide fallback still applies, since variant names are unique
+within a file.
 
 #### Why flags are not enums
 
@@ -558,13 +562,17 @@ fn simplify(e: Expr) -> Expr {
 
 Chapter 10 covers this.
 
-**Relying on `Option<Option<T>>`.** It does not exist at this tier.
-`Some(None)` collapses to `None`. If you need to distinguish
-"absent" from "present but empty", model it explicitly:
+**Reaching for `Option<Option<T>>` when you want three named states.**
+It works — `Option` is boxed, and `Some(None) != None` — but the type
+tells a reader nothing about what the two absences mean. Spell it out
+where the distinction matters:
 
 ```glide
 type Field<T> = Missing | Null | Present(T)
 ```
+
+Also note that `T??` cannot lex; the nested form is written
+`Option<Int?>`.
 
 **Expecting variant names to be globally unique.** Two types may both
 have a `NotFound` variant, and that is fine in patterns (the scrutinee
@@ -653,7 +661,7 @@ type Connection =
 ```
 
 **Enumerate your failure modes.** This is sum types' best use case and
-Chapter 19 is built on it:
+Chapter 20 is built on it:
 
 ```glide
 // Bad — every caller must handle "something went wrong"
@@ -746,7 +754,7 @@ answer is "whatever the code happens to do", and `describe`'s ordering
 of the `if`s *is* the specification — undocumented, and easy to get
 wrong when someone adds a case.
 
-```glide
+```glide-run
 // Version 2 — one axis extracted
 type Progress =
     Queued
@@ -810,22 +818,17 @@ fn render(v: Value) -> String {
         Flag(b)  => "{b}"
         Items(xs) => {
             let parts = xs.iter().map(|x| render(x)).collect()
-            "[{parts.join(\", \")}]"
+            "[{parts.join(", ")}]"
         }
     }
 }
 ```
 
-That last arm has a string literal inside an interpolation, which the
-current lexer rejects (Chapter 6). Hoisted:
-
-```glide
-        Items(xs) => {
-            let parts = xs.iter().map(|x| render(x)).collect()
-            let inner = parts.join(", ")
-            "[{inner}]"
-        }
-```
+A string literal inside an interpolation lexes correctly, **unescaped**:
+`"[{parts.join(", ")}]"`. The lexer tracks the nesting, so the inner
+`"` opens a new string rather than closing the outer one. Escaping them
+(`\"`) is what fails — the backslash makes them the *outer* string's
+quotes, and the interpolation never terminates.
 
 ```glide
 fn main() {
@@ -844,13 +847,13 @@ fn main() {
 ```
 
 This is exactly the shape Glide's designed JSON module uses for dynamic
-data (Chapter 31): `Null | Bool | Number | String | Array | Object`.
+data (Chapter 33): `Null | Bool | Number | String | Array | Object`.
 Exhaustive matching over shapes replaces the type-assertion ladder that
 `map[string]interface{}` forces in Go.
 
 **A state machine as a sum type, showing the compile-error payoff:**
 
-```glide
+```glide-run
 type Door = Open | Closed | Locked{ key_id: Int }
 
 fn act(d: Door, action: String) -> Door {

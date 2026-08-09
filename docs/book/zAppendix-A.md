@@ -1,6 +1,6 @@
 # Appendix A: Command Reference
 
-The `glide` command surface is **closed** — nine commands, and
+The `glide` command surface is **closed** — ten commands, and
 `DESIGN.md` commits to not growing the list. There is no plugin system
 and no `glide-*` subcommand discovery: Cargo's extension mechanism
 reopens the arbitrary-code-execution door that banning build scripts
@@ -10,12 +10,13 @@ closed.
 
 ## Today
 
-Two subcommands exist.
+Three subcommands exist. All three **type-check the program first**;
+there is no way to skip it (Chapter 19).
 
 ### `glide run <file.gld> [args...]`
 
-Parse, evaluate, and call `main`. Arguments after the filename reach
-`os.args()` (with the filename itself at index 0).
+Parse, check, evaluate, and call `main`. Arguments after the filename
+reach `os.args()` (with the filename itself at index 0).
 
 ```bash
 $ glide run hello.gld
@@ -45,6 +46,28 @@ skip  bench "insert 10k" (benchmarks not implemented yet)
 ```
 
 Exit code reflects failures.
+
+### `glide check <file.gld>`
+
+Parse and type-check; report every diagnostic; change nothing; execute
+nothing. Non-zero exit if anything was found.
+
+```bash
+$ glide check app.gld
+app.gld:6:19: expected String, found Int
+ 6 |     println(greet(42))
+   |                   ^^
+$ echo $?
+1
+```
+
+This is `go vet`-shaped: a **convenience**, never a way to skip
+checking. `glide run` and `glide test` perform the identical check
+before doing anything else, and no flag disables it.
+
+One difference worth knowing: the tail-value rule is enforced by the
+evaluator rather than the checker, so `glide check` does not report it
+(Appendix D, *Known checker gaps*).
 
 ---
 
@@ -206,19 +229,34 @@ later scaling concern (Go added theirs a decade in).
 
 ---
 
-## Script mode ○
+## Script mode ✓
 
 ```glide
-#!/usr/bin/env glide run
+#!/usr/bin/env -S glide run
 fn main() {
     println("hello from a script")
 }
 ```
 
-Shebang handling is not wired up yet (the `#!` line is not skipped by
-the lexer), but `glide run tool.gld` works today and is the same
-program. Because the dev tier is an interpreter, type-checked scripting
-is nearly free.
+```bash
+$ chmod +x tool.gld
+$ ./tool.gld
+hello from a script
+```
+
+The `#!` line is skipped by the lexer, but only as the first two bytes
+of a file — `#` is not a comment character anywhere else. It is
+skipped rather than stripped, so line numbers in diagnostics match what
+your editor shows.
+
+**Use `env -S`.** Linux hands `execve` everything after the interpreter
+path as a single argument, so bare `#!/usr/bin/env glide run` searches
+for a binary named `glide run`. macOS splits the line, so the bare form
+works there and fails on deployment — `-S` splits explicitly on both.
+
+`glide run tool.gld` is the same program, and takes the same arguments.
+Because the dev tier is an interpreter, type-checked scripting is
+nearly free.
 
 A **REPL** is likely an interpreter byproduct rather than a
 commitment — REPL semantics in a statically typed language is real

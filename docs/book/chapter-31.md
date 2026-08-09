@@ -1,693 +1,900 @@
-# Chapter 31: JSON
+# Chapter 31: Files, Processes, and the Environment
 
-`DESIGN.md` opens its JSON section by calling Go's `encoding/json`
-**five diseases**, and the list is worth reading before anything else,
-because Glide's design is a point-by-point response:
+This chapter used to be the shortest in the book, because the surface it
+described was four functions. It is no longer short. `fs`, `os` and
+`process` grew — in one sitting, driven by one real script — and what
+they grew into is enough to replace most of what people write shell
+scripts for.
 
-1. Runtime reflection.
-2. Stringly struct tags — `json:"nmae"` compiles and ships.
-3. Missing field → silent zero value, so pointer fields get used to
-   fake `Option`.
-4. Case-insensitive field matching — a security-relevant surprise.
-5. `map[string]interface{}` for anything dynamic.
+That growth is the **dogfood rule** working as designed: a stdlib
+function exists because a program needed it, not because it might be
+useful. Chapter 32 is the program that needed these.
 
-Four of the five were already cured upstream by decisions in earlier
-chapters. That is the interesting part: the JSON module is mostly a
-*consequence* of no-null, mandatory initialisation, sum types, and
-comptime.
-
-The interpreter ships a dynamic shim (✓). The real design —
-`derive Json` — is ○ and is Chapter 34's machinery.
+Everything in section 1 is ✓ and was executed to produce the output
+shown. The ○ material is confined to *The designed surface*, and to a
+short honest list at the end of what is still missing.
 
 ---
 
 ### 1. Basic Usage
 
-#### Encoding
+#### The `os` module
 
-```glide
-import json
+| Function | Signature | Notes |
+|---|---|---|
+| `os.args()` | `() -> List<String>` | program name first |
+| `os.exit(code)` | `(Int) -> !` | immediate; skips `defer` |
+| `os.env(name)` | `(String) -> String?` | `None` when unset |
+| `os.set_env(name, value)` | `(String, String) -> Result<(), Error>` | this process and its children |
+| `os.cwd()` | `() -> Result<String, Error>` | resolved, symlinks followed |
+| `os.chdir(path)` | `(String) -> Result<(), Error>` | **process-global** |
 
-type P = struct {
-    pub name: String
-    pub age: Int
-    pub tags: List<String>
-}
-
-fn main() {
-    let p = P{ name: "ada", age: 36, tags: ["a", "b"] }
-    println(json.encode(p))
-    println(json.encode(["x": 1, "y": 2]))
-    println(json.encode([1, 2, 3]))
-    println(json.encode(None))
-}
-```
-
-```
-{"name":"ada","age":36,"tags":["a","b"]}
-{"x":1,"y":2}
-[1,2,3]
-null
-```
-
-`json.encode(v)` does a **structural walk**:
-
-| Glide | JSON |
-|---|---|
-| struct | object, in **field order** |
-| `Map` with String keys | object, in **insertion order** |
-| `List`, tuple | array |
-| `None` | `null` |
-| `distinct` | unwrapped |
-| `Instant` | RFC 3339 string |
-| variant, function | **error** — these wait for `derive` |
-
-#### Decoding
-
-```glide
-import json
+```glide-run
+import os
 
 fn main() {
-    match json.decode(`{"k": 1, "b": [1, 2], "s": "x", "n": null}`) {
-        Ok(v)  => println("{v:?}")
-        Err(e) => println("err: {e}")
-    }
-    match json.decode("not json") {
-        Ok(v)  => println("{v:?}")
-        Err(e) => println("err: {e}")
-    }
+    println("home={os.env("HOME") ?? "?"}")
+    println("nope={os.env("DEFINITELY_NOT_SET") ?? "(unset)"}")
 }
 ```
 
 ```
-["b": [1, 2], "k": 1, "n": None, "s": "x"]
-err: invalid JSON: invalid character 'o' in literal null (expecting 'u')
+home=/Users/craig
+nope=(unset)
 ```
 
-`json.decode(s)` returns `Result<T, Error>` producing **dynamic
-values**:
+`os.env` returns an **Option**, not a String, and that is not
+pedantry: "unset" and "set to the empty string" are different states,
+and every shell script that has ever confused them has a bug in it.
+Pair it with `??` when you have a default, and match it when you do not.
 
-| JSON | Glide |
-|---|---|
-| object | `Map` — **keys sorted** (Go's decoder loses order) |
-| array | `List` |
-| whole number | `Int` |
-| other number | `Float` |
-| `null` | `None` |
+`os.chdir` is marked process-global as a warning. Two tasks calling it
+under `spawn` interleave, and a third resolving a relative path sees
+whichever won. It is fine in a single-threaded script, which is what it
+is for; prefer building absolute paths with `fs.join` in anything
+concurrent.
 
-Trailing garbage is an error. **Typed decode arrives with
-`derive Json`.**
+#### The `fs` module
 
-Note the asymmetry: encoding preserves order, decoding sorts. That is a
-shim limitation — Go's decoder does not preserve key order — and the
-designed module fixes it with an insertion-ordered map.
+Paths are Strings. A typed `path` module is designed (○); until it
+exists, a String is what a script has, and converting at every boundary
+would buy no checking.
 
-#### JSON literals want raw strings
+| Function | Signature | Notes |
+|---|---|---|
+| `fs.read_string(path)` | `-> Result<String, Error>` | whole file |
+| `fs.write_string(path, s)` | `-> Result<(), Error>` | creates or **truncates** — the shell's `>` |
+| `fs.append_string(path, s)` | `-> Result<(), Error>` | the shell's `>>` |
+| `fs.exists(path)` | `-> Bool` | bare Bool |
+| `fs.is_dir(path)` | `-> Bool` | `false` for a missing path too |
+| `fs.remove(path)` | `-> Result<(), Error>` | one file, or one *empty* directory |
+| `fs.remove_all(path)` | `-> Result<(), Error>` | the whole tree |
+| `fs.mkdir_all(path)` | `-> Result<(), Error>` | parents too; already-exists is `Ok` |
+| `fs.rename(from, to)` | `-> Result<(), Error>` | same-filesystem move |
+| `fs.list_dir(path)` | `-> Result<List<String>, Error>` | entry **names**, sorted |
+| `fs.join(segments)` | `(List<String>) -> String` | cleaned, platform separator |
 
-```glide
-// Bad — {"title"...} tries to interpolate
-let body = "{\"title\": \"first\"}"
+```glide-run
+import fs
+import os
 
-// Good
-let body = `{"title": "first", "body": "hello"}`
+fn main() -> Result<(), Error> {
+    let dir = fs.join([os.env("TMPDIR") ?? "/tmp", "glide-demo"])
+    fs.mkdir_all(dir)?
+
+    let file = fs.join([dir, "a.txt"])
+    fs.write_string(file, "one\n")?
+    fs.append_string(file, "two\n")?
+
+    println("exists={fs.exists(dir)} is_dir={fs.is_dir(dir)}")
+    println("entries={fs.list_dir(dir)?}")
+    println("body={fs.read_string(file)?.lines()}")
+
+    fs.remove_all(dir)?
+    println("gone={fs.exists(dir) == false}")
+    Ok(())
+}
 ```
 
-This is the most common mistake in the chapter and it is recorded in
-`glide/DESIGN-DECISIONS.md` as discovered the hour the HTTP shim
-landed. In an always-interpolating string (Chapter 6), `{` opens an
-interpolation. Backticks are what raw strings were ratified for.
+```
+exists=true is_dir=true
+entries=["a.txt"]
+body=["one", "two"]
+gone=true
+```
 
-#### Working with decoded values
+Four of these signatures are worth a sentence each.
 
-Because decode produces a `Map`, indexing returns an `Option`:
+**`fs.exists` and `fs.is_dir` return a bare `Bool`,** not a
+`Result<Bool, Error>`. A Result here would be one you could only ever
+unwrap: there is no useful way to fail at answering "is this there?"
+that is not simply "no".
+
+**`fs.list_dir` returns entry *names*, not paths,** and they are
+**sorted**. Sorting is deliberate — an unsorted listing makes a
+program's output depend on the filesystem's whim, and that is a class
+of flaky test nobody should have to debug. To get a path, join:
 
 ```glide
-import json
+for name in fs.list_dir(dir)? {
+    let path = fs.join([dir, name])
+    …
+}
+```
+
+**`fs.remove_all` is named so it is never reached by accident.** It is
+the one call in the module that can destroy something you meant to
+keep, and `remove` will refuse a non-empty directory.
+
+**`fs.join` takes a `List<String>`, not a variadic,** because the
+language has no variadics and never will. It moves to a `path` module
+when that lands.
+
+#### The `process` module
+
+| Surface | Signature | Notes |
+|---|---|---|
+| `process.run(cmd [, args])` | `(String, List<String>?) -> Result<Output, Error>` | runs to completion, capturing both streams |
+| `out.status()` | `() -> Int` | exit code; `-1` if a signal killed it |
+| `out.ok()` | `() -> Bool` | `status() == 0` |
+| `out.stdout()` / `out.stderr()` | `-> String` | captured in full |
+
+```glide-run
+import process
+
+fn main() -> Result<(), Error> {
+    let out = process.run("echo", ["hello", "from a child"])?
+    println("status={out.status()} ok={out.ok()}")
+    print(out.stdout())
+
+    let miss = process.run("grep", ["zzz", "/etc/hosts"])?
+    println("grep status={miss.status()} ok={miss.ok()}")
+
+    match process.run("no-such-binary-anywhere", []) {
+        Ok(_)  => println("unreachable")
+        Err(e) => println("could not run: {e}")
+    }
+    Ok(())
+}
+```
+
+```
+status=0 ok=true
+hello from a child
+grep status=1 ok=false
+could not run: exec: "no-such-binary-anywhere": executable file not found in $PATH
+```
+
+Three properties of this surface are deliberate, and all three are the
+opposite of what a shell does.
+
+**A non-zero exit is not an error.** Look at the `grep` line: it exited
+1, and that is an `Ok` with `status() == 1`. `Err` means the program
+could not be run *at all* — not on `PATH`, not executable, killed by
+the enclosing scope. A program that ran and exited 1 produced an
+answer: that is how `grep` says "no match", `diff` says "they differ",
+and `test` says "false". Folding it into `Err` would make `?` propagate
+an ordinary result, and every caller would have to un-propagate it.
+
+**There is no shell.** The command and its arguments are separate
+values, and an argument containing a space stays one argument. Nothing
+is word-split, so there is no quoting to get wrong and no injection to
+audit — which is most of what makes shell scripts fragile. A shell is
+still available, and then it is *visible at the call site*:
+
+```glide
+process.run("sh", ["-c", "a | b > c"])
+```
+
+which is the only kind of `shell=True` that should exist: one you can
+grep for.
+
+**It is a cancellation point.** `scope(timeout: 5.s)` kills the child.
+Without that the scope would return and leave the process running,
+which is exactly the leak structured concurrency exists to prevent
+(Chapter 27).
+
+```glide-run
+import process
 
 fn main() {
-    let Ok(v) = json.decode(`{"title": "hello", "count": 3}`) else {
-        eprintln("bad json")
-        return
+    let r = scope(timeout: 500.ms) {
+        process.run("sleep", ["5"])
     }
-    let title = v["title"] ?? ""
-    let count = v["count"] ?? 0
-    println("{title} x{count}")
-}
-```
-
-```
-hello x3
-```
-
-`??` supplies the default for a missing key — the same idiom as any
-map (Chapter 11).
-
-#### `derive Json` ○
-
-The real design:
-
-```glide
-type Note = struct {
-    pub id: NoteId
-    pub title: String
-    pub created: Instant
-    pub body: String?
-} derive(Json)
-```
-
-```glide
-let note: Note = json.decode(text)?      // ○ typed decode
-let text = json.encode(note)             // ○ generated encoder
-```
-
-The encoder and decoder are **generated as plain code at compile
-time** — serde-class speed with no proc-macro second compiler and no
-runtime reflection.
-
-Options are **typed comptime arguments**, never string tags:
-
-```glide
-type Note = struct { … } derive(Json(rename_all: camel))     // ○
-```
-
-A typo'd option is a compile error. Compare `json:"nmae"`, which
-compiles, ships, and silently produces a field nobody reads.
-
-#### Dynamic JSON is a sum type ○
-
-```glide
-type Json =
-    Null
-    | Bool(Bool)
-    | Number(JsonNumber)
-    | Str(String)
-    | Array(List<Json>)
-    | Object(Map<String, Json>)
-```
-
-Exhaustive `match` over shapes replaces the type-assertion ladder that
-`map[string]interface{}` forces:
-
-```glide
-fn render(v: Json) -> String {              // ○
-    match v {
-        Null       => "null"
-        Bool(b)    => "{b}"
-        Number(n)  => n.text()
-        Str(s)     => "\"{s}\""
-        Array(xs)  => …
-        Object(m)  => …
+    match r {
+        Ok(_)  => println("finished")
+        Err(_) => println("timed out — and the child is dead, not orphaned")
     }
 }
 ```
 
-This is sum types' best demonstration, and Chapter 13 built a working
-version of exactly this shape.
+```
+timed out — and the child is dead, not orphaned
+```
+
+#### Argument handling
+
+There is still no flag parser (○ — `flag` is on the committed stdlib
+list). Argument handling is a **list pattern**:
+
+```glide
+import fs
+import os
+
+fn main() -> Result<(), Error> {
+    let [_, path] = os.args() else {
+        eprintln("usage: linecount <file>")
+        os.exit(2)
+    }
+
+    let text = fs.read_string(path).context("reading input")?
+    println("{text.lines().len()} lines")
+    Ok(())
+}
+```
+
+Three things do work in those four lines:
+
+- `[_, path]` matches **exactly two** elements, so it rejects both
+  no-arguments and too-many-arguments. That exactness is what makes it
+  a complete check (Chapter 10).
+- `eprintln` sends the usage message to **stderr**, so it cannot
+  contaminate the program's output in a pipeline.
+- `os.exit(2)` **diverges**, which satisfies the `let … else` rule. `2`
+  is the Unix convention for misuse.
+
+For an optional second argument, match both shapes:
+
+```glide
+let args = os.args()
+let (path, n) = match args {
+    [_, p]      => (p, 10)
+    [_, p, raw] => (p, raw.parse_int() ?? 10)
+    _           => {
+        eprintln("usage: head <file> [lines]")
+        os.exit(2)
+    }
+}
+```
+
+#### Exit codes
+
+| How | Exit code | Runs `defer`? |
+|---|---|---|
+| `main` returns `()` or `Ok(())` | 0 | ✓ |
+| `main` returns `Err(e)` | 1, `e` printed to stderr | ✓ |
+| `os.exit(n)` | `n` | **✗ skipped** |
+| A panic | 1, message to stderr | ✓ |
+
+`os.exit` skipping defers is deliberate — it is an *immediate* exit,
+and that is what it is for. If you need cleanup, return an `Err`.
+
+#### Stream discipline
+
+```glide
+println(data)         // stdout — the program's output
+eprintln(diagnostic)  // stderr — everything else
+```
+
+Usage messages, warnings, progress, and errors go to stderr. The
+program's actual result goes to stdout. That is what makes a program
+composable:
+
+```bash
+$ wordfreq notes.txt | sort -rn | head
+```
+
+Both are unbuffered (Chapter 6), so a prompt appears before the read
+and a debug print survives a crash on the next line.
+
+#### The designed surface ○
+
+`STDLIB-GOALS.md` and `DESIGN.md` commit to `flag` for CLI parsing,
+`embed` for build-time file embedding, a typed `path` module, file
+metadata, and streaming IO.
+
+Two designed details worth knowing now:
+
+**`embed` is declarative grammar, not Go's magic comment:**
+
+```glide
+embed "static/**" as assets      // ○
+```
+
+The build system provides the bytes; comptime never does IO, so
+hermeticity survives. Embedded trees serve through the same `fs`
+interface as disk, so dev-from-disk versus prod-from-binary is one
+constructor swap.
+
+**Cross-compilation is a flag**, not a project:
+
+```bash
+glide build -target linux/arm64      # ○
+```
+
+Any host to any target, no sysroots, static by default,
+`FROM scratch`-ready. This stays trivial *because* C FFI was exiled to
+the margins — cgo is what collapses Go's cross-compilation story.
 
 ---
 
 ### 2. Under the Hood
 
-#### The shim does dynamically what derive will do statically
+#### Host shims
 
-`glide/DESIGN-DECISIONS.md` is explicit: `json.encode` walks values
-structurally; `json.decode` produces dynamic maps and lists. **None of
-this survives into the compiled tier** — `derive Json` generates the
-typed versions.
+Every module in the interpreter era is Go code behind a Glide-shaped
+interface. `fs.read_string` calls `os.ReadFile`; `process.run` builds
+an `exec.Cmd`; `os.args()` reads `os.Args`.
 
-The shim exists to prove the *surfaces*, not the mechanism. So the
-things it cannot do — encode a variant, decode into a type — are not
-gaps to work around; they are the parts that are waiting for the right
-implementation.
+That has a designed consequence worth knowing: **stdlib shims are
+injectable per host** (○). Because they are already Go code behind an
+interface, making the provided set *chosen by the embedder* buys
+capability-style sandboxing for free — an untrusted script embedded in
+a Go program is simply never handed `fs` or `process`.
 
-#### Why `derive` is not reflection
+`DESIGN.md` calls this "the one embedding requirement worth honouring
+while building the interpreter, because it is painful to retrofit."
 
-`derive Json` is an **ordinary comptime function** that walks the
-type's structure (fields, names, types) at compile time and emits a
-plain encoder — the code you would have hand-written.
+#### How `process.run` becomes a cancellation point
 
-Contrast Go, where `json.Marshal` runs an interpretive loop over
-`reflect.Type` on **every call**: read the struct tag string, parse it,
-switch on the field kind, box the value. That is a permanent runtime
-tax and the biggest hole in Go's auditability story.
+The child is started with `exec.CommandContext` under the interpreter's
+*host context* — the same context a `scope(timeout:)` cancels and an
+`http.get` respects. The interpreter lock is released while the child
+runs, so other tasks in the scope keep making progress; when the scope
+dies, the context is cancelled and the child is signalled.
 
-Contrast Rust's `serde`, which gets the performance right via proc
-macros — a second compiler, slow, and opaque to tooling.
+That is why the timeout example above kills `sleep 5` rather than
+merely stopping waiting for it. "Stopped waiting" is the Go
+`context.WithTimeout` + `cmd.Run` mistake, and it leaves a process
+behind.
 
-Comptime derive is the third option: generated at build time, visible
-to the same tools as any other code, no runtime cost.
+#### `os.exit` is a sentinel panic
 
-#### Required-by-default falls out of earlier decisions
+The interpreter implements `os.exit` by panicking with a sentinel that
+becomes an `ExitError`, recovered in `Run`. That is why tests can
+intercept exits instead of the test process dying — a `test` block
+whose code calls `os.exit` reports a failure rather than killing the
+runner.
 
-This is the elegant part, and it is worth spelling out because it is
-four chapters paying off at once.
+It is also why `os.exit` skips defers: the unwind is caught at the top
+rather than running the normal cleanup path.
 
-Because there are **no zero values** (Chapter 12) and **absence is a
-type** (Chapter 14):
+#### Errors carry the OS message
 
-```glide
-type Note = struct {
-    pub title: String        // required — absent input is a decode error
-    pub body: String?        // may be absent or null
-}
+`fs.read_string` returns the underlying error text:
+
+```
+error: open /nonexistent: no such file or directory
 ```
 
-No tag is needed to say "required". A missing `title` cannot decode
-into a `Note`, because there is no zero `String` to put there. A
-missing `body` decodes to `None`, because that is what `String?` means.
+`.context("reading input")` prepends a breadcrumb (Chapter 20):
 
-**Absent-versus-zero is unrepresentable.** In Go you need `*string` to
-distinguish "absent" from "empty", which reintroduces nil to fake
-`Option`, and then `omitempty` interacts with it confusingly.
+```
+error: reading input: open /nonexistent: no such file or directory
+```
 
-`T?` also collapses JSON's missing-versus-null tri-state into two,
-which is what every API actually wants. The rare protocol that genuinely
-distinguishes them gets an explicit wrapper.
-
-#### Numbers keep their lexical form ○
-
-Go's decoder turns every number into `float64`, which **silently
-corrupts int64 IDs past 2⁵³**. A Twitter-scale ID round-trips wrong,
-and nothing tells you.
-
-The designed answer: `JsonNumber` holds the digits, with
-`as_int() -> Int?` and `as_float()` converting where you choose. Plus
-optional string-encoding of big integers for JavaScript-facing APIs.
-
-#### Exact-case matching, always
-
-Go's decoder matches field names case-insensitively, so a JSON field
-`ADMIN` populates a Go field `Admin`. That has been a
-security-relevant surprise in real systems.
-
-Glide matches exactly, always. Unknown fields are ignored by default —
-the right default for evolving APIs — with a `strict` opt-in for
-config files, where "you typo'd `porrt`" beats silence.
+Because `Error` is boxed (Chapter 20), an error you construct yourself
+and one that came from the operating system are the same kind of value
+and print alike.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why comptime derive rather than reflection
+#### Why the surface grew when it did
 
-Three costs of reflection, all avoided:
+It grew because someone tried to write a shell script in it. That is
+the dogfood rule stated as a process rather than a slogan: the module
+list did not come from a survey of what `os` modules usually contain,
+it came from a program that could not be written.
 
-**Performance.** An interpretive loop per call, per field. `serde` is
-often an order of magnitude faster than `encoding/json` for exactly
-this reason.
+Two things fell out of that sitting which no amount of design-in-the-
+abstract had found: `match` arms could not be separated by commas (so a
+one-line `match` was unwritable), and `Some(1) == Some(1)` panicked.
+Both were found within ten minutes of typing real code, and neither was
+visible from the roadmap.
 
-**Auditability.** `DESIGN.md` calls runtime reflection "the biggest
-hole in Go's auditability story". You cannot tell by reading a
-function what it will do to a value, because it decides at runtime.
+The lesson is in Chapter 32, and it is the reason that chapter exists.
 
-**The tag language.** Reflection needs metadata, and metadata in Go is
-a string in a struct tag — unchecked, untyped, and silently wrong when
-misspelled.
+#### Why a non-zero exit is not an error
 
-The cost of banning reflection is named honestly: **no deserialising
-into a type named by a runtime string.** The rare dynamic case
-hand-rolls a registry, visibly.
+Because it is not one. `grep` exiting 1 is `grep` answering the
+question. The shell conflates "the program said no" with "the program
+broke" because it only has one channel — the exit status — and then
+`set -e` turns every "no" into a fatal error, which is why real shell
+scripts are full of `|| true`.
 
-#### Why options are typed arguments, not tags
+Glide has two channels: `Result` says whether the program *ran*, and
+`status()` says what it *said*. `?` propagates the first and never the
+second, so a script can use `?` freely without accidentally aborting on
+a "no".
+
+#### Why there is no shell
+
+Word-splitting is the root of most shell bugs, and command injection is
+word-splitting with an adversary. A filename with a space in it breaks
+an unquoted script; a filename with a `;` in it runs whatever comes
+after.
+
+Passing an executable and a list removes the entire class. There is
+nothing to quote because nothing is parsed. And when you genuinely want
+a pipeline, `process.run("sh", ["-c", …])` says so at the call site —
+which means a reviewer can find every place a shell is involved with
+one grep, instead of auditing every string that ever reaches a
+`system()` call.
+
+Python's `subprocess` gets this right and then supplies `shell=True`
+anyway; that flag is the single most common source of injection bugs in
+Python code. Glide's version of the flag is a different program name.
+
+#### Why the surface is still small
+
+The designed standard library is explicitly **batteries-included**
+(HTTP, TLS, crypto, JSON, time, regex, structured logging, templating,
+compression, a `database/sql`-style interface). `DESIGN.md`'s three-way
+argument:
+
+- **Rust's minimal std** → 300 transitive dependencies per web service,
+  each a supply-chain surface. The opposite of auditable.
+- **Python froze its batteries and they died on the shelf.** `urllib`
+  is stdlib; everyone installs `requests`. PEP 594 hauled out corpses.
+- **Go proved the upside** — stdlib `net/http` made `Handler` the
+  ecosystem's shared currency — but v1 chains it to fossils.
+
+The synthesis: **stdlib versions with the language**, `glide fix`
+migrates callers mechanically, and wrong modules get fixed rather than
+embalmed beside their replacements. Python's disease was not batteries;
+it was batteries plus immortality.
+
+So the small surface is a *sequencing* decision. What ships must be
+right, and what ships gets built when a real program forces the
+question.
+
+#### Why argument parsing is a pattern, not a library
+
+Because the list pattern is *already* a complete check.
+
+`let [_, path] = os.args() else { usage() }` validates arity in both
+directions, binds the argument, and handles the failure — in one line,
+with no dependency and no framework. Compare Go:
 
 ```go
-// Go — a string. `json:"nmae,omitemty"` compiles.
-Name string `json:"name,omitempty"`
-```
-
-```glide
-// Glide — checked at compile time                       ○
-type User = struct { … } derive(Json(rename_all: camel))
-```
-
-A struct tag is a program written in a string, parsed at runtime,
-checked by nothing. `json:"nmae"` ships. `json:"name,omitemty"` ships
-and silently does not omit.
-
-Typed comptime arguments are just arguments — the compiler checks the
-name and the type.
-
-#### Why dynamic JSON is a sum type
-
-Because `map[string]interface{}` is the shape you get when a language
-has a top type and no sum types, and working with it is a ladder of
-type assertions with no coverage check:
-
-```go
-switch v := val.(type) {
-case map[string]interface{}: …
-case []interface{}: …
-case string: …
-case float64: …           // and int64 has already been lost
-case bool: …
-case nil: …
+if len(os.Args) != 2 {
+    fmt.Fprintln(os.Stderr, "usage: linecount <file>")
+    os.Exit(2)
 }
+path := os.Args[1]
 ```
 
-Nothing checks that you handled all six, and `float64` for every number
-is disease four.
+Five lines, and the index and the length check can disagree.
 
-A six-variant sum type gets exhaustiveness for free, keeps numbers in
-their lexical form, and reads as what it is.
+A real flag parser (`--verbose`, `-o file`, subcommands) is genuinely a
+library and is on the committed list. Positional arguments are not.
 
-#### Why insertion-ordered maps matter here
+#### Why `os.exit` skips defers
 
-Chapter 11's map ordering pays off at the JSON boundary: **key order
-round-trips.** Decode an object, modify one field, re-encode, and the
-output is not gratuitously reordered — which matters for
-human-readable config files under version control.
+Because it is the "get out now" primitive, and a primitive that
+sometimes runs arbitrary user code is not that.
 
-Go's decoder loses order (its maps are randomised), so a
-decode-modify-encode cycle produces a diff touching every line.
+The consequence is a rule: **use `os.exit` only where there is nothing
+to clean up.** Argument validation at the top of `main`, before
+anything is opened, is the canonical place. Everywhere else, return an
+`Err` — which unwinds normally, runs defers, prints the error, and
+exits 1.
 
-#### Why serde-style format genericity was rejected
+This is also why `log.Fatal` is banned in the designed logging module:
+it is a hidden `os.Exit` inside a logging call — control flow disguised
+as observability, skipping defers. Log, then exit, in two honest lines.
 
-`serde` abstracts over formats: one derive, and your type works with
-JSON, YAML, MessagePack, and CBOR.
+#### Why no build scripts, restated here
 
-It is elegant, and `DESIGN.md` declines it: the thirty-method trait
-dance is "the enterprise abstraction we keep declining." Each format
-gets its own comptime derive over the same reflection API, and if
-duplication across four formats ever hurts, a shared-walk refactor fits
-behind the derives **without touching user code**.
+Chapter 2 covered it; it belongs in a chapter about files because that
+is where the temptation lives. `glide build` executes no user code,
+reads nothing outside the module tree and `vendor/`, and touches no
+network. Code generation is a step you run, visibly, with output
+committed.
 
-That last clause is the reason it is safe to decline: the decision is
-reversible.
+Cargo's `build.rs` and npm's lifecycle scripts mean compiling someone's
+code runs their program on your machine. Most supply-chain attacks in
+both ecosystems ride exactly that.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `encoding/json` with reflection and struct tags — the five
-diseases. Also `json.Number` as an opt-in escape from the float64
-problem, which most people do not know about. Go's v2 `encoding/json`
-proposal fixes several of these, a decade in.
+**Bash.** The incumbent, and the thing Chapter 32 replaces. Everything
+is a string, every command substitution is a word-splitting hazard,
+`set -euo pipefail` is a three-flag apology for the defaults, and there
+is no way to say "this function returns a list".
 
-**Rust.** `serde` — the performance target. Proc-macro derive, format
-genericity, and excellent ergonomics, at the cost of a second compiler
-in your build and macro-expanded code your tooling cannot see through.
+**Go.** `os.Args`, `flag`, `os`, `io/fs`, `os/exec`, `//go:embed`. The
+model for most of this surface. `os/exec` is where `process.run` comes
+from, minus the `Cmd` struct's twenty configurable fields — those
+arrive as named parameters when a program needs them. Go's `flag`
+package is deliberately limited, which is why every serious Go CLI uses
+`cobra` — a case where the stdlib's minimalism lost.
 
-**Python.** `json` producing `dict`/`list`/`None`, with `pydantic` as
-the near-universal typed layer. `pydantic`'s popularity is the evidence
-that dynamic decoding is not enough.
+**Rust.** `std::fs`, `std::env`, `std::process::Command`, and `clap` as
+a near-universal dependency. Rust's `Path`/`PathBuf` vs `OsString` vs
+`String` split is the ceremony Glide declines by treating strings as
+UTF-8 bytes (Chapter 6) — at the cost of being wrong on Windows paths
+that are not valid UTF-16, which is a trade recorded rather than
+overlooked.
 
-**Java.** Jackson and Gson — annotation-driven runtime reflection, with
-all of Go's problems plus configuration surface. `@JsonProperty`,
-`@JsonIgnore`, and a `ObjectMapper` with dozens of feature flags.
+**Python.** `sys.argv`, `argparse`, `pathlib`, `subprocess`,
+`os`/`shutil`. Batteries-included and showing its age — three
+overlapping filesystem APIs, and `subprocess` with a security-relevant
+`shell=True` footgun.
 
-**TypeScript.** `JSON.parse` returning `any`, with `zod` or `io-ts` as
-the runtime-validation layer everyone adds. Same story as `pydantic`:
-the type system cannot help at the boundary, so a library re-does it.
+**Zig.** `std.fs`, `std.process`, explicit allocators everywhere, and
+the best cross-compilation in the industry. Glide's cross-compilation
+is trivial by *avoidance* — no C FFI — rather than by Zig's heroics.
 
-**Zig.** `std.json` with comptime-driven parsing into typed structs —
-architecturally the closest to Glide's design, and evidence that
-comptime derive works.
+**Node.** `process.argv` (with two leading entries, not one), `fs` with
+three parallel APIs (callback, promise, sync), and npm lifecycle
+scripts as the supply-chain door.
 
 ---
 
 ### 5. Common Mistakes
 
-**Using a regular string for a JSON literal.**
+**Treating a non-zero exit as a failure.**
 
 ```glide
-// Bad — does not even lex
-let body = "{\"title\": \"first\"}"
+// Bad — `?` here is right, but the check that follows is missing
+let out = process.run("git", ["rev-parse", "HEAD"])?
+let head = out.stdout().trim()        // empty when git said "not a repo"
 
 // Good
-let body = `{"title": "first"}`
+let out = process.run("git", ["rev-parse", "HEAD"])?
+if out.ok() == false {
+    return Err("not a git repository: {out.stderr().trim()}")
+}
+let head = out.stdout().trim()
 ```
 
-**Expecting typed decode.** `json.decode` produces dynamic maps and
-lists today. Reach into them with `??`, or wait for `derive Json`.
+`?` catches "git is not installed". Only `out.ok()` catches "git ran
+and said no". They are different failures and they need different
+handling — which is the entire point of splitting them.
 
-**Expecting decoded key order to be preserved.** Encoding preserves
-order; decoding sorts. A shim limitation.
+**Forgetting that `os.args()[0]` is the program name.** A one-argument
+program matches `[_, path]`, not `[path]`.
 
-**Encoding a variant.** It errors — variants wait for `derive`. Encode
-a struct or a map instead:
+**Indexing instead of pattern matching.**
 
 ```glide
-// Bad today
-json.encode(Status.Active)
+// Bad — panics with no arguments
+let path = os.args()[1]
 
-// Good today
-json.encode(["status": "active"])
+// Good
+let [_, path] = os.args() else {
+    eprintln("usage: prog <file>")
+    os.exit(2)
+}
 ```
 
-**Assuming a missing key gives a zero.** It gives `None`:
+**Using `os.env` as if it were a String.** It is an `Option`. `??`
+supplies a default; `match` distinguishes unset from empty. If you find
+yourself writing `os.env("X") ?? ""`, ask whether unset and empty
+really are the same thing for your program — sometimes they are, and
+then the `??` is correct and deliberate.
+
+**Building paths with `+`.**
 
 ```glide
-let count = v["count"] ?? 0        // the ?? is not optional
+// Bad — double separators, no cleaning, wrong on Windows
+let p = dir + "/" + name
+
+// Good
+let p = fs.join([dir, name])
 ```
 
-**Round-tripping large integers through a JavaScript client.** Numbers
-past 2⁵³ lose precision in JavaScript regardless of what Glide does.
-The designed answer is optional string-encoding of big integers; today,
-send them as strings yourself.
+**Using `os.exit` where cleanup matters.**
 
-**Reaching for `omitempty` habits.** There is no `omitempty` and there
-does not need to be: `String?` with `None` encodes as `null`, and the
-designed derive has a typed option for omitting rather than
-null-encoding.
+```glide
+// Bad — the defer never runs
+fn main() {
+    let db = sql.open(dsn) ?? { os.exit(1) }
+    defer { _ = db.close() }
+    if bad_config() {
+        os.exit(1)              // db is never closed
+    }
+}
 
-**Trusting case-insensitive matching.** There is none. Field names
-match exactly.
+// Good
+fn main() -> Result<(), Error> {
+    let db = sql.open(dsn)?
+    defer { _ = db.close() }
+    if bad_config() {
+        return Err("bad config")     // unwinds; the defer runs
+    }
+    Ok(())
+}
+```
+
+**Sending diagnostics to stdout.** It breaks pipelines. `eprintln` for
+anything that is not the program's output.
+
+**Reading a whole file when you want to stream it.**
+`fs.read_string` loads the entire file into memory. For a
+multi-gigabyte log that is a problem, and streaming IO is ○. Until then
+this is a real limitation, not a style choice.
+
+**Expecting `process.run` to stream output to the terminal.** It
+captures. A long build's progress is invisible until it finishes, and
+streaming is ○ — and not a triviality: the interpreter's stdout is an
+`io.Writer` a test can redirect, and a subprocess writing to the real
+file descriptor bypasses it, so the two tiers could disagree about
+where output went.
+
+**Forgetting `.context()` on file errors.** `open /tmp/x: no such file`
+tells you what failed; `loading config: open /tmp/x: no such file`
+tells you why you cared.
 
 ---
 
 ### 6. Performance Considerations
 
-**The shim walks values structurally at runtime.** That is reflection
-by another name, and it is a tree-walker cost. Do not benchmark it.
+**`fs.read_string` reads the whole file into memory** in one
+allocation. Fine for configuration files and source code; not fine for
+arbitrary user input of unknown size.
 
-**`derive Json` generates plain code** (○) — a straight-line encoder
-per type, optimised like anything you would hand-write. That is the
-serde cost model, and it is typically several times faster than
-reflection-based encoding.
+**`process.run` buffers both streams in full.** A child that produces a
+gigabyte of stdout produces a gigabyte of Glide `String`. The designed
+fix is streaming (○); the mitigation today is to make the child produce
+less — `grep -c` rather than `grep | count the lines`.
 
-**Decoding allocates a map per object and a list per array.** Typed
-decode (○) allocates the struct directly and skips the intermediate.
-That is the biggest performance difference between the shim and the
-designed module.
+**A process is orders of magnitude more expensive than a function
+call.** A shell script pays this constantly because everything is a
+program; a Glide script should pay it only where the work genuinely
+lives in another program. Counting lines with `text.lines().len()` beats
+`process.run("wc", ["-l", path])` by about four orders of magnitude,
+and it cannot be defeated by a filename with a space in it.
 
-**Key ordering costs a keys slice per map** (Chapter 11) — one pointer
-per entry, in exchange for stable output.
+**Printing is one syscall per call** and unbuffered (Chapter 6). For
+bulk output — a million lines — that is seconds rather than
+milliseconds, and the designed answer is an explicit buffered writer
+(○) whose `flush`/`close` is visible via `defer`.
 
-**Numbers in lexical form cost a string** (○) until converted, in
-exchange for not corrupting int64s.
+Until it lands, the mitigation is to build the output and print once:
 
-**Exact-case matching is a plain comparison.** Go's case-insensitive
-fallback costs a second pass.
+```glide
+// Bad — a million syscalls
+for line in lines { println(line) }
+
+// Better today — one syscall
+println(lines.join("\n"))
+```
+
+**IO is a cancellation point**, so a read inside a `scope(timeout:)`
+can be aborted. That costs a context per call in the interpreter.
+
+**`os.args()` allocates a list per call.** Call it once.
+
+**Startup is nothing** (Chapter 30) — no init graph, no static
+constructors.
 
 ---
 
 ### 7. Best Practices
 
-**Use raw strings for every JSON literal.** No exceptions. If you find
-yourself typing `\"`, stop.
-
-**Parse into a type at the boundary, once.** This is Chapter 11's
-"maps at the boundary, structs inside", and JSON is where it matters
-most:
+**Validate arguments with a pattern, at the top of `main`, before
+anything is open.**
 
 ```glide
-// Good — the dynamic map lives for three lines
-fn parse_note(body: String) -> Result<Note, ApiError> {
-    let Ok(v) = json.decode(body) else {
-        return Err(.BadInput{ msg: "invalid JSON" })
+fn main() -> Result<(), Error> {
+    let [_, src, dst] = os.args() else {
+        eprintln("usage: copy <src> <dst>")
+        os.exit(2)
     }
-    let title = v["title"] ?? ""
-    if title == "" {
-        return Err(.BadInput{ msg: "title is required" })
-    }
-    Ok(Note{ title: title, body: v["body"] ?? "" })
+    // nothing is open yet, so os.exit above is safe
+    …
 }
 ```
 
-Downstream code gets a `Note`, not a map that might contain anything.
-When `derive Json` lands this becomes one line, and the *shape* is the
-same.
+**Return `Err` from `main` for anything that happens after a resource
+is open.** It prints the error, exits 1, and runs your defers.
 
-**Let `T?` express optionality; do not invent sentinels.**
+**Use `os.exit(2)` for usage errors** and let everything else be an
+`Err`. That is the Unix convention (`2` = misuse) and it distinguishes
+"you called me wrong" from "something went wrong".
+
+**Wrap a conversation with an external program in one function that
+returns an Option or a Result.**
 
 ```glide
-// Good
-type Note = struct {
-    pub title: String        // required
-    pub body: String?        // optional
-}
-```
-
-**Decide unknown-field policy deliberately.** Ignore for evolving APIs
-(the default); `strict` for config files, where a typo'd key should be
-an error rather than a silent default.
-
-**Do not send large integers to JavaScript clients as numbers.**
-Anything above 2⁵³ needs string encoding, and that is a protocol
-decision, not a serialisation one.
-
-**Keep the wire type separate from the domain type when they diverge.**
-
-```glide
-// Good, once shapes differ
-type NoteWire = struct { pub title: String, pub body: String? }
-type Note = struct { pub id: NoteId, pub title: String, pub words: Int }
-
-fn to_domain(w: NoteWire, id: NoteId) -> Note { … }
-```
-
-A `derive(Json)` on your domain type couples your API to your internal
-model. Sometimes that is fine; when it stops being fine, the fix is a
-second type and a conversion, not a pile of tag options.
-
----
-
-### 8. Examples
-
-**Encoding, the full structural walk:**
-
-```glide
-import json
-
-type P = struct {
-    pub name: String
-    pub age: Int
-    pub tags: List<String>
-}
-
-fn main() {
-    let p = P{ name: "ada", age: 36, tags: ["a", "b"] }
-    println(json.encode(p))
-    println(json.encode(["x": 1, "y": 2]))
-    println(json.encode([1, 2, 3]))
-    println(json.encode(None))
-}
-```
-
-```
-{"name":"ada","age":36,"tags":["a","b"]}
-{"x":1,"y":2}
-[1,2,3]
-null
-```
-
-Struct field order and map insertion order are both preserved.
-
-**Decoding and validating at the boundary:**
-
-```glide
-import json
-
-type Note = struct {
-    pub title: String
-    pub body: String
-}
-
-type ApiError = BadInput{ msg: String }
-
-fn parse_note(body: String) -> Result<Note, ApiError> {
-    let Ok(v) = json.decode(body) else {
-        return Err(.BadInput{ msg: "invalid JSON" })
-    }
-    let title = v["title"] ?? ""
-    if title == "" {
-        return Err(.BadInput{ msg: "title is required" })
-    }
-    Ok(Note{ title: title, body: v["body"] ?? "" })
-}
-
-fn main() {
-    for input in [
-        `{"title": "first", "body": "hello"}`,
-        `{"title": "second"}`,
-        `{"body": "no title"}`,
-        `not json`,
-    ] {
-        match parse_note(input) {
-            Ok(n)                => println("ok: {n:?}")
-            Err(BadInput{ msg }) => println("rejected: {msg}")
+// Good — the two failure kinds are handled once, at the boundary
+fn git(dir: String, args: List<String>) -> String? {
+    let mut full = ["-C", dir]
+    full.extend(args)
+    match process.run("git", full) {
+        Ok(out) => if out.ok() { Some(out.stdout().trim()) } else { None }
+        Err(e)  => {
+            eprintln("git is not runnable: {e}")
+            None
         }
     }
 }
 ```
 
-```
-ok: Note{ title: "first", body: "hello" }
-ok: Note{ title: "second", body: "" }
-rejected: title is required
-rejected: invalid JSON
-```
+Callers then write `git(dir, ["rev-parse", "HEAD"])` and deal with one
+`Option` instead of an `Output` and a status code.
 
-Four inputs, four distinct outcomes, and every failure is a typed value
-the caller can match on. Note the shape: `json.decode` produces a
-dynamic map, the function validates and constructs a `Note`, and
-nothing downstream ever sees the map.
-
-**The round-trip:**
+**Put a timeout on anything that talks to another program.**
 
 ```glide
-import json
+scope(timeout: 10.s) {
+    // every child started in here dies with the scope
+}
+```
 
+A shell script that hangs hangs forever. This is the cheapest
+reliability win in the chapter.
+
+**Add context to every file error.**
+
+```glide
+let text = fs.read_string(path).context("reading {path}")?
+```
+
+**Keep the happy path unindented with `let … else`.**
+
+```glide
+fn main() -> Result<(), Error> {
+    let [_, path] = os.args() else { usage() }
+    let text = fs.read_string(path).context("reading {path}")?
+    let Some(config) = parse(text) else {
+        return Err("{path}: not a valid config")
+    }
+    run(config)
+}
+```
+
+Three possible failures, zero nesting.
+
+**Write to stdout only what a downstream program should consume.** If
+you would not want it in a `| sort`, it goes to stderr.
+
+**Do not build a flag parser.** Wait for `flag`, or use positional
+arguments — which for a tool with one or two inputs is better anyway.
+
+---
+
+### 8. Examples
+
+**`wc`, complete:**
+
+```glide
+// wc.gld — count lines, words, and bytes.
+import fs
+import os
+
+fn main() -> Result<(), Error> {
+    let [_, path] = os.args() else {
+        eprintln("usage: wc <file>")
+        os.exit(2)
+    }
+
+    let text = fs.read_string(path).context("reading input")?
+
+    let lines = text.lines().len()
+    let words = text.split_whitespace().len()
+    let bytes = text.len()
+
+    println("{lines:8}{words:8}{bytes:8} {path}")
+    Ok(())
+}
+```
+
+```bash
+$ glide run wc.gld testdata/sample.txt
+       1       7      33 testdata/sample.txt
+$ glide run wc.gld
+usage: wc <file>
+$ echo $?
+2
+$ glide run wc.gld /nonexistent
+error: reading input: open /nonexistent: no such file or directory
+$ echo $?
+1
+```
+
+Three exit paths, three exit codes, and each failure message says
+something useful. Note the contrast between exit 2 (you called me
+wrong) and exit 1 (something went wrong).
+
+**A directory tally — `fs` and a sort:**
+
+```glide-run
+import fs
+import os
+
+fn main() -> Result<(), Error> {
+    let dir = if os.args().len() > 1 { os.args()[1] } else { os.cwd()? }
+
+    let mut sized: List<(String, Int)> = []
+    for name in fs.list_dir(dir)? {
+        let path = fs.join([dir, name])
+        if fs.is_dir(path) { continue }
+        match fs.read_string(path) {
+            Ok(body) => sized.push((name, body.len()))
+            Err(_)   => {}          // unreadable: skip, don't fail the run
+        }
+    }
+
+    sized.sort_by(|a, b| b.1.cmp(a.1))
+    println("{sized.len()} readable file(s) in {dir}")
+    for entry in sized.slice(0, if sized.len() < 5 { sized.len() } else { 5 }) {
+        println("  {entry.1:8}  {entry.0}")
+    }
+    Ok(())
+}
+```
+
+The `Err(_) => {}` arm is the interesting line. A file that cannot be
+read — a socket, a permission problem, a dangling symlink — should not
+fail a directory tally, and writing that decision as an explicit empty
+arm makes it a choice a reviewer can see, rather than a missing check.
+
+**Talking to another program, safely:**
+
+```glide-run
+import process
+
+fn main() -> Result<(), Error> {
+    // An argument with a space in it is one argument. There is nothing
+    // to quote, and no way for the string to become two arguments.
+    let name = "a file with spaces.txt"
+    let out = process.run("echo", ["--", name])?
+    print(out.stdout())
+
+    // A shell, when you actually want one — visible at the call site.
+    let piped = process.run("sh", ["-c", "printf 'b\\na\\n' | sort"])?
+    print(piped.stdout())
+    Ok(())
+}
+```
+
+```
+-- a file with spaces.txt
+a
+b
+```
+
+**Bad versus good: the exit that loses data**
+
+```glide
+// Bad
 fn main() {
-    let original = `{"name":"ada","age":36,"active":true,"tags":["x","y"]}`
-
-    let Ok(v) = json.decode(original) else {
-        println("decode failed")
-        return
-    }
-    println("{v:?}")
-    println(json.encode(v))
-}
-```
-
-```
-["active": true, "age": 36, "name": "ada", "tags": ["x", "y"]]
-{"active":true,"age":36,"name":"ada","tags":["x","y"]}
-```
-
-The keys came back sorted rather than in input order — the shim
-limitation. The designed module preserves order through the round trip,
-which is what makes decode-modify-encode produce a clean diff.
-
-**Bad versus good: the stringly-typed pipeline**
-
-```glide
-// Bad — the map escapes into the program
-fn handle(body: String) -> String {
-    let Ok(v) = json.decode(body) else { return "bad json" }
-    process(v)                       // takes a Map
-}
-
-fn process(v: Map<String, Json>) -> String {
-    let title = v["title"] ?? ""     // every access might be absent
-    let count = v["count"] ?? 0      // every value needs a default
-    let nested = v["meta"] ?? [:]    // and this one is a map too
-    …
-}
-```
-
-Every function downstream has to know the schema, restate the defaults,
-and handle absence. Two call sites can disagree about what the default
-for `count` is, and nothing notices.
-
-```glide
-// Good — parse once, then it is a type
-fn handle(body: String) -> String {
-    match parse_note(body) {
-        Ok(n)  => process(n)         // takes a Note
-        Err(e) => "rejected: {e:?}"
+    let f = fs.create("out.txt") ?? { os.exit(1) }     // ○ fs.create
+    defer { _ = f.close() }                            // never runs
+    write_report(f)
+    if verify_failed() {
+        eprintln("verification failed")
+        os.exit(1)          // the buffered write is lost
     }
 }
+```
 
-fn process(n: Note) -> String {
-    // n.title is a String. Not a maybe-String. A String.
-    …
+`os.exit` skips defers, so `f.close()` — which is where a buffered
+write is flushed — never happens. The file is truncated and the program
+exits 1, looking like a clean failure.
+
+```glide
+// Good
+fn main() -> Result<(), Error> {
+    let f = fs.create("out.txt")?
+    defer { _ = f.close() }
+    write_report(f)
+    if verify_failed() {
+        return Err("verification failed")     // unwinds; the defer runs
+    }
+    Ok(())
 }
 ```
 
-This is the same argument as Chapter 12's parse-don't-validate, and
-JSON is where it earns the most, because JSON is where untrusted data
-enters.
+The rule in one line: **`os.exit` before you open anything; `Err`
+after.**
 
 ---
 
@@ -695,56 +902,65 @@ enters.
 
 **Summary**
 
-- Go's `encoding/json` has **five diseases**: runtime reflection,
-  stringly struct tags, missing-field-becomes-zero, case-insensitive
-  matching, and `map[string]interface{}` for dynamic data. Glide's
-  design is a point-by-point response, and four of the five were cured
-  by earlier decisions.
-- **Today (✓):** `json.encode(v)` does a structural walk preserving
-  struct field order and map insertion order; `json.decode(s)` produces
-  dynamic maps and lists with **sorted** keys. Variants and functions
-  cannot be encoded — they wait for derive.
-- **JSON literals want raw strings.** `` `{"k": 1}` `` — in an
-  always-interpolating string, `{` opens an interpolation.
-- **`derive Json` (○)** generates encoder and decoder as plain code at
-  compile time — serde-class speed, no proc-macro second compiler, no
-  runtime reflection. Options are **typed comptime arguments**, so a
-  typo is a compile error rather than a shipped bug.
-- **Required-by-default falls out of no-zero-values plus `Option`.** A
-  missing `String` field is a decode error; a missing `String?` field
-  is `None`. Absent-versus-zero is unrepresentable, and no tag is
-  needed.
-- **Dynamic JSON is a sum type** (○) — `Null | Bool | Number | Str |
-  Array | Object` — so exhaustive `match` replaces the type-assertion
-  ladder.
-- **Numbers keep their lexical form** (○), so int64 IDs past 2⁵³ do not
-  silently corrupt the way Go's decode-to-float64 does.
-- **Exact-case matching, always.** Unknown fields ignored by default,
-  `strict` opt-in for config files.
-- **serde-style format genericity was rejected** as an enterprise
-  abstraction, and the decision is reversible — a shared-walk refactor
-  fits behind the derives without touching user code.
-- Insertion-ordered maps (Chapter 11) mean key order round-trips, so
-  decode-modify-encode produces a clean diff.
+- **`os`** ✓: `args`, `exit`, `env`, `set_env`, `cwd`, `chdir`.
+  `os.env` returns an `Option` because unset and empty are different
+  states. `os.chdir` is process-global — a warning, not a feature.
+- **`fs`** ✓: `read_string`, `write_string`, `append_string`, `exists`,
+  `is_dir`, `remove`, `remove_all`, `mkdir_all`, `rename`, `list_dir`,
+  `join`. Paths are Strings until a typed `path` module lands (○).
+  `list_dir` returns sorted *names*, so output never depends on the
+  filesystem's whim.
+- **`process`** ✓: `run(cmd, args)` returning `Result<Output, Error>`,
+  with `status()`, `ok()`, `stdout()`, `stderr()`.
+- **A non-zero exit is not an error.** `Err` means "could not run";
+  `status()` means "what it said". `?` propagates the first and never
+  the second.
+- **There is no shell**, so there is nothing to quote and no injection
+  to audit. `process.run("sh", ["-c", …])` is available and visible.
+- **`process.run` is a cancellation point** — `scope(timeout:)` kills
+  the child rather than abandoning it.
+- **`os.args()[0]` is the program name.** Argument handling is a **list
+  pattern** — `let [_, path] = os.args() else { … }` validates arity in
+  both directions, binds, and handles failure in one line.
+- **Exit codes:** `Ok(())` → 0, `Err(e)` → 1 with the error on stderr,
+  `os.exit(n)` → n, panic → 1. **`os.exit` skips `defer`s.** The rule:
+  **`os.exit` before you open anything; `Err` after.**
+- **Stream discipline:** stdout is the program's output, stderr is
+  everything else. Both unbuffered.
+- ○ and honestly missing: streaming IO in both directions, file
+  metadata (size, mtime, mode), stdin, a per-call environment or
+  working directory for a child, a typed `path` module, `flag`, a
+  buffered writer, `embed`, and `glide build -target`.
+- Host shims are **injectable per embedder** (○), which buys
+  capability-style sandboxing for free.
 
 **Exercises**
 
-1. **Find the silent zero.** In a Go service, find a struct decoded
-   from JSON with a non-pointer `int` or `string` field that is
-   logically optional. Determine what happens when the field is absent
-   versus present-and-zero. Then write the Glide type and note that the
-   distinction is forced into the declaration rather than into a
-   comment.
+1. **Write `cat` with three failure modes.** Handle no arguments (exit
+   2, usage on stderr), a missing file (exit 1, error propagated from
+   `main`), and success. Then add a `-n` line-numbering flag using only
+   pattern matching, and note exactly where a real flag parser would
+   start earning its place.
 
-2. **Break a big integer.** Encode `9007199254740993` (2⁵³ + 1) as
-   JSON, decode it in a JavaScript environment, and re-encode. Note
-   what you get back. Then decide, for an API you maintain, whether any
-   ID could reach that magnitude — and whether you would notice if one
-   did.
+2. **Break the shell, then fail to break Glide.** Write a bash script
+   that takes a filename argument and `cat`s it. Run it against a file
+   named `a b.txt`, then against one named `$(whoami).txt`, then
+   against `; echo pwned`. Write the same program in Glide with
+   `process.run` and try all three again. Count the quoting rules you
+   had to learn on each side.
 
-3. **Design the strict/lax boundary.** For a service you know, list
-   every JSON input: request bodies, config files, webhook payloads,
-   cached documents. For each, decide whether unknown fields should be
-   ignored or rejected, and write down why. You will find the answer
-   splits cleanly along "does a human write this?" — which is exactly
-   why `DESIGN.md` makes it an opt-in rather than a global setting.
+3. **Find the orphaned process.** Write a Glide program that runs
+   `sleep 30` inside `scope(timeout: 1.s)`, and check with `ps` that
+   the child is gone after the program exits. Then write the Go
+   equivalent using `context.WithTimeout` and `cmd.Run` — not
+   `CommandContext` — and check again. That difference is why
+   cancellation is part of the language rather than a library
+   convention.
+
+4. **Design the `flag` module.** Given that Go's `flag` was too limited
+   and every serious Go CLI uses `cobra`, write the signature for a
+   Glide `flag` API that handles short and long options, subcommands,
+   and required arguments — using named parameters and sum types rather
+   than a builder. Then check it against the "no DSL" principle: if
+   your design has a fluent chain of `.Flag().Short().Required()`, it
+   has become the thing `DESIGN.md` declines.

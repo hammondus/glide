@@ -263,7 +263,7 @@ Running as of M4c: the type checker, sized numerics, explicit numeric
 conversion, generic bound checking, trait conformance, `Ord`, boxed
 `Option` and match exhaustiveness. Not yet running: comptime and
 `derive`, the arithmetic operator traits, `unsafe`, `embed`, and most
-of the designed standard library. Chapter 35 covers the path from here
+of the designed standard library. Chapter 37 covers the path from here
 to a compiler.
 
 You will see this reflected in every chapter. Sections marked ✓ have

@@ -63,6 +63,15 @@ This appendix is about the ones that do not.
 | `func TestX(t *testing.T)` | `test "name" { }` | a language construct |
 | `t.Errorf` / testify | `expect(a == b)` | compiler-known |
 | `b.N` | `bench "name" { }` (○) | runner owns the loop |
+| `os/exec` `Cmd` | `process.run(cmd, args)` | non-zero exit is `Ok`, not `Err` |
+| `os.Getenv` | `os.env(name)` → `String?` | unset ≠ empty |
+| `os.ReadFile` / `os.WriteFile` | `fs.read_string` / `fs.write_string` | |
+| `filepath.Join` | `fs.join([a, b])` | a list; no variadics |
+| `math.Abs` / `math.Min` | `x.abs()` / `x.min(y)` | methods, because they need the width |
+| `math.Sqrt` / `math.Floor` | `math.sqrt(x)` / `math.floor(x)` | Float-only, so a plain function |
+| `min`/`max` builtins (1.21) | `x.min(y)` / `x.max(y)` | not universe names — both are common variables |
+| `uint8(300)` → `44` | `u8(300)` → **compile error** | `n.wrapping_u8()` to truncate |
+| `go vet` | `glide check` | type checking, not a lint pass |
 | `/* */` | **does not exist** | `//` only |
 | `;` | **does not exist** | newline rules |
 | `++` | `+= 1` | |
@@ -97,7 +106,7 @@ makes the either-or physical: there is no text to touch until you have
 gone through the check.
 
 And **enumerate your library's failures** as a sum type
-(Chapter 19) — `errors.Is` archaeology has no equivalent because it has
+(Chapter 20) — `errors.Is` archaeology has no equivalent because it has
 no need.
 
 ### 3. `defer` is block-scoped
@@ -125,7 +134,7 @@ joins every child, and leaks are unrepresentable.
 The corollary that catches people: **scope exit blocks**. A function
 that opens a scope does not return until its children finish. And a
 *normal* exit joins without cancelling, so a blocked child deadlocks —
-use `return` (an early exit) to cancel first. That is Chapter 27's
+use `return` (an early exit) to cancel first. That is Chapter 28's
 sharpest edge and you will hit it once.
 
 ### 5. `context.Context` is gone, and you should not rebuild it

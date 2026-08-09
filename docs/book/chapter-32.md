@@ -1,796 +1,671 @@
-# Chapter 32: HTTP
+# Chapter 32: Case Study — Replacing a Shell Script
 
-Glide's HTTP design changes one thing about Go's, and everything else
-follows from it: **handlers return values.**
+Every project accumulates them. A script that started as four lines,
+grew a second argument, then a cleanup trap, then a `|| true` on the
+line that kept failing for a reason nobody looked into. It is two
+hundred lines now, it is the only thing that knows how to cut a
+release, and nobody wants to touch it.
 
-```glide
-fn(Request) -> Result<Response, Error>
-```
+This chapter takes one such script and rewrites it. Not to show that
+Glide can do what bash does — it obviously can — but because the
+translation is where the language's design shows up as something you
+can feel rather than agree with. Almost every Glide feature in this
+book exists to make one specific bash failure mode impossible, and
+this is where you can see which is which.
 
-Go's `func(w http.ResponseWriter, r *http.Request)` cannot return an
-error, and that single limitation is the root of reinvented
-error-middleware, the forgotten-`return`-after-`http.Error` bug class,
-and the difficulty of composing handlers.
-
-The second change is that **cancellation is ambient** — an HTTP request
-inside a `scope(timeout:)` is aborted when the scope dies, with no
-`ctx` in any signature.
-
-The M2 shim (✓) is deliberately small: a Go-1.22-level router, a
-handful of response constructors, and a client with real defaults.
+Everything here is ✓. The program is `glide/examples/release.gld` in
+the repository, and the outputs below are real.
 
 ---
 
 ### 1. Basic Usage
 
-#### A server
+#### The script
+
+A release stager. Given a version and a directory: check the version
+looks like a version, check the working tree is a clean git checkout,
+build a staging directory, write a manifest, checksum it, and clean up
+if anything goes wrong.
+
+Here it is in bash, in the shape these things actually reach:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION=$1
+DIR=${2:-.}
+
+if ! [[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "release: $VERSION is not a version like v1.2.3" >&2
+    exit 1
+fi
+
+HEAD=$(git -C $DIR rev-parse --short HEAD 2>/dev/null) || {
+    echo "release: $DIR is not a git repository" >&2
+    exit 1
+}
+
+STATUS=$(git -C $DIR status --porcelain)
+if [ -n "$STATUS" ]; then
+    echo "release: $(echo "$STATUS" | wc -l) uncommitted file(s)" >&2
+    exit 1
+fi
+
+OUT=${TMPDIR:-/tmp}/release-$VERSION
+trap 'rm -rf "$OUT"' EXIT
+mkdir -p $OUT
+
+cat > $OUT/RELEASE.txt <<EOF
+version $VERSION
+commit  $HEAD
+source  $DIR
+EOF
+
+SUM=$(shasum -a 256 $OUT/RELEASE.txt | cut -d' ' -f1)
+echo "sha256  $SUM" >> $OUT/RELEASE.txt
+
+echo "staged $VERSION in $OUT"
+ls $OUT | sed 's/^/  /'
+```
+
+Thirty-eight lines. It works. It also has at least six defects, and
+this chapter's claim is that the Glide version does not have them
+*because of the type system*, not because I was more careful.
+
+#### The same program in Glide
 
 ```glide
-import http
+import fs
+import os
+import process
 
-fn main() -> Result<(), Error> {
-    let mut r = http.router()
-    r.get(`/health`, |req| http.text("ok"))
+type ReleaseError =
+    NotSemver{ given: String }
+    | NotARepo{ dir: String }
+    | Dirty{ files: Int }
+    | ToolFailed{ tool: String, status: Int, why: String }
+```
 
-    scope s {
-        http.serve("127.0.0.1:8080", r)
+Before a line of logic: **the failure modes are a list**. Four ways
+this program can fail, written down, and the compiler will not let a
+`match` over them forget one. The bash script's failure modes are
+`exit 1` four times, which is the same information erased.
+
+```glide
+// One conversation with one external program, in one place. `Err` is
+// "the tool could not be run"; a non-zero status is the tool answering.
+fn tool(name: String, args: List<String>) -> Result<String, ReleaseError> {
+    let out = match process.run(name, args) {
+        Ok(o)  => o
+        Err(e) => { return Err(.ToolFailed{ tool: name, status: -1, why: e.message() }) }
     }
+    if out.ok() == false {
+        return Err(.ToolFailed{ tool: name, status: out.status(), why: out.stderr().trim() })
+    }
+    Ok(out.stdout().trim())
+}
+
+fn git(dir: String, args: List<String>) -> Result<String, ReleaseError> {
+    let mut full = ["-C", dir]
+    full.extend(args)
+    tool("git", full)
 }
 ```
 
-`http.router()` returns a `Router`. `r.get/post/put/delete(pattern,
-handler)` registers a route and requires a `mut` path.
-`http.serve(addr, r)` blocks, serving a green thread per request.
-
-**Route patterns want raw strings.** `` `/notes/{id}` `` — in a regular
-string, `{id}` interpolates.
-
-#### Handlers return values
+`tool` is where the two things bash conflates come apart. `Err` from
+`process.run` means the program could not be started — not on `PATH`,
+not executable. A non-zero `status()` means it ran and said no. The
+bash script cannot tell these apart at all: `set -e` treats both as
+fatal, `|| true` treats both as fine, and there is no third option.
 
 ```glide
-fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Some(raw) = req.path_param("id") else {
-        return Ok(http.bad_request("missing id"))
+// v1.2.3 — three numeric parts after a leading v. No regex needed, and
+// the failure carries what was actually given.
+fn check_version(v: String) -> Result<(), ReleaseError> {
+    if v.starts_with("v") == false {
+        return Err(.NotSemver{ given: v })
     }
-    let Some(id) = raw.parse_int() else {
-        return Ok(http.bad_request("bad id"))
+    let parts = v.trim_prefix("v").split(".")
+    if parts.len() != 3 {
+        return Err(.NotSemver{ given: v })
     }
-    let found = db.query_one(
-        "select id, title from notes where id = :id",
-        ["id": id],
-    )?
-    match found {
-        Some(row) => Ok(http.json(row))
-        None      => Ok(http.not_found())
+    for p in parts {
+        let Some(_) = p.parse_int() else { return Err(.NotSemver{ given: v }) }
     }
+    Ok(())
 }
 ```
 
-A handler returns a `Response` or a `Result<Response, E>`. An `Err`
-maps to 500 plus the rendered error — **the one default mapping** until
-middleware is designed. A handler panic is 500 plus a stderr trace.
-
-Note the `?` on the database call: it propagates through the handler
-signature, converting into `ApiError` via `from` (Chapter 19). No
-error-handling middleware, no forgotten return.
-
-#### Registering handlers with dependencies
+Seven lines instead of a regex, and the error carries the offending
+string rather than only announcing that one existed. There is no
+`regex` module yet (○); when there is, this becomes three lines and the
+error still carries `given`, because that part was never about the
+regex.
 
 ```glide
-let mut r = http.router()
-r.get(`/notes/{id}`, |req| get_note(db, req))
-r.post(`/notes`, |req| create_note(db, req))
+fn check_tree(dir: String) -> Result<String, ReleaseError> {
+    let head = match git(dir, ["rev-parse", "--short", "HEAD"]) {
+        Ok(h)  => h
+        Err(_) => { return Err(.NotARepo{ dir: dir }) }
+    }
+    let status = git(dir, ["status", "--porcelain"])?
+    if status != "" {
+        return Err(.Dirty{ files: status.lines().len() })
+    }
+    Ok(head)
+}
 ```
 
-The closure adapts the handler signature and supplies the dependency.
-That one-line closure is Glide's dependency injection (Chapter 29) —
-no container, no globals, no framework.
-
-#### Request and response surfaces
-
-| Request | Returns |
-|---|---|
-| `req.path_param(name)` | `String?` — `None` when absent |
-| `req.body()` | `String` |
-| `req.method()` | `String` |
-| `req.path()` | `String` |
-
-| Constructor | Produces |
-|---|---|
-| `http.text(s)` | 200 with a text body |
-| `http.json(v)` | 200 with a JSON body |
-| `http.created()` | 201 |
-| `http.bad_request(msg)` | 400 |
-| `http.not_found()` | 404 |
-
-That constructor set is **closed** for now — it grows under the
-dogfood rule.
-
-#### A client with real defaults
+Note the asymmetry, and that it is deliberate. `rev-parse` failing is
+interpreted — that specific failure means "not a repository", so it is
+translated into the error the caller actually wants. `status` failing
+is *not* interpreted: `?` propagates whatever went wrong, because there
+is no second meaning to give it.
 
 ```glide
-import http
+fn stage(dir: String, version: String, head: String) -> Result<String, ReleaseError> {
+    let out = fs.join([os.env("TMPDIR") ?? "/tmp", "release-{version}"])
+
+    // If anything below fails, the half-built directory goes away.
+    // A shell script needs a trap for this, and gets the signal cases
+    // wrong; errdefer runs on the error path only.
+    errdefer { _ = fs.remove_all(out) }
+
+    match fs.mkdir_all(out) {
+        Ok(_)  => {}
+        Err(e) => { return Err(.ToolFailed{ tool: "mkdir", status: -1, why: e.message() }) }
+    }
+
+    let notes = fs.join([out, "RELEASE.txt"])
+    let body = "version {version}\ncommit  {head}\nsource  {dir}\n"
+    match fs.write_string(notes, body) {
+        Ok(_)  => {}
+        Err(e) => { return Err(.ToolFailed{ tool: "write", status: -1, why: e.message() }) }
+    }
+
+    let sum = checksum(notes)?
+    match fs.append_string(notes, "sha256  {sum}\n") {
+        Ok(_)  => {}
+        Err(e) => { return Err(.ToolFailed{ tool: "append", status: -1, why: e.message() }) }
+    }
+    Ok(out)
+}
+```
+
+`errdefer` is the honest version of `trap … EXIT`. The bash trap fires
+on success too, which is why the script deletes its own output — see
+the defects list below. `errdefer` fires on the error path only: a
+`return` carrying an `Err`, what `?` propagates, or a panic.
+
+```glide
+fn explain(e: ReleaseError) -> String {
+    match e {
+        NotSemver{ given } => "{given} is not a version like v1.2.3"
+        NotARepo{ dir }    => "{dir} is not a git repository"
+        Dirty{ files }     => "{files} uncommitted file(s); commit or stash first"
+        ToolFailed{ tool, status, why } =>
+            if status < 0 { "{tool} could not be run: {why}" } else { "{tool} exited {status}: {why}" }
+    }
+}
+
+fn run(version: String, dir: String) -> Result<String, ReleaseError> {
+    check_version(version)?
+    // Every child started in here dies with the scope. A shell script
+    // that hangs, hangs forever.
+    scope(timeout: 30.s) {
+        let head = check_tree(dir)?
+        stage(dir, version, head)
+    } ?? Err(.ToolFailed{ tool: "git", status: -1, why: "timed out after 30s" })
+}
 
 fn main() {
-    match http.get("http://example.com/") {
-        Ok(resp) => println("{resp.status()} {resp.body().len()} bytes")
-        Err(e)   => println("failed: {e}")
+    let args = os.args()
+    let (version, dir) = match args {
+        [_, v]    => (v, ".")
+        [_, v, d] => (v, d)
+        _         => {
+            eprintln("usage: release <version> [dir]")
+            os.exit(2)
+        }
+    }
+
+    match run(version, dir) {
+        Ok(out) => {
+            println("staged {version} in {out}")
+            for name in fs.list_dir(out) ?? [] {
+                println("  {name}")
+            }
+            _ = fs.remove_all(out)
+        }
+        Err(e) => {
+            eprintln("release: {explain(e)}")
+            os.exit(1)
+        }
     }
 }
 ```
 
-| Client call | Notes |
-|---|---|
-| `http.get(url)` | 30s timeout **out of the box** |
-| `http.post(url, body)` | body sent as `application/json` |
-| `resp.status()` | `Int` |
-| `resp.body()` | `String` |
+#### Running it
 
-**The default client has a timeout.** Go's does not, and an infinite
-hang out of the box is an incident generator.
+```bash
+$ glide run examples/release.gld
+usage: release <version> [dir]
+$ echo $?
+2
 
-#### Cancellation is ambient
+$ glide run examples/release.gld 1.2.3
+release: 1.2.3 is not a version like v1.2.3
+$ echo $?
+1
 
-```glide
-scope(timeout: 5.s) {
-    let resp = http.get(url)?
-    …
-}
+$ glide run examples/release.gld v1.2.3 /tmp
+release: /tmp is not a git repository
+
+$ glide run examples/release.gld v1.2.3 .
+release: 43 uncommitted file(s); commit or stash first
+
+$ glide run examples/release.gld v1.2.3 ~/clean-checkout
+staged v1.2.3 in /var/folders/…/T/release-v1.2.3
+  RELEASE.txt
+$ echo $?
+0
 ```
 
-`http.get` is a **cancellation point**, so the scope's deadline aborts
-the in-flight request. Nothing in the signature mentions a timeout.
-
-`http.serve` is a cancellation point too: **the enclosing scope's death
-gracefully shuts the server down.**
-
-```glide
-scope s {
-    _ = s.spawn(|| sweeper(db))
-    http.serve("127.0.0.1:8080", r)
-}
-```
-
-When `serve` returns, the sweeper is cancelled and joined. When the
-scope dies for any other reason, `serve` shuts down. **There is no
-shutdown code anywhere.**
-
-#### A complete, self-driving service
-
-This is the repository's own `notes.gld`, reduced. It serves, exercises
-its own API over real HTTP, and returns — which cancels the server.
-
-```glide
-import http
-import sql
-import time
-
-fn get_note(db: Db, req: Request) -> Result<Response, Error> {
-    let Some(raw) = req.path_param("id") else {
-        return Ok(http.bad_request("missing id"))
-    }
-    let Some(id) = raw.parse_int() else {
-        return Ok(http.bad_request("bad id"))
-    }
-    let found = db.query_one(
-        "select id, title from notes where id = :id",
-        ["id": id],
-    )?
-    match found {
-        Some(row) => Ok(http.json(row))
-        None      => Ok(http.not_found())
-    }
-}
-
-fn run() -> Result<String, Error> {
-    let db = sql.open("sqlite::memory:")?
-    defer { _ = db.close() }
-    _ = db.exec(`create table notes (id integer primary key, title text)`)?
-    _ = db.exec("insert into notes (title) values (:t)", ["t": "hello"])?
-
-    let mut r = http.router()
-    r.get(`/notes/{id}`, |req| get_note(db, req))
-
-    scope s {
-        _ = s.spawn(|| http.serve("127.0.0.1:17651", r))
-        time.sleep(80.ms)
-        let resp = http.get("http://127.0.0.1:17651/notes/1")?
-        return Ok("{resp.status()} {resp.body().trim()}")
-    }
-}
-
-fn main() {
-    match run() {
-        Ok(s)  => println(s)
-        Err(e) => eprintln("failed: {e}")
-    }
-}
-```
-
-```
-200 {"id":1,"title":"hello"}
-```
-
-Note the `return` inside the scope — an early exit, which cancels the
-spawned server (Chapter 27's sharpest edge). A tail expression would
-join the server forever.
-
-#### The designed surface ○
-
-- **Middleware is `fn(Handler) -> Handler`.** Because handlers return
-  values, composition is function composition.
-- **`?` propagates to one error-to-status mapping**, configurable
-  rather than reinvented per project.
-- **Streaming**: a `Response` body can be a reader or a generator —
-  iterators paying off.
-- **HTTP/2 in; HTTP/3 when it earns entry.**
-- TLS, connection pooling, and retries.
+Five paths, five distinct outcomes, and the exit codes distinguish
+"you called me wrong" (2) from "something went wrong" (1).
 
 ---
 
 ### 2. Under the Hood
 
-#### Green thread per request
+#### The six defects in the bash version
 
-Each request runs in its own task. Because tasks are cheap and
-stackful, a handler is ordinary blocking code — no callbacks, no
-`async`, no colouring.
+Each one is a real bug in the script above, and each one is
+*unreachable* in the Glide version. This list is the chapter.
 
-That is the Go model, and it is the reason Go took over backend
-services. Glide adds the scope: a request's task is a child of the
-server's scope, so a request that is still running when the scope dies
-is cancelled.
+**1. `git -C $DIR` word-splits.** A directory named
+`~/my projects/app` becomes two arguments and the script does something
+else entirely. `$DIR` is unquoted in three places. In Glide,
+`process.run("git", ["-C", dir, …])` passes a list; a space in `dir`
+cannot become an argument boundary, because nothing is parsed.
 
-#### Why `serve` being a cancellation point matters
+**2. `VERSION=$1` with no argument is an error under `set -u`** — good
+— but the message is `line 4: $1: unbound variable`, not a usage
+string. The Glide version matches `os.args()` exhaustively and the
+no-argument case is a branch with a message and exit 2.
 
-`http.serve` blocks. Making it a cancellation point means the *scope*
-controls the server's lifetime rather than the server controlling the
-program's.
+**3. The `trap … EXIT` deletes the output on success.** Read it again:
+`trap 'rm -rf "$OUT"' EXIT` fires on *every* exit, including 0. The
+script prints "staged v1.2.3 in /tmp/release-v1.2.3" and then removes
+the directory it just announced. To fix it you need a flag variable, or
+`trap … ERR` plus the knowledge that `ERR` does not fire inside
+functions unless you also set `-E`. `errdefer` has one meaning and it
+is the one you wanted.
 
-Compare Go, where graceful shutdown is:
+**4. `SUM=$(shasum … | cut -d' ' -f1)` swallows a missing `shasum`.**
+Under `pipefail` it aborts — with the message `cut: …` or nothing at
+all, depending on which half failed. The Glide version's `ToolFailed`
+carries the tool name, the status and the tool's own stderr, and the
+`status < 0` branch distinguishes "could not be run" from "ran and
+failed".
 
-```go
-srv := &http.Server{Addr: ":8080", Handler: r}
-go func() { srv.ListenAndServe() }()
+**5. `git status --porcelain` hanging hangs the script forever.** A git
+process waiting on a lock, a network filesystem, or a credential
+prompt: there is no timeout, and adding one in bash means `timeout(1)`
+— which is not installed on macOS — or a background subshell and a kill
+loop. `scope(timeout: 30.s)` covers every child in the block, and kills
+them rather than abandoning them.
 
-stop := make(chan os.Signal, 1)
-signal.Notify(stop, os.Interrupt)
-<-stop
+**6. `echo "$STATUS" | wc -l` is off by one for empty input** and
+counts wrong for filenames containing newlines. `status.lines().len()`
+uses the rule from Chapter 6: split on `\n`, no phantom empty last
+line.
 
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-srv.Shutdown(ctx)
+There are two more I will not belabour: `ls $OUT | sed` breaks on
+filenames with newlines, and `${TMPDIR:-/tmp}` silently uses `/tmp`
+when `TMPDIR` is set to the empty string — which is exactly the
+unset-versus-empty distinction `os.env`'s `Option` exists to expose.
+
+#### What the checker did during the rewrite
+
+Two things, both worth recording because they are the ordinary
+experience rather than a highlight reel.
+
+First, `return` inside a match arm was a parse error:
+
+```
+release.gld:24:19: expected an expression, found 'return'
+ 24 |         Err(e) => return Err(.ToolFailed{ … })
+    |                   ^^^^^^
 ```
 
-Roughly ten lines, present in every Go service, written slightly
-differently each time. In Glide the scope already does it.
+Match arms are single *expressions*, and `return` is a statement. The
+fix is a block: `Err(e) => { return Err(…) }`. This is the language
+being consistent rather than convenient, and it is the kind of thing
+that costs ten seconds once.
 
-#### The one default error mapping
+Second — and this is the one that matters — adding a fifth variant to
+`ReleaseError` later produces a diagnostic pointing at `explain`, with
+the variant named. In bash, adding a fifth failure mode means adding a
+fifth `echo … >&2; exit 1` and hoping the message is consistent with
+the other four.
 
-`Err(e)` from a handler becomes 500 plus the rendered error. That is
-the *only* mapping in M2, recorded in `DESIGN-DECISIONS.md` as "until
-middleware is designed".
+#### Why `?` works so freely here
 
-It is deliberately crude. A real service wants `NotFound` → 404,
-`BadInput` → 400, `Db` → 500, and that mapping is exactly what
-middleware is for — one function, applied once, that matches the
-error sum type and picks a status.
+Every function in the program returns `Result<_, ReleaseError>`, so `?`
+never has to convert anything. That uniformity is worth designing for:
+a script with one error type is a script where `?` is free.
 
-Today you write it inline by returning `Ok(http.not_found())` rather
-than `Err(.NotFound)`, which is why the examples above do that.
-
-#### Client defaults are production defaults
-
-`http.get` has a 30-second timeout out of the box. `DESIGN.md` is
-pointed about this: **Go's default client has no timeout — an infinite
-hang out of the box, an incident generator.**
-
-Every Go codebase eventually learns to construct its own
-`http.Client{Timeout: …}`, usually after an outage. A default that is
-wrong for production is not a default.
-
-#### Route patterns are Go-1.22 level
-
-Methods plus `{wildcards}`. Not a DSL, not a framework. `DESIGN.md`:
-routing is part of the shared currency a standard library provides —
-the same reasoning that made Go's `Handler` interface the ecosystem's
-common language.
+The moment a second error type appears — say `Result<_, Error>` from
+`fs` — you have three options, in increasing order of ceremony:
+declare `fn from(…) -> ReleaseError` on the target so `?` converts
+automatically (Chapter 20), `match` and translate as `check_tree` does,
+or make the whole program use the dynamic `Error` and lose the
+enumeration. The program above takes the second option deliberately,
+because translating `fs` failures into `ToolFailed` is what makes the
+messages read well.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why handlers return values
+#### Why a shell script is the right thing to attack
 
-Go's signature is `func(w http.ResponseWriter, r *http.Request)`. It
-returns nothing, and three problems follow.
+Because shell is the language people use when the alternative is too
+much ceremony, and "too much ceremony" is a design failure, not a user
+failure.
 
-**Errors have nowhere to go.** A handler that fails must write the
-response itself:
+Nobody writes a release script in bash because bash is good at it. They
+write it in bash because `#!/usr/bin/env bash` and a text editor is the
+entire setup, and the Go version needs a `go.mod`, a `main` package, a
+build step and an argument parser before it prints anything.
 
-```go
-if err != nil {
-    http.Error(w, err.Error(), 500)
-    return          // ← forget this and execution continues
-}
-```
+Glide's answer is not "use a real language". It is to make a real
+language have the same setup cost: one file, one command, no
+build step, no manifest, and a checker that runs anyway. That is what
+the interpreter tier is *for*, and it is why `DESIGN.md` insists the
+interpreter ships rather than retiring at self-hosting.
 
-That missing `return` is a real, recurring Go bug: `http.Error` writes
-a response and the function keeps going, writing a second one.
+#### Why the type system pays for itself in a 100-line script
 
-**Error handling cannot be centralised.** Every Go web framework
-reinvents an error-returning handler type and an adapter:
+The usual objection to types in scripts is that a script is too small
+to be worth it. The list of six defects is the answer: every one of
+them is a *type* question wearing a runtime disguise.
 
-```go
-type HandlerFunc func(w http.ResponseWriter, r *http.Request) error
+- Word-splitting is "is this one string or a list of strings?"
+- The trap bug is "does this cleanup run on success, failure, or both?"
+- The swallowed `shasum` failure is "did this produce a value or an
+  error?"
+- The `wc -l` bug is "what is the length of an empty list?"
 
-func wrap(h HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        if err := h(w, r); err != nil { … }
-    }
-}
-```
+A language where all four are unanswerable is a language where a
+hundred-line script has six bugs, and that is not a small-program
+discount — it is the reason the small program grew a `|| true`.
 
-Echo, Gin, Chi, and every in-house framework has this. It exists purely
-to work around the signature.
+#### Why not just write it in Go
 
-**Composition is awkward.** With a returned `Response`, middleware is
-`fn(Handler) -> Handler` — plain function composition. With a
-`ResponseWriter`, middleware must wrap the writer to inspect what a
-handler did, which is why Go middleware that needs the status code
-implements a `responseWriter` shim.
+You could, and it would be correct. What you would also have: a
+`go.mod`, a build step, `flag` or hand-rolled `os.Args` slicing,
+`exec.Command` with `CombinedOutput` and a manual `ExitError` type
+assertion to get the status, `errors.Is` for the failure modes because
+there are no sum types, and `defer` that runs on every path so the trap
+bug comes back unless you thread a `success` boolean.
 
-Returning `Result<Response, E>` fixes all three. `?` propagates,
-one mapping turns errors into statuses, and middleware composes.
+The Glide version is shorter than the Go one and about the same length
+as the bash one. That is the whole pitch of the scripting tier: bash's
+setup cost with Go's guarantees, and a bit more of the type system than
+Go has.
 
-#### Why cancellation is ambient here
+#### Why the errors are a sum type and not strings
 
-Chapter 26 made the general argument. HTTP is where it pays the most,
-because HTTP is where Go's `ctx` is most viral: every handler takes
-one, every function a handler calls takes one, every database call
-takes one, and Go duplicated its entire `database/sql` API
-(`Query`/`QueryContext`) to retrofit it.
+Because `explain` exists. Every failure the program can produce is
+rendered in one place, and adding a failure mode makes the compiler
+point at that place. In the bash script the messages are scattered
+across four `echo >&2` lines and there is no way to find them except
+`grep`, no way to know if one is missing, and nothing stopping the
+fifth one from being phrased differently.
 
-`scope(timeout: 5.s) { http.get(url)? }` cancels the request when the
-scope dies, and no signature changed. `DESIGN.md`: "the ctx-replacement
-covers HTTP for free."
-
-#### Why a router in the standard library
-
-Because **routing is shared currency**.
-
-Go's `net/http` made `Handler` the ecosystem's common interface, and
-that is why Go middleware from different authors composes. But Go's
-router was too weak until 1.22 (no method matching, no path
-parameters), so every project imported `gorilla/mux` or `chi` — and
-those routers have incompatible parameter-extraction APIs, which
-fragmented the middleware ecosystem after all.
-
-Shipping a Go-1.22-level router — methods plus wildcards — from day one
-means the shared currency includes routing. Not a DSL, not a
-framework.
-
-#### Why the response constructor set is closed (for now)
-
-`http.text`, `http.json`, `http.created`, `http.bad_request`,
-`http.not_found`. Five constructors.
-
-That is the dogfood rule (Chapter 30): the set grows when a program
-needs a member. A closed set also keeps the API from becoming a status
-code enumeration with a function per code, which is what happens when
-you start (`http.conflict()`, `http.teapot()`, …).
-
-#### Why green thread per request rather than async
-
-Chapter 25's argument, applied. A handler is ordinary blocking code
-that can call any function, use `?`, hold a database transaction across
-an await-shaped boundary that does not exist, and be tested by calling
-it.
-
-Node's and Python's async ecosystems both split their libraries in two
-over this. Java spent fifteen years on reactive HTTP and shipped
-virtual threads.
+There is a real cost, and Chapter 20 names it: a sum-type error is more
+to write than `Err("something broke")`. The rule of thumb is that a
+program with a *user* — even if the user is you, at 2am, reading the
+output of a failed CI job — wants its failures enumerated. A program
+with no user wants `Error`.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `net/http` — the model, and genuinely excellent: `Handler` as
-shared currency, green thread per request, a standard library server
-you can run in production. Its three weaknesses that Glide targets: the
-handler signature cannot return an error, the default client has no
-timeout, and `ctx` must be threaded manually.
+**bash / sh.** Universally installed, zero setup, and every value is a
+string. The three flags of `set -euo pipefail` exist because the
+defaults are wrong, and they are not enough: `set -e` does not fire
+inside command substitutions in conditions, `pipefail` reports the
+first failing stage and loses the rest, and `-u` gives you a line
+number instead of a usage message.
 
-**Rust.** `axum`, `actix-web`, `hyper` — async, so handlers are
-`async fn` and everything they call must be async-aware. Excellent
-performance and the function-colouring cost. Axum's handler return type
-(`impl IntoResponse`) is close in spirit to Glide's returned
-`Response`.
+**Python.** The usual escape from bash, and a good one: real data
+structures, `subprocess`, `pathlib`. What you keep is a runtime that
+must be installed and might be 3.9, a `shell=True` footgun, and errors
+that are exceptions — so the failure modes are still not in any
+signature.
 
-**Python.** Flask/Django (sync, WSGI) and FastAPI/Starlette (async,
-ASGI) — the two parallel ecosystems the async decision produced.
-FastAPI's typed request/response models via Pydantic are the closest
-thing to what `derive Json` plus typed handlers will give.
+**Go.** Correct, fast, and one static binary — with a build step
+between you and the answer, and no sum types, so failure modes are
+`errors.Is` against sentinel values.
 
-**Node.** Express with `(req, res, next)` — the same
-no-return-value problem as Go, plus `next()` for error propagation and
-a middleware chain that is a list rather than a composition.
-`async`/`await` on top means an unhandled promise rejection can hang a
-request silently.
+**Just / Make / Taskfile.** These do not replace the script; they
+*invoke* it. The logic still ends up in a shell fragment somewhere.
 
-**Java.** Servlets (`doGet(req, resp)` — the same shape as Go's) and
-Spring MVC, where a handler returns a value and an
-`@ExceptionHandler` maps errors to statuses. Spring got the returned-
-value design right decades ago, at the cost of the rest of Spring.
+**PowerShell.** The one mainstream shell with real objects, and it is
+genuinely better than bash at exactly this. Its problem is the reverse
+of Python's: excellent on Windows, an unusual choice everywhere else.
 
-**Elixir/Phoenix.** `Plug` — a function `conn -> conn`, so middleware
-composes cleanly. Different shape from Glide's, same insight: make the
-handler a function that returns something.
+**Glide.** One file, `glide run`, no build step, and a checker that
+runs whether you asked for it or not. The trade is that the standard
+library is small (Chapter 31) — no regex yet, no flag parser, no
+streaming — so a script that needs those is a script that waits.
 
 ---
 
 ### 5. Common Mistakes
 
-**Using a regular string for a route pattern.**
+**Translating bash line by line.** The bash script's structure is
+dictated by bash's limits: everything is flat because there are no
+return values worth having, and errors are `exit 1` because there is
+nowhere else to put them. A line-by-line translation inherits all of
+that. Write down the failure modes first — as a sum type — and the
+structure follows.
 
-```glide
-// Bad — {id} interpolates
-r.get("/notes/{id}", handler)
+**Reaching for `Error` because it is easier.** It is easier, and for a
+twenty-line script it is right. For this one it would have deleted
+`explain`, and with it the guarantee that every failure has exactly one
+rendering.
 
-// Good
-r.get(`/notes/{id}`, handler)
+**Forgetting that `?` needs a matching error type.** `fs.read_string`
+returns `Result<_, Error>`, not `Result<_, ReleaseError>`. Inside a
+function returning `ReleaseError` you must translate — with `match`, or
+by declaring `ReleaseError.from`. The checker says so:
+
+```
+cannot propagate Error: this function returns Result<String, ReleaseError>,
+and ReleaseError has no `from` that accepts it
 ```
 
-The single most common HTTP mistake in Glide, and it was discovered the
-hour the shim landed.
+**Using `os.exit` after opening something.** The staging directory is
+created inside `stage`, which returns an `Err` rather than exiting —
+that is what lets `errdefer` clean up. An `os.exit(1)` in there would
+skip it and leave the half-built directory behind, which is the bash
+behaviour being replaced.
 
-**Forgetting `mut` on the router.**
+**Assuming a non-zero exit is a failure.** `git status --porcelain`
+exits 0 with output when the tree is dirty. `grep` exits 1 when it
+finds nothing. `diff` exits 1 when files differ. If you write
+`?` on the `Result` and never look at `status()`, you have written the
+`set -e` bug in a new language.
 
-```glide
-// Bad
-let r = http.router()
-r.get(`/health`, h)        // registration requires a mut path
-
-// Good
-let mut r = http.router()
-r.get(`/health`, h)
-```
-
-**Letting a tail expression join the server forever.**
-
-```glide
-// Bad — normal scope exit joins the blocked server
-scope s {
-    _ = s.spawn(|| http.serve(addr, r))
-    do_something()
-}
-
-// Good — early exit cancels first
-scope s {
-    _ = s.spawn(|| http.serve(addr, r))
-    do_something()
-    return
-}
-```
-
-Chapter 27's sharpest edge, and it bites hardest here because
-`http.serve` blocks forever by design.
-
-**Returning `Err` for a client error.** Today, `Err(e)` maps to 500 —
-the one default mapping. A 404 or a 400 must be `Ok(http.not_found())`
-or `Ok(http.bad_request(msg))` until error middleware exists.
-
-```glide
-// Bad today — a missing note becomes a 500
-None => Err(.NotFound{ id: id })
-
-// Good today
-None => Ok(http.not_found())
-```
-
-**Expecting a `ctx` parameter.** There is none. Timeouts come from an
-enclosing scope.
-
-**Blocking the server's task with setup.** `http.serve` blocks, so
-anything after it in the same task never runs. Spawn it, or make it the
-last statement.
-
-**Assuming the client has no timeout.** It has 30 seconds. That is
-usually right and occasionally wrong — for a long-poll endpoint, wrap
-it in a scope with the deadline you want.
-
-**Reaching for middleware.** It is ○. Today, compose by wrapping the
-closure at registration:
-
-```glide
-r.get(`/notes/{id}`, |req| with_logging(|r| get_note(db, r), req))
-```
-
-Workable, and clearly a placeholder for `fn(Handler) -> Handler`.
+**Leaving out the timeout.** It is one line, it covers every child in
+the block, and it is the difference between a CI job that fails in 30
+seconds and one that is still running in the morning.
 
 ---
 
 ### 6. Performance Considerations
 
-**Green thread per request** costs a few kilobytes of stack per
-in-flight request. At tens of thousands of concurrent connections that
-is tens to hundreds of megabytes — fine on a server, and the workload
-`DESIGN.md` concedes to async is a million connections on small
-hardware.
+**A script's runtime is dominated by the processes it starts.** This
+one runs `git` three times and `shasum` once. The interpreter's
+per-instruction cost — two orders of magnitude slower than Go
+(Chapter 37) — is invisible next to four `fork`/`exec` pairs.
 
-**A handler returning a `Response`** is a value return, not a write to
-a shared writer. That means the framework can inspect, wrap, and
-transform it — which is what makes middleware cheap — at the cost of
-holding the body in memory until it is written.
+That is the general shape: **for a script, the interpreter's speed does
+not matter, and the things it makes easy to avoid do.** Every external
+process you replace with a string method is a four-order-of-magnitude
+win. `status.lines().len()` versus `echo "$STATUS" | wc -l` is not
+merely more correct, it is roughly ten thousand times faster, and the
+bash version cannot do better because `wc` is a program.
 
-For large bodies that matters, and the designed answer is a
-**streaming body**: a reader or a generator, so the response is
-produced lazily (Chapter 23's laziness paying off in a third place).
+**`process.run` buffers both streams in full.** Fine for `git
+rev-parse`; wrong for `git log` on a large repository. Streaming is ○.
 
-**`http.get` has a 30-second timeout** and connection pooling.
-Cancellation adds a context per call.
-
-**In the interpreter**, everything above sits on Go's `net/http`, so
-the network path is production-grade and the *handler* is
-tree-walked — which is where the time goes.
-
-**`http.json(v)` walks the value structurally** (Chapter 31). With
-`derive Json` (○) it becomes a generated encoder.
+**Startup is a parse, a check, and a run.** No build step, no module
+resolution, no init graph.
 
 ---
 
 ### 7. Best Practices
 
-**Let the scope own the server's lifetime.**
+**Write the failure modes first.** Before any logic, list what can go
+wrong as a sum type. It takes two minutes and it decides the structure
+of everything after it.
 
-```glide
-fn run() -> Result<(), Error> {
-    let db = sql.open(dsn)?
-    defer { _ = db.close() }
+**One function per external program, returning a Result.** `tool` and
+`git` in this program. The two failure kinds — could not run, ran and
+said no — get handled once, at the boundary, rather than at every call
+site.
 
-    let mut r = http.router()
-    r.get(`/notes/{id}`, |req| get_note(db, req))
-    let r = r                                     // seal after registration
+**Interpret a failure only where it has a second meaning.**
+`rev-parse` failing means "not a repository", so translate it. `status`
+failing means nothing more than itself, so propagate it. Translating
+everything produces error messages that lie.
 
-    scope s {
-        _ = s.spawn(|| sweeper(db))
-        http.serve("127.0.0.1:8080", r)
-    }
-}
-```
+**Put a `scope(timeout:)` around anything that talks to the outside.**
 
-Everything dies together, in the right order, with no shutdown code.
-Note the `let r = r` seal (Chapter 4) — registration is over.
+**Use `errdefer`, not `defer`, for cleanup that should not happen on
+success.** This is the single most common bash bug the language deletes
+outright.
 
-**Keep handlers as named functions; use closures only to inject.**
+**Keep `main` thin.** Argument shape, one call, one `match` on the
+result. Everything else is a function that returns a value.
 
-```glide
-// Good
-r.get(`/notes/{id}`, |req| get_note(db, req))
+**Do not add a `--verbose` flag.** Not until there is a `flag` module.
+Positional arguments handled by a list pattern are complete and
+checked; a hand-rolled flag loop is neither.
 
-fn get_note(db: Db, req: Request) -> Result<Response, ApiError> { … }
-```
-
-The handler is now an ordinary function you can call from a test with a
-constructed `Request` — no server, no port, no HTTP.
-
-**Validate at the boundary and convert to types immediately.**
-
-```glide
-fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Some(raw) = req.path_param("id") else {
-        return Ok(http.bad_request("missing id"))
-    }
-    let Some(n) = raw.parse_int() else {
-        return Ok(http.bad_request("bad id"))
-    }
-    let id = NoteId(n)              // typed from here on
-    …
-}
-```
-
-Two guard clauses, then everything downstream has a `NoteId`
-(Chapter 15).
-
-**Distinguish client errors from server errors deliberately.** Client
-errors (400, 404) are `Ok(…)` responses; server errors are `Err`. That
-mapping is temporary but the *distinction* is permanent, and getting it
-right now means the middleware migration is mechanical.
-
-**Set a scope timeout per request boundary** rather than per call:
-
-```glide
-fn handle(req: Request) -> Result<Response, ApiError> {
-    scope(timeout: 2.s) {
-        let user = load_user(req)?
-        let prefs = load_prefs(user)?
-        Ok(http.json(render(user, prefs)))
-    }
-}
-```
-
-**Do not reach for a framework.** The standard library is the shared
-currency, and the whole reason it ships a router is so that the
-ecosystem does not fragment into incompatible middleware conventions.
+**Exit 2 for usage, 1 for failure, 0 for success.** It is the Unix
+convention and it is what lets a caller tell a broken invocation from a
+broken world.
 
 ---
 
 ### 8. Examples
 
-**Hello, server:**
+#### The smallest useful case: three lines of bash
 
-```glide
-import http
+Not everything deserves the treatment above. This is the other end of
+the range:
+
+```bash
+#!/usr/bin/env bash
+set -e
+for f in *.md; do
+    echo "$f: $(wc -l < "$f") lines"
+done
+```
+
+```glide-run
+import fs
+import os
 
 fn main() -> Result<(), Error> {
-    let mut r = http.router()
-    r.get(`/health`, |req| http.text("ok"))
-    r.get(`/hello/{name}`, |req| {
-        let name = req.path_param("name") ?? "world"
-        http.text("hello, {name}")
-    })
-
-    scope s {
-        http.serve("127.0.0.1:8080", r)
+    for name in fs.list_dir(os.cwd()?)? {
+        if name.ends_with(".md") == false { continue }
+        let body = fs.read_string(name)?
+        println("{name}: {body.lines().len()} lines")
     }
+    Ok(())
 }
 ```
 
-Two routes, a path parameter with a default, and a server whose
-lifetime is the scope.
+Nine lines against five, and the argument for the nine is: it does not
+start a process per file, it does not break on a filename with a space,
+`*.md` matching nothing does not iterate over the literal string
+`*.md`, and a read failure says which file. Use `Error` here — there is
+no `explain` function to earn a sum type.
 
-**The self-driving service — server and client in one program:**
+#### Adding a failure mode, and letting the compiler find the work
+
+Suppose the release script grows a rule: refuse to stage a version tag
+that already exists.
 
 ```glide
-import http
-import sql
-import time
+type ReleaseError =
+    NotSemver{ given: String }
+    | NotARepo{ dir: String }
+    | Dirty{ files: Int }
+    | TagExists{ tag: String }                         // new
+    | ToolFailed{ tool: String, status: Int, why: String }
+```
 
-fn get_note(db: Db, req: Request) -> Result<Response, Error> {
-    let Some(raw) = req.path_param("id") else {
-        return Ok(http.bad_request("missing id"))
+```
+release.gld:101:5: match is not exhaustive: TagExists not handled
+ 101 |     match e {
+     |     ^^^^^
+```
+
+One diagnostic, pointing at `explain`, naming the variant. Add the arm
+and the check:
+
+```glide
+        TagExists{ tag }   => "tag {tag} already exists"
+```
+
+```glide
+fn check_tag(dir: String, version: String) -> Result<(), ReleaseError> {
+    let tags = git(dir, ["tag", "--list", version])?
+    if tags.trim() != "" {
+        return Err(.TagExists{ tag: version })
     }
-    let Some(id) = raw.parse_int() else {
-        return Ok(http.bad_request("bad id"))
-    }
-    let found = db.query_one(
-        "select id, title from notes where id = :id",
-        ["id": id],
-    )?
-    match found {
-        Some(row) => Ok(http.json(row))
-        None      => Ok(http.not_found())
-    }
+    Ok(())
 }
+```
 
-fn run() -> Result<String, Error> {
-    let db = sql.open("sqlite::memory:")?
-    defer { _ = db.close() }
-    _ = db.exec(`create table notes (id integer primary key, title text)`)?
-    _ = db.exec("insert into notes (title) values (:t)", ["t": "hello"])?
+The bash equivalent of this change is: add an `if`, add an `echo`, and
+remember on your own that there is a place where failure messages are
+supposed to be consistent.
 
-    let mut r = http.router()
-    r.get(`/notes/{id}`, |req| get_note(db, req))
+#### The pattern this chapter is really about
 
-    scope s {
-        _ = s.spawn(|| http.serve("127.0.0.1:17651", r))
-        time.sleep(80.ms)
-
-        let mut report = []
-        for id in ["1", "999", "abc"] {
-            let resp = http.get("http://127.0.0.1:17651/notes/" + id)?
-            report.push("{id:4} -> {resp.status()} {resp.body().trim()}")
-        }
-        return Ok(report.join("\n"))
-    }
-}
-
+```glide
+// Every script that talks to the world has this shape.
 fn main() {
-    match run() {
-        Ok(s)  => println(s)
-        Err(e) => eprintln("failed: {e}")
-    }
-}
-```
+    let args = os.args()
+    let cfg = match args { … }               // 1. arguments, exhaustively
 
-```
-   1 -> 200 {"id":1,"title":"hello"}
- 999 -> 404 not found
- abc -> 400 bad id
-```
-
-Three requests, three status codes, one program. Worth counting what is
-absent: no `context.Context`, no `WaitGroup`, no shutdown handler, no
-signal trapping, no `errgroup`, and no `defer srv.Shutdown(ctx)`. The
-`return` cancels the server, the scope joins it, and the `defer` closes
-the database.
-
-**Side by side with Go, on the error path:**
-
-```go
-// Go — the missing `return` is a real, recurring bug
-func GetNote(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        id, err := strconv.Atoi(r.PathValue("id"))
-        if err != nil {
-            http.Error(w, "bad id", 400)
-            return                              // ← forget this…
+    match run(cfg) {                         // 2. one call
+        Ok(v)  => report(v)                  // 3. success on stdout
+        Err(e) => {                          // 4. failure on stderr, exit 1
+            eprintln("prog: {explain(e)}")
+            os.exit(1)
         }
-        note, err := queryNote(r.Context(), db, id)
-        if err != nil {
-            http.Error(w, err.Error(), 500)
-            return                              // ← …or this
-        }
-        if note == nil {
-            http.NotFound(w, r)
-            return                              // ← …or this
-        }
-        json.NewEncoder(w).Encode(note)
     }
 }
 ```
 
-Three `return`s that must not be forgotten, and forgetting one produces
-a superimposed double response rather than a compile error.
-
-```glide
-// Glide — every exit is a value, so there is nothing to forget
-fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Some(raw) = req.path_param("id") else {
-        return Ok(http.bad_request("missing id"))
-    }
-    let Some(id) = raw.parse_int() else {
-        return Ok(http.bad_request("bad id"))
-    }
-    let found = db.query_one(sql, ["id": id])?
-    match found {
-        Some(row) => Ok(http.json(row))
-        None      => Ok(http.not_found())
-    }
-}
-```
-
-The function must produce a `Result<Response, ApiError>` on every path,
-and the compiler checks that. A forgotten exit is a type error rather
-than a runtime double-write.
-
-**Bad versus good: the shutdown ceremony**
-
-```glide
-// Bad — Go habits transplanted
-fn main() -> Result<(), Error> {
-    let (stop_tx, stop_rx) = channel()
-    let mut shutting_down = false
-
-    scope s {
-        _ = s.spawn(|| {
-            for v in stop_rx { shutting_down = true }
-        })
-        _ = s.spawn(|| sweeper(db, stop_rx))     // takes a stop channel
-        http.serve(addr, r)
-        stop_tx.close()
-        return
-    }
-}
-```
-
-A stop channel, a flag, and a sweeper that has to poll it. Every piece
-of this is reconstructing what the scope already does — and the
-`mut shutting_down` captured across a task boundary is the exact
-pattern the ○ compile rule will reject.
-
-```glide
-// Good
-fn main() -> Result<(), Error> {
-    scope s {
-        _ = s.spawn(|| sweeper(db))
-        http.serve(addr, r)
-    }
-}
-```
-
-`sweeper` has no stop channel, no flag, and no `ctx`. Its
-`time.sleep` is a cancellation point, so it stops when the scope dies.
+Four parts. The work is in `run`, which returns a value; `main` decides
+what to *do* with a failure, and it is the only place that decides.
+Bash cannot express the split because there is no value to return, so
+every function ends up deciding for itself whether to print, exit, or
+carry on — which is why a bash script's error handling is inconsistent
+by construction rather than by neglect.
 
 ---
 
@@ -798,55 +673,54 @@ fn main() -> Result<(), Error> {
 
 **Summary**
 
-- **Handlers return values**: `fn(Request) -> Result<Response, E>`.
-  This single change fixes Go's three handler problems — errors have
-  nowhere to go, error handling cannot be centralised, and composition
-  requires wrapping the `ResponseWriter`.
-- The forgotten-`return`-after-`http.Error` bug class becomes a **type
-  error**: every path must produce a `Result<Response, E>`.
-- **`Err(e)` maps to 500** — the one default mapping until middleware
-  is designed. Client errors are `Ok(http.bad_request(…))` and
-  `Ok(http.not_found())` today.
-- **Route patterns want raw strings**: `` r.get(`/notes/{id}`, h) ``.
-  Registration requires a `mut` router.
-- **Dependency injection is a one-line closure**:
-  `r.get(pat, |req| get_note(db, req))`. No container, no globals.
-- **Cancellation is ambient.** `http.get` and `http.serve` are
-  cancellation points, so `scope(timeout:)` bounds a request and the
-  scope's death gracefully shuts the server down. **There is no
-  shutdown code** — Go's ten-line signal-trap-and-`Shutdown(ctx)`
-  ritual is deleted.
-- **The client has a 30-second timeout by default.** Go's has none,
-  which is an infinite hang out of the box.
-- **Green thread per request**, so handlers are ordinary blocking code
-  with no function colouring.
-- **A router in the standard library** because routing is shared
-  currency — Go's weak pre-1.22 router fragmented the middleware
-  ecosystem it had otherwise unified.
-- Response constructors are a **closed set of five**, growing under the
-  dogfood rule.
-- ○: middleware as `fn(Handler) -> Handler`, a configurable
-  error-to-status mapping, streaming response bodies (a reader or
-  generator), TLS, retries, HTTP/2.
+- **A shell script's defects are type errors in disguise.** Word
+  splitting, cleanup-on-every-path, swallowed tool failures, and
+  off-by-one line counts are all questions bash cannot ask.
+- **Write the failure modes first**, as a sum type. The structure of
+  the program follows from that list, and `match` keeps the list
+  honest.
+- **`Err` means "could not run"; `status()` means "what it said".**
+  Conflating them is the `set -e` bug, and it is available in every
+  language.
+- **`errdefer` is `trap … EXIT` done correctly** — the error path only,
+  no flag variable, no `-E`.
+- **`scope(timeout:)` kills children rather than abandoning them.** One
+  line, and it is the difference between a CI job that fails and one
+  that hangs.
+- **Interpret a failure only where it has a second meaning**;
+  propagate it otherwise.
+- **The interpreter's speed does not matter for scripts**, and the
+  processes it lets you avoid do — a string method beats a pipeline by
+  four orders of magnitude and cannot be defeated by a filename.
+- **Not every script deserves a sum type.** A program with a user wants
+  its failures enumerated; a twenty-line one wants `Error`.
+- The setup cost is the point: one file, `glide run`, no build step,
+  and the checker runs anyway.
 
 **Exercises**
 
-1. **Count the shutdown code.** In a Go service, find every line
-   involved in graceful shutdown: signal handling, the `Shutdown`
-   call, its timeout context, the `errgroup`, and every `ctx.Done()`
-   arm in a background loop. Then write the Glide equivalent and count
-   again. The difference is one scope.
+1. **Find your own trap bug.** In any shell script you own with a
+   `trap … EXIT`, work out whether the cleanup runs on success. If it
+   does and it should not, you have found defect 3 in the wild. Now
+   write the fix in bash, and count the lines.
 
-2. **Find the missing return.** In a Go or Express codebase, search for
-   `http.Error(`, `res.status(`, or equivalent, and check that every
-   one is immediately followed by a `return` or `next()`. In a codebase
-   of any size you will find at least one that is not, and it will
-   either be a latent double-write or a case where the author knew
-   something the code does not say.
+2. **Port the smallest script you have.** Ten lines or fewer. Use
+   `Error`, not a sum type. Time it. The interesting number is not how
+   long the port took but how many behaviours you had to *decide* that
+   bash had been deciding for you.
 
-3. **Design the error middleware.** Write the `fn(Handler) -> Handler`
-   that maps an `ApiError` sum type to statuses — `NotFound` → 404,
-   `BadInput` → 400, `Db` → 500 — and note that the `match` is
-   exhaustive, so adding a variant breaks the middleware at compile
-   time and forces you to choose a status. Then compare with Go's
-   `errors.Is` ladder, which does not.
+3. **Grow it until `Error` hurts.** Keep adding failure modes to the
+   ported script until you want to distinguish two of them at a call
+   site. That moment — where you reach for `e.find(…)` or wish you
+   could `match` — is exactly the moment to convert to a sum type, and
+   it is worth feeling once so you can recognise it later.
+
+4. **Make the release script hang.** Add a `git` invocation that blocks
+   (`git -C … fetch` from an unreachable host works, so does a credential
+   prompt). Run it with the `scope(timeout:)` and without. Check with
+   `ps` whether the child survives the program in each case.
+
+5. **Argue for bash.** Write down the strongest case for leaving a
+   script in bash. There is one, and it is not "it works" — it is about
+   who else has to run it, and what is installed where. Then decide
+   which of your own scripts it actually applies to.

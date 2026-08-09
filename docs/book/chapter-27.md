@@ -1,796 +1,800 @@
-# Chapter 27: Channels
+# Chapter 27: Cancellation, Timeouts, and Deadlines
 
-A **channel** is a typed pipe between tasks. One task sends, another
-receives, and the channel handles the synchronisation.
+Go escaped `async`/`await`'s viral function colouring — and then
+cancellation forced `ctx context.Context` to be the first parameter of
+every serious function. `DESIGN.md` calls that **the same disease,
+manual and unchecked**.
 
-Glide keeps Go's channels — `DESIGN.md` calls them and `select` "Go's
-crown jewel" — and fixes the sharp edges. All three of Go's channel
-panics are symptoms of one root cause, **"anyone can close anything"**,
-and splitting the channel into two half-types dispatches them.
+Glide's answer: cancellation belongs to the **scope**. It is ambient
+within a scope's subtree, it is delivered at blocking operations, and
+no signature mentions it.
 
-Everything here is ✓, with one recorded interpreter wart around
-`Option` unboxing.
+```glide
+scope(timeout: 5.s) {
+    http.get(url)?
+}
+```
+
+That is the whole surface. This chapter explains the machinery behind
+it, including a mechanism that is genuinely unusual: cancellation is a
+**third unwind**, neither error nor panic, and **user code cannot
+catch it**.
+
+Everything here is ✓.
 
 ---
 
 ### 1. Basic Usage
 
-#### Creating a channel
+#### Duration and Instant
+
+Two distinct types, never conflated:
 
 ```glide
-let (tx, rx) = channel()              // unbuffered rendezvous
-let (tx, rx) = channel(cap: 64)       // buffered
+let d = 1.s + 500.ms
+println("{d}")            // 1.5s
+println(d > 1.s)          // true
+
+let t = time.now()        // an Instant
+let elapsed = time.now() - t     // Instant - Instant -> Duration
 ```
 
-`channel()` returns a **tuple of two halves**: a `Sender` and a
-`Receiver`. There is no whole-channel value — the tuple construction
-*is* the halves doctrine, so who-sends and who-receives is structural.
-
-The default is **unbuffered**: a send blocks until a receiver takes the
-value, and a receive blocks until a sender provides one. That gives
-backpressure by construction.
-
-**There are no unbounded channels.** If you want one, build it
-visibly.
-
-#### Sending and receiving
+Constructors are suffix properties on numbers: `.ns`, `.us`, `.ms`,
+`.s`, `.mins`, `.h`. They work on `Int` and `Float`:
 
 ```glide
-tx.send(v)              // blocks per capacity; panics if closed
-tx.close()              // idempotent; only the sender half has it
-rx.recv()               // -> Option<T>; None means closed and drained
+250.ms
+0.5.s
+30.mins
+2.h
 ```
 
-```glide
+There is no `.days`, deliberately — a "day" is calendar arithmetic, DST
+makes 23-hour days, and calendars belong to the future `time` module.
+And it is `.mins` rather than `.min` because `a.min(b)` is the obvious
+future math method on `Int`.
+
+Arithmetic is minimal and total:
+
+| Operation | Result |
+|---|---|
+| `Duration ± Duration` | `Duration` |
+| `Duration * Int` (either order) | `Duration` |
+| `Duration / Int` | `Duration` |
+| `Instant - Instant` | `Duration` |
+| `Instant ± Duration` | `Instant` |
+| comparisons on both | `Bool` |
+
+There is no `Instant + Instant` (meaningless — the operator simply does
+not exist) and no `Duration / Duration` (Go's float-division wart; if
+you want a ratio, divide nanosecond counts explicitly).
+
+#### `scope(timeout:)`
+
+```glide-run
 import time
 
+fn timed() -> String {
+    let r = scope(timeout: 25.ms) s {
+        _ = s.spawn(|| time.sleep(10.s))
+        time.sleep(10.s)
+        "finished"
+    }
+    match r {
+        Ok(m)        => m
+        Err(Timeout) => "timed out"
+        Err(_)       => "other"
+    }
+}
+
 fn main() {
-    let (tx, rx) = channel()
-    scope s {
-        _ = s.spawn(|| {
-            for i in 1..=3 { tx.send(i) }
-            tx.close()
-        })
-        for v in rx {
-            print("{v} ")
-        }
-        println("")
+    println(timed())
+}
+```
+
+```
+timed out
+```
+
+`scope(timeout: d)` evaluates to `Result<T, Timeout>`: `Ok(v)` when the
+body completes, `Err(Timeout)` when the clock wins. Both the body *and*
+the spawned child were cancelled and joined.
+
+`scope(deadline: t)` takes an `Instant` instead. Go's `context` has
+both because real code wants both.
+
+The grammar is `scope [(config)] [handle] { body }` — config first,
+then handle. That is Trio's shape (`with move_on_after(5) as scope:`),
+and the config parens reuse the named-argument machinery rather than
+introducing a new syntax class.
+
+#### Body errors propagate *through* the timeout
+
+Scopes are control-flow transparent:
+
+```glide
+fn load() -> Result<Config, Error> {
+    scope(timeout: 5.s) {
+        let text = fs.read_string(path)?      // this Err propagates out
+        parse(text)
     }
 }
 ```
 
-```
-1 2 3
-```
+The `?` inside the body exits the *enclosing function*, not just the
+scope. So body errors never nest inside the timeout's `Result` — you
+never get `Result<Result<T, E>, Timeout>`.
 
-#### `for v in rx`
+The `Timeout` itself converts at the outer `?` via `E.from(Timeout)` —
+the `?`-conversion machinery from Chapter 20 is what makes timeouts
+non-viral.
 
-A receiver satisfies the iteration protocol: `for v in rx` consumes
-until the channel is closed and drained. That works because `recv()`
-returns `Option<T>` with `None` for end-of-stream — the same shape as
-the generator protocol (Chapter 24).
-
-Note the scope. Sending and receiving on an unbuffered channel from the
-same task would deadlock; the send happens in a spawned child.
-
-#### Buffered channels
+#### `Timeout` matches as a bare pattern
 
 ```glide
-fn main() {
-    let (btx, brx) = channel(cap: 3)
-    btx.send(1)
-    btx.send(2)
-    btx.close()
-    println("{brx.recv():?}")     // 1
-    println("{brx.recv():?}")     // 2
-    println("{brx.recv():?}")     // None
+match r {
+    Ok(v)        => …
+    Err(Timeout) => …
 }
 ```
 
-With capacity, sends do not block until the buffer is full — so a
-single task can send and receive without a second task, up to the
-capacity.
-
-#### Both halves clone; semantics are mpmc
-
-Multiple producers and multiple consumers are the supported case:
+#### Reading the effective deadline
 
 ```glide
-scope s {
-    _ = s.spawn(|| worker(jobs_rx, out_tx))     // several workers…
-    _ = s.spawn(|| worker(jobs_rx, out_tx))     // …share one receiver
+scope(timeout: 5.s) s {
+    let d = s.deadline()      // Option<Instant>
     …
 }
 ```
 
-Worker pools sharing one receiver are bread-and-butter, which is why
-mpmc is the default rather than Rust's std mpsc.
+`s.deadline()` returns the nearest enclosing timeout or deadline,
+inherited from outer scopes. This is the one place cancellation state
+is readable, and it is through an **explicit handle** rather than
+hidden.
 
-#### Only the sender closes
+#### Cancellation points
 
-`rx` has no `close` method. The receiver-closes bug is
-**unrepresentable**.
+Cancellation is delivered **only at blocking operations**:
 
-`tx.close()` is **idempotent** — closing twice is fine.
+- `t.join()`
+- `time.sleep(d)`
+- channel `send` and `recv`, and a blocking `select`
+- IO: `http.serve`, `http.get`, `http.post`, `db.exec`, `db.query`
+- generator handoffs
 
-#### Sending on a closed channel panics
+A pure compute loop is **uncancellable**. That is a recorded cost,
+uniform with Trio, Kotlin, and Swift.
 
-That is a coordination bug between senders, not an expected outcome
-(Chapter 20).
+#### `defer` and `errdefer` both run
 
-#### A worker pool
+A cancelled task unwinds, running its `defer` blocks (it must release
+its locks) **and** its `errdefer` blocks (the operation did not
+complete, so compensations apply). Chapter 22's table:
 
-```glide
-import time
+| Exit path | `defer` | `errdefer` |
+|---|---|---|
+| Cancellation | ✓ | ✓ |
 
-fn slow_square(n: Int) -> Int {
-    time.sleep(1.ms)
-    n * n
-}
+#### You cannot catch it
 
-fn pool_sum(upto: Int) -> Int {
-    let (jobs_tx, jobs_rx) = channel()
-    let (out_tx, out_rx) = channel(cap: 64)
+There is no `Cancelled` error type, no way to observe cancellation, and
+no way to suppress it. This is the closure property, and section 3
+explains why it matters.
 
-    scope s {
-        _ = s.spawn(|| {
-            for j in jobs_rx {
-                out_tx.send(slow_square(j))
-            }
-        })
-        _ = s.spawn(|| {
-            for j in jobs_rx {
-                out_tx.send(slow_square(j))
-            }
-        })
+#### Only scopes cancel
 
-        for i in 1..=upto {
-            jobs_tx.send(i)
-        }
-        jobs_tx.close()
+There is no `t.cancel()`. Cancellation comes from the enclosing scope
+on exactly three events:
 
-        let mut total = 0
-        for _ in 1..=upto {
-            total += out_rx.recv() ?? 0
-        }
-        total
-    }
-}
-
-fn main() {
-    println(pool_sum(10))     // 385
-}
-```
-
-Two workers share `jobs_rx`. The scope guarantees both are joined
-before `pool_sum` returns, so nothing leaks. Note the results channel
-is buffered — with an unbuffered one, a worker would block on `send`
-while the main task is still feeding jobs.
-
-#### Channel operations are cancellation points
-
-`send`, `recv`, and a blocking `select` all deliver cancellation
-(Chapter 26). A task blocked on a channel inside a dying scope unwinds.
+1. Early exit from the scope body (a `?`, `return`, or `break`).
+2. A sibling's panic.
+3. A timeout or deadline expiring.
 
 ---
 
 ### 2. Under the Hood
 
-#### The halves are the design
+#### The third unwind
 
-`channel()` returns `(Sender<T>, Receiver<T>)` — two distinct types.
-That single decision handles Go's three channel panics:
+Glide has three ways a computation stops early, and cancellation is the
+odd one:
 
-| Go panic | Glide |
-|---|---|
-| Receiver closes the channel | **Unrepresentable** — `rx` has no `close` |
-| Double close | **Gone** — `tx.close()` is idempotent |
-| Send on a closed channel | **Still a panic** — a sender coordination bug |
-| Nil channel blocks forever | **Free** — there is no nil |
+| Unwind | Cause | Catchable? | Is it a value? |
+|---|---|---|---|
+| Error | `?` propagating an `Err` | Yes | Yes |
+| Panic | A bug | No | No |
+| **Cancellation** | The scope dying | **No** | **No** |
 
-The tuple destructuring at the creation site means the reader can see
-which task got which half.
+`glide/DESIGN-DECISIONS.md` records the implementation choice and its
+reasoning:
 
-#### Why close is idempotent
+> **Cancellation is a Go panic (`cancelUnwind`), not a `sig`.** Panics
+> already unwind through every construct uncatchably, and
+> `evalBlockDeferred`'s panic path already runs `defer` AND `errdefer`
+> on the way out — which is exactly the ratified cancellation
+> behavior. A `sig` variant would have needed a "cannot be consumed by
+> match/loops/user code" rule bolted onto every consumer.
 
-Go panics on a double close, and Go users hand-roll `sync.Once` to
-avoid it.
+Only the scope machinery (and the task and generator wrappers) recovers
+it.
 
-`DESIGN.md`'s reasoning: **there is no deterministic drop in a GC'd
-language**, so close must be safe from a `defer` racing another. Making
-it idempotent removes the whole category.
+That is a nice piece of design economy: the cleanup semantics
+cancellation needs were already implemented for panics, so the
+mechanism came for free.
 
-The accepted cost: idempotent close hides sloppy double-close where Go
-would have panicked.
+#### How a blocking operation becomes a cancellation point
 
-#### Why send-on-closed is still a panic
+Every host-level blocking call obtains a context from `hostCtx()`,
+which is wired to the current task's cancellation channel and to the
+nearest enclosing deadline. When the scope cancels, the context is
+cancelled, the blocking operation returns, and the interpreter raises
+`cancelUnwind`.
 
-Three reasons.
+The interpreter's single lock is released while blocked — which is what
+makes the interleaving happen exactly at cancellation points, as
+Chapter 26 described.
 
-It is a **coordination bug between senders** — someone closed while
-someone else was still sending. A `Result`-returning `send` would tax
-every correct program with a check, to launder a bug into a value.
+#### `Timeout` is a synthetic variant
 
-**Shutdown flows down the scope tree via cancellation, not up via send
-failures.** In Rust, `send` returns `Err` when the receiver is gone,
-because that is how a producer learns to stop. Here the producer learns
-by being cancelled, so the error return has no customer.
+An interesting corner. A timed-out scope's `Err` payload is a variant
+value with type and name `Timeout`, synthesised by the interpreter — so
+`Err(Timeout)` matches the bare pattern `Timeout`, renders as
+`Timeout`, and converts through a user's `fn from(t: Timeout)`, all
+**without any global type declaration the program did not write**.
 
-Full static prevention would need **affine senders** — ownership
-machinery Glide sacrificed. Recorded cost.
+The checker era makes `Timeout` a real stdlib type, and nothing about
+programs changes.
 
-#### Ownership transfer on send
+#### Duration and Instant are host types
 
-Sending transfers ownership: the sent value is dead to the sender. That
-kills the both-sides-mutate race at the root.
+The interpreter wraps Go's `time.Duration` and `time.Time`, which means
+the dual wall/monotonic semantics come free: elapsed-time arithmetic
+automatically uses the monotonic reading, so measuring a timeout across
+an NTP step does not produce a negative duration.
 
-**Ratified but dormant in M2** — the checker enforces it; the
-tree-walker will not half-enforce it. So today you *can* keep using a
-value after sending it, and you should not.
+`==` on `Instant` compares as Go's `Equal` (wall + monotonic aware),
+not as a struct comparison. `Duration` renders as Go does — `1.5s`,
+`2m30s`.
 
-#### The `Option` unboxing wart
+#### The deferred sub-question
 
-`recv()` returns `Option<T>`, with `None` meaning closed-and-drained.
-Because the interpreter unboxes `Option` (Chapter 14), a **sent `None`
-reads as end-of-stream**.
-
-This is recorded in `stdlib.md` as an M2 wart. Until the checker boxes
-`Option`, do not send `Option` values through a channel.
-
-#### Implementation
-
-The interpreter's channels are Go channels, and `select` rides
-`reflect.Select` (Chapter 28). Blocking operations release the
-interpreter lock with the task's cancellation channel as an extra case,
-which is how a blocked channel operation becomes a cancellation point.
+`DESIGN.md` leaves one thing open: what happens when a `defer` block
+performs a blocking operation *during* cancellation? Leaning toward
+Trio's answer — cleanup gets a brief grace period, then blocking
+operations fail loudly — and undecided.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why channels at all
+#### Why `context.Context` is function colouring by hand
 
-Go's slogan is "share memory by communicating", and the underlying
-claim is that passing ownership of a value through a channel removes
-the need for a lock around it. A task that receives a value is its sole
-owner; no other task can be looking at it.
+This is the central argument, and it is worth spelling out.
 
-Glide keeps the model and makes the ownership part real (○): sending
-transfers ownership, enforced by the checker. In Go it is a convention.
+Go avoided `async`/`await` and therefore avoided a viral type-system
+property. Then cancellation had to come from somewhere, and Go's answer
+was a value threaded through every call:
 
-Channels are not the *only* answer. `DESIGN.md` also specifies
-`Mutex<T>` that **wraps the data it guards** (○) — Rust's best
-non-borrow-checker idea, where unguarded access simply does not
-compile, unlike Go's `sync.Mutex` sitting beside the data hoping
-everyone remembers.
+```go
+func GetUser(ctx context.Context, id int) (*User, error)
+func loadPrefs(ctx context.Context, u *User) (*Prefs, error)
+func query(ctx context.Context, q string) (*Rows, error)
+```
 
-#### Why unbuffered by default
+`DESIGN.md` names it: **the same disease, manual and unchecked.**
 
-Backpressure by construction.
+- It is **viral**: any function that might call a cancellable operation
+  needs a `ctx`, so `ctx` reaches everywhere.
+- It is **unchecked**: nothing stops you passing
+  `context.Background()`, or forgetting to check `ctx.Done()`, or
+  storing the ctx in a struct (which the documentation forbids and
+  people do anyway).
+- It is **two features in one**: cancellation *and* request-scoped
+  values, and `ctx.Value` is an untyped stringly grab bag where auth,
+  transactions, and loggers travel invisibly.
 
-An unbuffered send blocks until someone receives, so a fast producer is
-automatically throttled by a slow consumer. Add capacity when you have
-measured that you want decoupling, and the number you write is a
-statement about how much lag you will tolerate.
+The Glide answer takes the parameter away entirely: cancellation is a
+property of the *scope you are running in*, and blocking operations
+consult it. No signature changes.
 
-#### Why no unbounded channels
+#### Why cancellation is uncatchable
 
-Rust's standard library made unbounded the default for `mpsc`, and it
-is the classic slow-consumer memory leak: the producer runs ahead, the
-queue grows, and the process dies of memory exhaustion a long way from
-the cause.
+Trio and Kotlin model cancellation as an exception that **convention
+forbids swallowing**. `DESIGN.md`: making it uncatchable turns the
+convention into a guarantee.
 
-`DESIGN.md`: want unbounded, build it visibly. That is the pricing
-pillar — the dangerous thing gets a longer name.
+The failure mode with a catchable cancellation is specific and common:
+a `catch (Exception e)` or `except:` somewhere in the stack swallows
+the cancellation, the task keeps running, and the scope that was trying
+to shut down hangs waiting for it. Kotlin's documentation devotes real
+space to *not* catching `CancellationException`, which is the tell.
 
-#### Why mpmc rather than mpsc
+Uncatchable removes the possibility.
 
-Worker pools sharing one receiver are bread-and-butter. The evidence
-cited: **Rust's ecosystem abandoned std's mpsc for crossbeam's mpmc.**
-When the standard library's restriction is routinely worked around by a
-third-party crate, the restriction was wrong.
+#### The closure property
 
-#### Why split halves
+This is the subtle one and it is elegant:
 
-Because "anyone can close anything" is the root cause of Go's channel
-panics, and types are the cheapest fix.
+> **User code never observes a cancelled task.**
 
-There is a second benefit: the halves make **direction** structural. In
-Go you can express direction in a parameter type
-(`func worker(jobs <-chan int)`), and it is optional and easy to omit.
-Here there is no whole-channel value to pass, so a function taking a
-`Receiver<Job>` cannot send, ever.
+Cancellation implies the scope is going down. If the scope is going
+down, no live code remains to `join()` a cancelled child. So there is
+nothing to observe, no `Cancelled` value to return, and — crucially —
+**no `Cancelled` error type leaking into any signature.**
 
-#### Why `for v in rx` works
+Kotlin leaks `CancellationException` into every `catch` block in its
+ecosystem. Glide's type system never mentions cancellation at all.
 
-`recv()` returns `Option<T>` with `None` for end-of-stream — the same
-shape as `Iterator.next()`. So a `Receiver` satisfies the iteration
-protocol and `for v in rx` follows for free.
+#### Why only scopes cancel
 
-`DESIGN.md` is careful that this does not contradict "channels are not
-the iterator protocol" (Chapter 23): the ban is on *implementing* an
-iterator with a thread and a channel. **Consuming an existing stream is
-the legitimate direction.**
+There is no `t.cancel()`, and Kotlin's `job.cancel()` is the thing
+being declined.
 
-#### Why no `ctx.Done()` arm is needed
+`DESIGN.md`: `job.cancel()` is a structured-concurrency escape hatch —
+arbitrary code killing a task it does not own. Once any code can cancel
+any task, the lexical reasoning that structured concurrency exists to
+provide is gone.
 
-In Go, the most common `select` arm is `case <-ctx.Done():`. Here a
-blocked channel operation is a cancellation point, so the scope cancels
-it directly. Chapter 28 makes this concrete.
+The legitimate use case — "cancel the losers when one wins" — is a
+*race* construct, and it is `select`-shaped rather than
+cancel-shaped (Chapter 29).
+
+#### Why cancellation points are blocking operations only
+
+Because the alternative is worse.
+
+`DESIGN.md` records that loop back-edge checks in the interpreter were
+**considered and rejected**: dev-tier programs would be more cancellable
+than release-tier, and **semantics that differ by tier are poison.**
+
+That is a strong principle worth noting — the tiered-backend design
+allows overflow, backtraces, hygiene, and debug info to differ, and it
+explicitly does not allow *semantics* to differ.
+
+The recorded cost: a pure compute loop cannot be cancelled. If you
+write `for { compute() }` with no blocking call, a timeout will not
+stop it. Trio, Kotlin, and Swift all have the same property, and the
+mitigation is the same: put a blocking operation (even a zero
+`sleep`) in a long compute loop if it must be interruptible.
+
+#### Why `errdefer` fires on cancellation
+
+Because the operation did not complete, so compensations apply.
+`DESIGN.md` is explicit: skipping them would make timeouts corrupt
+state that errors do not.
+
+If a timeout leaves a half-written file that an error would have
+cleaned up, the timeout is a data-corruption mechanism. Firing
+`errdefer` makes the two paths consistent.
+
+#### Why `Duration` and `Instant` are distinct types
+
+What Go and C++ `chrono` got right. A duration and a point in time are
+different concepts, and conflating them permits nonsense:
+`now() + now()`, `sleep(timestamp)`, comparing a timeout to a clock
+reading.
+
+`DESIGN.md` goes further in the designed `time` module: four types —
+`Time` (an instant), `Date` (calendar date, no zone), `TimeOfDay`
+(09:00), and `ZonedTime` (civil time plus IANA zone) — because Go's
+single `time.Time` moonlighting as all four manufactures bugs, and
+`java.time` is the gold standard.
+
+The sharpest of those: **future events are civil time plus a zone,
+never instants.** "9am Sydney next March" is not a fixed point until it
+happens — DST legislation moves the instant, not the 9am. Storing
+future appointments as UTC is one of the subtlest widespread datetime
+bugs in production.
+
+#### The monotonic hybrid
+
+Kept from Go: `now()` carries both wall and monotonic readings, and
+elapsed-time arithmetic automatically uses monotonic. That kills the
+measured-a-timeout-across-an-NTP-step bug **in the default path**.
+
+`DESIGN.md`'s framing is worth keeping: Rust makes you choose
+correctly (`Instant` versus `SystemTime`); Go makes the correct thing
+happen when you do not think. For a bug this subtle, the second is
+better.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `make(chan T)` and `make(chan T, n)`, a single channel value,
-`close(ch)`, `v, ok := <-ch`, directional channel types in signatures.
-The direct model. Its three panics are the three things the split
-halves fix, and its `ok` tuple is the shape `Option` replaces.
+**Go.** `context.Context` as an explicit first parameter, with
+`WithCancel`, `WithTimeout`, `WithDeadline`, and `WithValue`.
+Cancellation is cooperative — you must `select` on `ctx.Done()` — and
+unchecked. Go's own standard library duplicated its entire database API
+(`Query`/`QueryContext`, `Exec`/`ExecContext`) to retrofit it, which
+`DESIGN.md` cites as the cost.
 
-**Rust.** `std::sync::mpsc` (single consumer, unbounded by default —
-both mistakes), and `crossbeam-channel` (mpmc, bounded) which the
-ecosystem uses instead. Rust's `send` returns `Result` because the
-receiver may be gone; Glide's does not, because shutdown flows through
-cancellation instead.
+**Python (Trio).** `move_on_after(5)` and `fail_after(5)` as scope
+config — the direct shape Glide copies. Cancellation is a
+`Cancelled` exception that convention says not to catch, and Trio's
+documentation works hard on that convention.
 
-**Kotlin.** `Channel<T>` with configurable capacity including
-`UNLIMITED` and `CONFLATED`, plus `Flow` as a separate reactive
-abstraction. Two concurrency-communication mechanisms in one language.
+**Kotlin.** Structured cancellation with `withTimeout`, cooperative
+`isActive` checks, and `CancellationException`. Also `job.cancel()`,
+which Glide declines. The `CancellationException`-in-every-catch-block
+problem is the specific thing uncatchability fixes.
 
-**Erlang.** Per-process mailboxes with selective receive — the deepest
-version of the idea, and a different model: the mailbox belongs to the
-process rather than being a separate object.
+**Swift.** `Task.isCancelled` and `Task.checkCancellation()` —
+cooperative and explicit, so you must poll. `withTaskGroup` gives
+structure. Swift's approach is more visible and more manual than
+Glide's ambient delivery.
 
-**Clojure.** `core.async`, an explicit port of CSP to a language
-without green threads, implemented with a macro that CPS-transforms the
-body. Instructive as an example of what you must build when the runtime
-does not provide it.
+**Java (Loom).** `StructuredTaskScope` with timeouts; interruption
+remains the underlying mechanism, and `InterruptedException` is a
+checked exception that everyone mishandles — the twenty-five-year
+version of the catch-the-cancellation problem.
 
-**Python (Trio / asyncio).** Memory channels with capacity, and `async
-with` for closing. Trio's send/receive halves are the closest analogue
-to Glide's split, and are also where the idea of closing one end
-cleanly is best worked out.
+**Rust (async).** Dropping a future cancels it, which is elegant and
+has a sharp edge: cancellation can happen at *any* await point, so
+"cancellation safety" is a property every async function must document
+and most do not. `tokio::select!` is where this bites hardest.
 
-**Java.** `BlockingQueue` — the same primitive without language
-integration, so there is no `select` and no `for … in`.
+**C#.** `CancellationToken` passed explicitly — Go's model in a
+language with exceptions. Same virality, same unchecked-ness.
 
 ---
 
 ### 5. Common Mistakes
 
-**Deadlocking on an unbuffered channel in one task.**
+**Expecting a compute loop to be cancellable.**
 
 ```glide
-// Bad — the send blocks forever; nobody is receiving
-let (tx, rx) = channel()
-tx.send(1)
-println("{rx.recv():?}")
-
-// Good — a second task receives
-scope s {
-    _ = s.spawn(|| tx.send(1))
-    println("{rx.recv():?}")
+// Bad — no blocking operation, so a timeout cannot stop this
+scope(timeout: 1.s) {
+    for { fibonacci(1_000_000) }
 }
 
-// Also good — capacity means the send does not block
-let (tx, rx) = channel(cap: 1)
-tx.send(1)
-println("{rx.recv():?}")
-```
-
-**Forgetting to close, so `for v in rx` never ends.** A `for` over a
-receiver runs until the channel is closed. If the producer finishes
-without closing, the consumer blocks forever — or, in a scope, until
-the scope is cancelled.
-
-```glide
-// Good
-_ = s.spawn(|| {
-    for i in 1..=3 { tx.send(i) }
-    tx.close()                        // essential
-})
-```
-
-**Abandoning a producer by falling off the end of the scope.** The
-sharpest edge in the chapter, covered in full in the Examples section:
-
-```glide
-// Bad — normal exit JOINS without cancelling; the blocked producer
-// never finishes and the program deadlocks
-scope s {
-    _ = s.spawn(|| { for i in items { tx.send(i) }
-                     tx.close() })
-    let v = rx.recv() ?? 0
-    v
-}
-
-// Good — early exit cancels first, then joins
-scope s {
-    _ = s.spawn(|| { for i in items { tx.send(i) }
-                     tx.close() })
-    let v = rx.recv() ?? 0
-    return v
+// Good — a blocking operation gives cancellation a delivery point
+scope(timeout: 1.s) {
+    for {
+        chunk_of_work()
+        time.sleep(0.ms)      // a cancellation point
+    }
 }
 ```
 
-Rule 1: *early exit cancels children first*. Normal exit does not.
+The second form is not elegant, and it is the honest mitigation for the
+recorded cost.
 
-**Closing from the receiving side.** There is no `rx.close()`. If you
-want the consumer to signal "stop", that is a second channel, or —
-usually better — an enclosing scope that cancels.
-
-**Sending after close.** Panics. If several tasks send, one of them
-closing while others are still sending is a coordination bug; the usual
-fix is that the *coordinator* closes after joining all senders.
-
-**Blocking the results channel in a pool.**
+**Trying to catch cancellation.** There is nothing to catch. If you
+need to know that a deadline was hit, that is the scope's `Result`:
 
 ```glide
-// Bad — with an unbuffered out channel, workers block while
-// the main task is still feeding jobs, and jobs_tx.send blocks
-// because the workers are blocked. Deadlock.
-let (out_tx, out_rx) = channel()
+match scope(timeout: 5.s) { work() } {
+    Ok(v)        => v
+    Err(Timeout) => fallback()
+}
+```
+
+**Looking for `t.cancel()`.** It does not exist. Restructure so the
+scope's lifetime is the cancellation boundary, or use `select`
+(Chapter 29) for a race.
+
+**Expecting body errors to nest inside the timeout Result.** They do
+not — scopes are control-flow transparent, so a `?` in the body exits
+the enclosing function.
+
+**Passing a timeout as a parameter.**
+
+```glide
+// Bad — this is ctx-threading reinvented
+fn fetch_all(urls: List<String>, timeout: Duration) -> …
+
+// Good — the caller sets the scope
+scope(timeout: 5.s) {
+    fetch_all(urls)
+}
+```
+
+The whole point is that the timeout is ambient. Reintroducing it as a
+parameter is the disease coming back.
+
+**Using bare integers for durations.**
+
+```glide
+// Bad — 60 what?
+sleep(60)
 
 // Good
-let (out_tx, out_rx) = channel(cap: 64)
+time.sleep(1.mins)
 ```
 
-This is the most common real deadlock in the worker-pool shape.
+Duration literals are the reason `sleep(1.mins)` cannot be confused
+with `sleep(60)` of unknown unit. There is no implicit conversion.
 
-**Sending `None` through a channel.** The interpreter's `Option`
-unboxing makes it read as end-of-stream. Wrap it in something:
+**Reaching for `.days`.** It does not exist. A day is calendar
+arithmetic. Use `24.h` if you genuinely mean 24 hours, and note that on
+a DST boundary that is *not* the same as "tomorrow at the same time".
 
-```glide
-type Msg = Value(Int) | Nothing
-```
-
-**Using a value after sending it.** Ownership transfer is ratified and
-dormant. The checker will reject it; write as though it already does.
-
-**Reaching for a channel where a `Task` would do.**
-
-```glide
-// Bad — a channel to return one value
-let (tx, rx) = channel()
-_ = s.spawn(|| tx.send(compute()))
-let result = rx.recv() ?? 0
-
-// Good
-let t = s.spawn(|| compute())
-let result = t.join()
-```
-
-`join()` returns exactly what the closure returned. Channels are for
-*streams*, not for single results.
+**Comparing Instants with struct equality intuitions.** `==` on
+`Instant` behaves like Go's `Equal`, which is wall-clock aware. Two
+Instants representing the same moment compare equal even if their
+monotonic readings differ.
 
 ---
 
 ### 6. Performance Considerations
 
-**An unbuffered send is a rendezvous** — the sender blocks until a
-receiver arrives, so each element costs a full synchronisation. That is
-the price of backpressure.
+**Cancellation costs nothing on the happy path.** There is no polling
+loop and no periodic check. A blocking operation registers with the
+task's cancellation channel; if nothing cancels, nothing happens.
 
-**A buffered send costs an enqueue** when there is room. Capacity trades
-memory for fewer synchronisations, and the right number is usually
-small — enough to smooth jitter, not enough to hide a throughput
-mismatch.
+**Delivery is at the next blocking operation**, so the latency between
+"the scope cancelled" and "the task stopped" is the duration of the
+current non-blocking stretch. For IO-bound code that is microseconds;
+for a long compute stretch it is the length of the compute.
 
-**Channel operations are far more expensive than function calls** —
-that is exactly why `DESIGN.md` bans channels as the iteration protocol
-(Chapter 23). A channel per element in a hot loop is orders of
-magnitude slower than an iterator.
+**`hostCtx()` allocates a context per blocking call** in the
+interpreter, plus a goroutine when the task has a cancellation channel.
+That is a real per-call cost at this tier and not at the compiled one.
 
-**Both halves cloning has no cost** — they are handles to the same
-underlying queue.
+**Unwinding runs every `defer` and `errdefer` frame.** That is required
+for correctness and happens once, on the way out.
 
-**In the interpreter**, channels are Go channels and each blocking
-operation releases and reacquires the interpreter lock. That makes
-channel ops the scheduling points, which is the intended semantics —
-but it also means a channel-heavy program is doing a lot of lock
-traffic.
+**`Duration` and `Instant` are value types** — 64-bit integers plus, in
+`Instant`'s case, the monotonic reading. Arithmetic is integer
+arithmetic. No allocation.
 
-**Cancellation adds a case to every blocking wait.** In the interpreter
-that is one extra `reflect.Select` case; negligible relative to the
-block itself.
+**Scope exit with a timeout costs one timer.**
 
 ---
 
 ### 7. Best Practices
 
-**Let the scope own the channel's lifetime.**
+**Put the timeout at the boundary where the operation has a deadline.**
 
 ```glide
-// Good — producer and consumer are both bounded by the scope
-scope s {
-    let (tx, rx) = channel()
-    _ = s.spawn(|| produce(tx))
-    consume(rx)
+// Good — the request has a budget; everything inside inherits it
+fn handle(req: Request) -> Result<Response, ApiError> {
+    scope(timeout: 2.s) {
+        let user = load_user(req.user_id)?
+        let prefs = load_prefs(user)?
+        Ok(render(user, prefs))
+    }
 }
 ```
 
-Nothing outlives the scope, so a stalled producer cannot leak.
+Neither `load_user` nor `load_prefs` mentions a timeout. Their database
+queries are cancellation points, so both are bounded by the scope.
 
-**Close in the task that owns the sending side, and close exactly
-once.**
+**Do not thread timeouts as parameters.** If you find a `timeout:
+Duration` parameter spreading through your call graph, you have
+rebuilt `ctx`.
 
-```glide
-// Good — the producer closes when it is done producing
-_ = s.spawn(|| {
-    for item in source { tx.send(item) }
-    tx.close()
-})
-```
-
-With several producers, join them first and let the coordinator close:
+**Use `deadline:` for a shared budget, `timeout:` for a fresh one.**
 
 ```glide
-scope s {
-    let ts = ranges.iter().map(|r| s.spawn(|| produce(r, tx))).collect()
-    for t in ts { let _ = t.join() }
-    tx.close()                        // after every producer has finished
+// A per-attempt budget
+for attempt in 1..=3 {
+    match scope(timeout: 1.s) { try_once() } {
+        Ok(v)        => return Ok(v)
+        Err(Timeout) => continue
+    }
+}
+
+// A total budget across attempts
+let end = time.now() + 3.s
+for attempt in 1..=3 {
+    match scope(deadline: end) { try_once() } {
+        Ok(v)        => return Ok(v)
+        Err(Timeout) => break        // the whole budget is gone
+    }
 }
 ```
 
-**Buffer the results channel in a fan-out.** The pool deadlock above is
-the reason.
+**Write durations with units, always.** `500.ms`, `30.s`, `2.h`. Never
+a bare integer that a reader has to interpret.
 
-**Prefer `Task` + `join` for single values, channels for streams.**
+**Give long compute loops a cancellation point** if they need to be
+interruptible. This is the honest mitigation, and it should be a
+conscious decision rather than a surprise.
 
-**Choose capacity deliberately, and write down why.**
-
-```glide
-// Good — the number means something
-let (out_tx, out_rx) = channel(cap: 64)    // ~2x worker count; smooths jitter
-```
-
-**Do not build an unbounded channel by accident.** A very large
-capacity is an unbounded channel with a slower failure mode. If the
-producer can outrun the consumer indefinitely, the answer is
-backpressure (small buffer) or dropping, not a bigger number.
-
-**Pass halves, not whole channels, through APIs.**
+**Use `s.deadline()` to adapt, not to poll.**
 
 ```glide
-// Good — the signature says which direction this function moves data
-fn worker(jobs: Receiver<Job>, results: Sender<Report>)
+// Good — size the batch to the remaining budget
+scope(timeout: 5.s) s {
+    if let d = s.deadline() {
+        let remaining = d - time.now()
+        let batch = if remaining > 3.s { 1000 } else { 100 }
+        process(batch)
+    }
+}
 ```
 
-There is no whole-channel value, so this is the only thing you *can*
-write — which is the point.
+**Never write cancellation-detection logic.** There is nothing to
+detect. If you want to know that a deadline was hit, read the scope's
+`Result`.
 
 ---
 
 ### 8. Examples
 
-**The basic pattern, end to end:**
+**The timeout, complete:**
 
-```glide
-fn main() {
-    let (tx, rx) = channel()
-    scope s {
-        _ = s.spawn(|| {
-            for i in 1..=3 { tx.send(i) }
-            tx.close()
-        })
-        for v in rx {
-            print("{v} ")
-        }
-        println("")
-    }
-}
-```
-
-```
-1 2 3
-```
-
-**Buffered, in one task:**
-
-```glide
-fn main() {
-    let (btx, brx) = channel(cap: 3)
-    btx.send(1)
-    btx.send(2)
-    btx.close()
-    println("{brx.recv():?}")
-    println("{brx.recv():?}")
-    println("{brx.recv():?}")
-}
-```
-
-```
-1
-2
-None
-```
-
-The third `recv()` returns `None` — closed and drained. That is the
-signal `for v in rx` uses to stop.
-
-**A worker pool, from the repository's own `pipeline.gld`:**
-
-```glide
+```glide-run
 import time
 
-fn slow_square(n: Int) -> Int {
-    time.sleep(1.ms)
-    n * n
-}
-
-fn pool_sum(upto: Int) -> Int {
-    let (jobs_tx, jobs_rx) = channel()
-    let (out_tx, out_rx) = channel(cap: 64)
-
-    scope s {
-        _ = s.spawn(|| {
-            for j in jobs_rx {
-                out_tx.send(slow_square(j))
-            }
-        })
-        _ = s.spawn(|| {
-            for j in jobs_rx {
-                out_tx.send(slow_square(j))
-            }
-        })
-
-        for i in 1..=upto {
-            jobs_tx.send(i)
-        }
-        jobs_tx.close()
-
-        let mut total = 0
-        for _ in 1..=upto {
-            total += out_rx.recv() ?? 0
-        }
-        total
+fn with_deadline() -> String {
+    let r = scope(timeout: 25.ms) s {
+        _ = s.spawn(|| time.sleep(10.s))
+        time.sleep(10.s)
+        "finished"
+    }
+    match r {
+        Ok(msg)      => msg
+        Err(Timeout) => "timed out (children cancelled and joined)"
+        Err(_)       => "other"
     }
 }
 
 fn main() {
-    println(pool_sum(10))
+    println(with_deadline())
 }
 ```
 
 ```
-385
+timed out (children cancelled and joined)
 ```
 
-Points worth noting:
+Both the body's `sleep` and the child's `sleep` were cancelled at their
+next cancellation point (immediately, since they were blocked), the
+child was joined, and the scope produced `Err(Timeout)`. No shutdown
+code, no `done` channel, no polling.
 
-- **Both workers share `jobs_rx`** — that is mpmc, and it is why the
-  restriction to a single consumer would be wrong.
-- **`jobs_tx.close()` after the feed loop** is what lets the workers'
-  `for j in jobs_rx` terminate.
-- **`out_tx` is buffered** so workers do not block while the main task
-  is still feeding.
-- **The scope joins both workers** before `pool_sum` returns. There is
-  no `WaitGroup`, and there is no way to forget.
+**Duration arithmetic:**
 
-**Go's three panics, side by side:**
-
-```go
-// Go — all three compile
-ch := make(chan int)
-close(ch)
-close(ch)          // panic: close of closed channel
-ch <- 1            // panic: send on closed channel
-
-var nilCh chan int
-<-nilCh            // blocks forever, silently
-```
-
-```glide
-// Glide
-let (tx, rx) = channel()
-tx.close()
-tx.close()          // fine — idempotent
-tx.send(1)          // panics — a sender coordination bug
-rx.close()          // does not exist
-// there is no nil channel
-```
-
-Three of the four are gone at the type or semantic level. The fourth is
-kept as a panic deliberately.
-
-**Bad versus good: the leaked producer**
-
-```go
-// Go — StartFeed returns, the goroutine blocks forever on send
-func StartFeed(items []int) <-chan int {
-    ch := make(chan int)
-    go func() {
-        for _, i := range items {
-            ch <- i          // blocks forever if the consumer stops early
-        }
-        close(ch)
-    }()
-    return ch
-}
-```
-
-If the caller breaks out of the range loop early, the producer goroutine
-is blocked on a send nobody will receive, forever. This is the single
-most common Go channel leak.
-
-```glide
-// Glide — and this version DEADLOCKS. Read on.
-fn consume_some(items: List<Int>, n: Int) -> Int {
-    let (tx, rx) = channel()
-    scope s {
-        _ = s.spawn(|| {
-            for i in items { tx.send(i) }
-            tx.close()
-        })
-        let mut total = 0
-        for _ in 0..n {
-            total += rx.recv() ?? 0
-        }
-        total          // normal exit: JOIN, do not cancel
-    }
-}
-```
-
-```
-fatal error: all goroutines are asleep - deadlock!
-```
-
-This is worth dwelling on, because it is rule 1 from Chapter 25 biting
-exactly as specified:
-
-> Scope exit always joins every child. **Early exit cancels them
-> first**, waits, then continues propagating.
-
-Falling off the end of the body is a **normal** exit, so the scope
-*joins* the producer without cancelling it — and the producer is
-blocked forever on a send nobody will receive. The scope waits, and the
-program deadlocks.
-
-The fix is to exit early, which triggers the cancel:
-
-```glide
-// Good — `return` is an early exit, so the scope cancels first
-fn consume_some(items: List<Int>, n: Int) -> Int {
-    let (tx, rx) = channel()
-    scope s {
-        _ = s.spawn(|| {
-            for i in items { tx.send(i) }
-            tx.close()
-        })
-        let mut total = 0
-        for _ in 0..n {
-            total += rx.recv() ?? 0
-        }
-        return total       // early exit: cancel the producer, then join
-    }
-}
+```glide-run
+import time
 
 fn main() {
-    println(consume_some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3))
-    println("returned without hanging")
+    let d = 1.s + 500.ms
+    println("{d}")                  // 1.5s
+    println(d > 1.s)                // true
+    println("{d * 3}")              // 4.5s
+    println("{2.mins + 30.s}")      // 2m30s
+
+    let start = time.now()
+    time.sleep(20.ms)
+    let elapsed = time.now() - start
+    println("elapsed at least 20ms: {elapsed >= 20.ms}")
 }
 ```
 
 ```
-6
-returned without hanging
+1.5s
+true
+4.5s
+2m30s
+elapsed at least 20ms: true
 ```
 
-The producer was blocked on `send` — a cancellation point — so it
-unwound, ran its defers, and was joined.
+`Duration` renders as Go does. Note `time.now() - time.now()` is an
+`Instant - Instant`, producing a `Duration` — and using the monotonic
+reading, so an NTP step during the sleep cannot make it negative.
 
-Compare this with the Go version above. Go's leak is **silent**: the
-goroutine sits blocked forever, the program continues, and you find it
-in a heap dump weeks later. Glide's failure is **immediate and loud**:
-the program deadlocks at the scope boundary, on the first run, with a
-stack trace pointing at the join.
+**Side by side with Go — the shape that motivates the whole design:**
 
-That is the trade structured concurrency makes. It does not
-automatically do the right thing with an abandoned producer; it refuses
-to let you *not notice*. And the one-character fix — `return` instead
-of a tail expression — is the difference between "wait for the child"
-and "the child is no longer wanted", which is a distinction the code
-should be making explicitly anyway.
+```go
+// Go: ctx in every signature, a select in every loop
+func Sweeper(ctx context.Context, db *sql.DB) error {
+    ticker := time.NewTicker(time.Minute)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-ticker.C:
+            if _, err := db.ExecContext(ctx, "delete from stale"); err != nil {
+                return err
+            }
+        }
+    }
+}
+
+func Run() error {
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    g, ctx := errgroup.WithContext(ctx)
+    g.Go(func() error { return Sweeper(ctx, db) })
+    g.Go(func() error { return server.ListenAndServe() })
+    return g.Wait()
+}
+```
+
+```glide
+// Glide: no ctx, no select, no errgroup, no cancel
+fn sweeper(db: Db) {
+    for {
+        time.sleep(1.mins)
+        _ = db.exec("delete from stale") ?? 0
+    }
+}
+
+fn run(db: Db, r: Router) -> Result<(), Error> {
+    scope s {
+        _ = s.spawn(|| sweeper(db))
+        http.serve("127.0.0.1:8080", r)
+    }
+}
+```
+
+Count what disappeared: the `ctx` parameter on `sweeper`, the `select`
+with its `ctx.Done()` arm, the ticker (a plain `sleep` is a
+cancellation point), the `errgroup`, the `WithCancel`, and the
+`defer cancel()`.
+
+`sweeper` has no way to be told to stop, and it stops correctly.
+`time.sleep` is a cancellation point, so when the scope dies — because
+`serve` returned, or because an enclosing timeout fired, or because
+something panicked — the sleeping sweeper unwinds, runs its defers, and
+is joined.
+
+That is the payoff `DESIGN.md` is claiming when it says the
+ctx-replacement covers HTTP for free.
+
+**Cancellation reaching an HTTP client:**
+
+```glide
+import http
+import time
+
+fn fetch_with_budget(url: String) -> String {
+    let r = scope(timeout: 50.ms) {
+        match http.get(url) {
+            Ok(resp) => "{resp.status()}"
+            Err(e)   => "error: {e}"
+        }
+    }
+    match r {
+        Ok(s)        => s
+        Err(Timeout) => "gave up after 50ms"
+        Err(_)       => "other"
+    }
+}
+```
+
+`http.get` is a cancellation point, so the scope's deadline aborts the
+in-flight request. Nothing in `fetch_with_budget`'s signature mentions
+a timeout, and `http.get` takes no `ctx`.
+
+**Bad versus good: the timeout parameter**
+
+```glide
+// Bad — ctx-threading, rebuilt by hand
+fn load_page(id: Int, timeout: Duration) -> Result<Page, Error> {
+    let user = load_user(id, timeout)?
+    let prefs = load_prefs(user, timeout)?      // …and now the budget doubles
+    Ok(render(user, prefs))
+}
+```
+
+Two problems. The parameter is viral — `load_user` and `load_prefs`
+both need it, and so does everything they call. And the semantics are
+wrong: passing the same `timeout` to two sequential calls gives a total
+budget of twice the timeout.
+
+```glide
+// Good
+fn load_page(id: Int) -> Result<Page, Error> {
+    let user = load_user(id)?
+    let prefs = load_prefs(user)?
+    Ok(render(user, prefs))
+}
+
+// The caller sets the budget, once, for the whole subtree
+scope(timeout: 2.s) {
+    load_page(id)?
+}
+```
+
+One budget, applied to the whole subtree, and no signature mentions
+it.
 
 ---
 
@@ -798,53 +802,59 @@ should be making explicitly anyway.
 
 **Summary**
 
-- `let (tx, rx) = channel()` gives an **unbuffered rendezvous**;
-  `channel(cap: n)` buffers. **There are no unbounded channels** — Rust
-  std's unbounded default is the classic slow-consumer leak.
-- **Two half-types, no whole-channel value.** Direction is structural,
-  and the tuple construction is the doctrine.
-- `tx.send(v)` blocks per capacity and **panics on a closed channel** —
-  a sender coordination bug, not an expected outcome. `tx.close()` is
-  **idempotent**. `rx` has **no close**.
-- `rx.recv()` returns `Option<T>`, with `None` meaning
-  closed-and-drained. That shape is why **`for v in rx`** works.
-- **Both halves clone; semantics are mpmc.** Worker pools sharing one
-  receiver are the motivating case, and Rust's ecosystem abandoning std
-  mpsc for crossbeam is the evidence.
-- Go's three channel panics: receiver-closes is **unrepresentable**,
-  double-close is **gone**, send-on-closed is **kept deliberately**,
-  and nil-channel-blocks is free because there is no nil.
-- **Send transfers ownership** — ratified, and dormant in M2 pending
-  the checker.
-- Channel operations are **cancellation points**, so a blocked task in
-  a dying scope unwinds.
-- Channels are for **streams**; a single result is a `Task` and
-  `join()`.
-- A sent `None` is an ordinary element, not end-of-stream: `Option` is
-  boxed as of M4c, so a payload cannot impersonate the channel's own
-  closed-and-drained signal. Sending Options is fine.
-- ○: `Mutex<T>` that wraps the data it guards — the other half of the
-  data-sharing story.
+- **Cancellation belongs to the scope.** No `ctx` parameter, no
+  signature changes. `scope(timeout: 5.s) { … }` bounds everything in
+  the subtree.
+- `scope(timeout: d)` and `scope(deadline: t)` evaluate to
+  `Result<T, Timeout>`. Body errors propagate *through* the scope, so
+  they never nest inside the timeout's Result. `Timeout` converts at
+  the outer `?` via `E.from(Timeout)`.
+- **Cancellation is a third unwind** — neither error nor panic. It is
+  **uncatchable**, which turns Trio's and Kotlin's "do not swallow
+  this" convention into a guarantee.
+- **`defer` and `errdefer` both run** during cancellation: locks must
+  be released, and compensations apply because the operation did not
+  complete.
+- **Closure property:** user code never observes a cancelled task, so
+  no `Cancelled` type leaks into any signature. Kotlin leaks
+  `CancellationException` into every catch block; Glide's type system
+  never mentions cancellation.
+- **Only scopes cancel.** There is no `t.cancel()` — arbitrary code
+  killing a task it does not own is the escape hatch that destroys the
+  lexical reasoning.
+- **Cancellation points are blocking operations**: `join`, `sleep`,
+  channel ops, `select`, IO, generator handoffs. Pure compute loops are
+  uncancellable — a recorded cost, uniform with Trio/Kotlin/Swift. Loop
+  back-edge checks were rejected because semantics that differ by tier
+  are poison.
+- **`Duration` and `Instant` are distinct types.** Constructors are
+  suffix properties (`250.ms`, `0.5.s`, `2.h`); no `.days`, because a
+  day is calendar arithmetic. No `Instant + Instant`, no
+  `Duration / Duration`.
+- The **monotonic hybrid** is kept from Go: elapsed-time arithmetic
+  uses the monotonic reading automatically, so an NTP step cannot
+  corrupt a measurement.
+- `s.deadline()` reads the nearest inherited deadline — the one place
+  cancellation state is readable, through an explicit handle.
 
 **Exercises**
 
-1. **Find the leaked producer.** In a Go codebase, find a function that
-   returns a `<-chan T` fed by a goroutine. Determine what happens if
-   the consumer stops reading early. Then write the Glide version and
-   note that the scope makes the question answerable by reading the
-   code.
+1. **Count the `ctx`s.** In a Go service, count how many function
+   signatures take a `context.Context`. Then count how many of those
+   functions actually *use* it for anything other than passing it
+   along. The ratio is the tax the parameter charges, and it is what
+   ambient cancellation deletes.
 
-2. **Build the pool three ways.** Implement a worker pool that squares
-   numbers, with (a) an unbuffered results channel, (b) a buffered one,
-   and (c) no results channel at all — spawn one task per job and
-   `join` them. Find the deadlock in (a), and then decide when (c) is
-   better than (b). (Hint: it depends on whether the job count is
-   bounded and known.)
+2. **Find the uncancellable loop.** Write a Glide program with a
+   compute-only loop inside a `scope(timeout:)` and confirm the timeout
+   does not stop it. Then add a cancellation point and confirm it does.
+   Decide where you would put such a point in a real CPU-bound job —
+   per batch, per row, per second? — and note that this is a decision
+   Go, Rust, Trio, Kotlin, and Swift all make you take.
 
-3. **Argue send-on-closed.** `DESIGN.md` keeps send-on-closed as a
-   panic rather than returning a `Result`. Write the strongest case for
-   the `Result` version, including what every correct call site would
-   then look like. Then check your case against the argument that
-   shutdown flows *down* the scope tree rather than *up* via send
-   failures — that is the load-bearing claim, and if you can break it,
-   the decision changes.
+3. **Design the datetime types.** `DESIGN.md` specifies four —
+   `Time`, `Date`, `TimeOfDay`, `ZonedTime` — with the rule that future
+   events are civil time plus zone, never instants. Take a scheduling
+   feature you have built and write down which type each stored field
+   should be. Then find the field that was stored as UTC and should not
+   have been; almost every calendar application has one.

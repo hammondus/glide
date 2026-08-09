@@ -1,722 +1,710 @@
-# Chapter 26: Cancellation, Timeouts, and Deadlines
+# Chapter 26: Structured Concurrency
 
-Go escaped `async`/`await`'s viral function colouring — and then
-cancellation forced `ctx context.Context` to be the first parameter of
-every serious function. `DESIGN.md` calls that **the same disease,
-manual and unchecked**.
+Glide is green-threaded like Go — cheap tasks, no `async`/`await`, no
+function colouring. But where Go's `go` statement launches a goroutine
+with **no parent**, every Glide task belongs to a **scope**: the
+scope's end waits for its children, a failing child cancels its
+siblings, and nothing leaks.
 
-Glide's answer: cancellation belongs to the **scope**. It is ambient
-within a scope's subtree, it is delivered at blocking operations, and
-no signature mentions it.
+That is the whole idea, and it turns an entire category of production
+bugs into shapes you cannot write.
 
-```glide
-scope(timeout: 5.s) {
-    http.get(url)?
-}
-```
+This chapter covers scopes, `spawn`, `join`, and the four rules that
+make the model. Cancellation gets Chapter 27; channels get Chapter 28.
 
-That is the whole surface. This chapter explains the machinery behind
-it, including a mechanism that is genuinely unusual: cancellation is a
-**third unwind**, neither error nor panic, and **user code cannot
-catch it**.
-
-Everything here is ✓.
+Everything here is ✓ — structured concurrency runs in the interpreter
+today.
 
 ---
 
 ### 1. Basic Usage
 
-#### Duration and Instant
+#### A scope with two tasks
 
-Two distinct types, never conflated:
-
-```glide
-let d = 1.s + 500.ms
-println("{d}")            // 1.5s
-println(d > 1.s)          // true
-
-let t = time.now()        // an Instant
-let elapsed = time.now() - t     // Instant - Instant -> Duration
-```
-
-Constructors are suffix properties on numbers: `.ns`, `.us`, `.ms`,
-`.s`, `.mins`, `.h`. They work on `Int` and `Float`:
-
-```glide
-250.ms
-0.5.s
-30.mins
-2.h
-```
-
-There is no `.days`, deliberately — a "day" is calendar arithmetic, DST
-makes 23-hour days, and calendars belong to the future `time` module.
-And it is `.mins` rather than `.min` because `a.min(b)` is the obvious
-future math method on `Int`.
-
-Arithmetic is minimal and total:
-
-| Operation | Result |
-|---|---|
-| `Duration ± Duration` | `Duration` |
-| `Duration * Int` (either order) | `Duration` |
-| `Duration / Int` | `Duration` |
-| `Instant - Instant` | `Duration` |
-| `Instant ± Duration` | `Instant` |
-| comparisons on both | `Bool` |
-
-There is no `Instant + Instant` (meaningless — the operator simply does
-not exist) and no `Duration / Duration` (Go's float-division wart; if
-you want a ratio, divide nanosecond counts explicitly).
-
-#### `scope(timeout:)`
-
-```glide
+```glide-run
 import time
 
-fn timed() -> String {
-    let r = scope(timeout: 25.ms) s {
-        _ = s.spawn(|| time.sleep(10.s))
-        time.sleep(10.s)
-        "finished"
-    }
-    match r {
-        Ok(m)        => m
-        Err(Timeout) => "timed out"
-        Err(_)       => "other"
+fn work(id: Int, ms: Int) -> Int {
+    time.sleep(ms.ms)
+    id * 10
+}
+
+fn parallel() -> Int {
+    scope s {
+        let a = s.spawn(|| work(1, 20))
+        let b = s.spawn(|| work(2, 10))
+        a.join() + b.join()
     }
 }
 
 fn main() {
-    println(timed())
+    println(parallel())      // 30
 }
 ```
 
-```
-timed out
-```
+`scope s { … }` opens a scope with handle `s`. `s.spawn(f)` starts a
+task and returns a `Task`. `t.join()` blocks and returns **exactly what
+the closure returned**.
 
-`scope(timeout: d)` evaluates to `Result<T, Timeout>`: `Ok(v)` when the
-body completes, `Err(Timeout)` when the clock wins. Both the body *and*
-the spawned child were cancelled and joined.
+A `scope` is an **expression** — it evaluates to its body's tail value,
+which is why `parallel()` can return `a.join() + b.join()` directly.
 
-`scope(deadline: t)` takes an `Instant` instead. Go's `context` has
-both because real code wants both.
-
-The grammar is `scope [(config)] [handle] { body }` — config first,
-then handle. That is Trio's shape (`with move_on_after(5) as scope:`),
-and the config parens reuse the named-argument machinery rather than
-introducing a new syntax class.
-
-#### Body errors propagate *through* the timeout
-
-Scopes are control-flow transparent:
+#### The scope always joins
 
 ```glide
-fn load() -> Result<Config, Error> {
-    scope(timeout: 5.s) {
-        let text = fs.read_string(path)?      // this Err propagates out
-        parse(text)
+scope s {
+    _ = s.spawn(|| background_work())
+    do_something_else()
+}
+// control does not reach here until the spawned task has finished
+```
+
+Scope exit joins every child, on **every** exit path — normal
+fall-through, `?`, `return`, `break`, and panic. Early exit cancels the
+children first, waits, then continues propagating.
+
+The scope is a super-`defer`: no exit path skips it. Leaks are
+unrepresentable.
+
+#### Errors are values that wait
+
+```glide
+fn fails() -> Result<Int, String> {
+    scope s {
+        let a = s.spawn(|| Err("boom"))
+        let b = s.spawn(|| Ok(5))
+        let x = a.join()?
+        let y = b.join()?
+        Ok(x + y)
     }
 }
 ```
 
-The `?` inside the body exits the *enclosing function*, not just the
-scope. So body errors never nest inside the timeout's `Result` — you
-never get `Result<Result<T, E>, Timeout>`.
+```
+Err("boom")
+```
 
-The `Timeout` itself converts at the outer `?` via `E.from(Timeout)` —
-the `?`-conversion machinery from Chapter 19 is what makes timeouts
-non-viral.
+`a.join()` returned `Err("boom")`; the `?` exited the scope body; the
+scope cancelled `b` and joined it; the error propagated.
 
-#### `Timeout` matches as a bare pattern
+Note that a child's `Err` is **a value, not an event**. It sits in the
+handle until joined. That makes partial success trivial — join each,
+keep what worked:
 
 ```glide
-match r {
-    Ok(v)        => …
-    Err(Timeout) => …
+scope s {
+    let tasks = urls.iter().map(|u| s.spawn(|| fetch(u))).collect()
+    let mut ok = []
+    for t in tasks {
+        match t.join() {
+            Ok(page) => ok.push(page)
+            Err(e)   => eprintln("skipping: {e}")
+        }
+    }
+    ok
 }
 ```
 
-#### Reading the effective deadline
+#### Errors cannot vanish
 
 ```glide
-scope(timeout: 5.s) s {
-    let d = s.deadline()      // Option<Instant>
-    …
+fn unjoined() -> Result<Int, String> {
+    scope s {
+        _ = s.spawn(|| Err("silent failure"))
+        Ok(1)
+    }
 }
 ```
 
-`s.deadline()` returns the nearest enclosing timeout or deadline,
-inherited from outer scopes. This is the one place cancellation state
-is readable, and it is through an **explicit handle** rather than
-hidden.
+```
+Err("silent failure")
+```
 
-#### Cancellation points
+The scope body returned `Ok(1)` and never joined the child. At normal
+exit, an unjoined child that finished with `Err` **fails the scope**,
+as if the body had `?`'d it at the closing brace. First failure wins.
 
-Cancellation is delivered **only at blocking operations**:
+To ignore an error deliberately, discard it explicitly:
 
-- `t.join()`
-- `time.sleep(d)`
-- channel `send` and `recv`, and a blocking `select`
-- IO: `http.serve`, `http.get`, `http.post`, `db.exec`, `db.query`
-- generator handoffs
+```glide
+let _ = t.join()
+```
 
-A pure compute loop is **uncancellable**. That is a recorded cost,
-uniform with Trio, Kotlin, and Swift.
+#### Panics do not wait
 
-#### `defer` and `errdefer` both run
+A child's panic is a bug, and bugs do not wait to be observed. It
+cancels the siblings **immediately**, and the scope re-panics at exit.
 
-A cancelled task unwinds, running its `defer` blocks (it must release
-its locks) **and** its `errdefer` blocks (the operation did not
-complete, so compensations apply). Chapter 21's table:
+The slogan for the two rules together: **values wait, bugs don't.**
 
-| Exit path | `defer` | `errdefer` |
-|---|---|---|
-| Cancellation | ✓ | ✓ |
+#### The four rules
 
-#### You cannot catch it
+`DESIGN.md` ratified these on 2026-08-09, and they are the whole model:
 
-There is no `Cancelled` error type, no way to observe cancellation, and
-no way to suppress it. This is the closure property, and section 3
-explains why it matters.
+1. **Scope exit always joins every child** — normal exit, `?`,
+   `return`, `break`, panic. Early exit cancels children first, waits,
+   then continues propagating.
+2. **A child's `Err` is a value, not an event** — it sits in the handle
+   until joined.
+3. **Errors can't vanish** — at normal exit, an unjoined child that
+   finished with `Err` fails the scope. First failure wins. Ignoring
+   takes an explicit `let _ = t.join()`.
+4. **A child's panic is a bug** — it cancels siblings immediately and
+   the scope re-panics at exit.
 
-#### Only scopes cancel
+#### There is no ambient spawn
 
-There is no `t.cancel()`. Cancellation comes from the enclosing scope
-on exactly three events:
+`spawn` exists only on a scope handle. You cannot start a task without
+naming its parent — including in `main`. That is the property that
+makes leaks unrepresentable.
 
-1. Early exit from the scope body (a `?`, `return`, or `break`).
-2. A sibling's panic.
-3. A timeout or deadline expiring.
+A bare `scope { }` with no handle parses and is merely pointless: you
+need the handle to spawn.
+
+#### `errgroup` semantics fall out
+
+There is no fail-fast *mode* to configure. Cancel-on-first-error is
+composition:
+
+```glide
+scope s {
+    let a = s.spawn(|| fetch(u1))
+    let b = s.spawn(|| fetch(u2))
+    let x = a.join()?          // if this fails…
+    let y = b.join()?          // …rule 1 cancels b on the way out
+    Ok(combine(x, y))
+}
+```
+
+No `supervisorScope`, no policy objects, no `errgroup.WithContext`.
 
 ---
 
 ### 2. Under the Hood
 
-#### The third unwind
+#### The interpreter's model
 
-Glide has three ways a computation stops early, and cancellation is the
-odd one:
+Spawned tasks run on real goroutines, but **exactly one interprets at a
+time** — there is a single interpreter lock, released around blocking
+operations.
 
-| Unwind | Cause | Catchable? | Is it a value? |
-|---|---|---|---|
-| Error | `?` propagating an `Err` | Yes | Yes |
-| Panic | A bug | No | No |
-| **Cancellation** | The scope dying | **No** | **No** |
+`glide/DESIGN-DECISIONS.md` is emphatic that this is not a shortcut to
+apologise for. Tasks interleave *exactly at blocking operations*, which
+is precisely the ratified cancellation-point rule. **The lock is the
+semantics, not just a guard.**
 
-`glide/DESIGN-DECISIONS.md` records the implementation choice and its
-reasoning:
+The cost: two compute-bound tasks serialise. Semantics permit any
+scheduling, so no program can detect this except through throughput,
+and release backends add true parallelism without changing observable
+behaviour.
 
-> **Cancellation is a Go panic (`cancelUnwind`), not a `sig`.** Panics
-> already unwind through every construct uncatchably, and
-> `evalBlockDeferred`'s panic path already runs `defer` AND `errdefer`
-> on the way out — which is exactly the ratified cancellation
-> behavior. A `sig` variant would have needed a "cannot be consumed by
-> match/loops/user code" rule bolted onto every consumer.
+Each goroutine's cancellation context is lock-protected state, saved
+and restored around every release. Generator handoffs release the lock
+on both ends, so a generator inside a task cannot wedge the
+interpreter.
 
-Only the scope machinery (and the task and generator wrappers) recovers
-it.
+#### The scope exit protocol
 
-That is a nice piece of design economy: the cleanup semantics
-cancellation needs were already implemented for panics, so the
-mechanism came for free.
+Recorded precisely, because the ordering matters:
 
-#### How a blocking operation becomes a cancellation point
+1. Capture the body's result — value, signal, or panic.
+2. If exiting early, cancel the children.
+3. **Drain-join** children until the task list is stable — children may
+   spawn siblings while you wait.
+4. Apply precedence:
 
-Every host-level blocking call obtains a context from `hostCtx()`,
-which is wired to the current task's cancellation channel and to the
-nearest enclosing deadline. When the scope cancels, the context is
-cancelled, the blocking operation returns, and the interpreter raises
-`cancelUnwind`.
+> body's own bug > child bug > outer cancellation > body's signal >
+> first unjoined child `Err` > body value
 
-The interpreter's single lock is released while blocked — which is what
-makes the interleaving happen exactly at cancellation points, as
-Chapter 25 described.
+That precedence list answers every "what if both happen at once"
+question. A panic in the body beats a child's panic; a child's panic
+beats being cancelled from outside; a `return` in the body beats an
+unjoined child's error.
 
-#### `Timeout` is a synthetic variant
+#### What a `Task` is
 
-An interesting corner. A timed-out scope's `Err` payload is a variant
-value with type and name `Timeout`, synthesised by the interpreter — so
-`Err(Timeout)` matches the bare pattern `Timeout`, renders as
-`Timeout`, and converts through a user's `fn from(t: Timeout)`, all
-**without any global type declaration the program did not write**.
+A handle holding the eventual result. `join()` blocks (a cancellation
+point) and returns whatever the closure returned — a value, an `Ok`, an
+`Err`, whatever. There is no unwrapping and no special error channel; a
+`Result`-returning closure yields its `Result` and you `?` it like any
+call.
 
-The checker era makes `Timeout` a real stdlib type, and nothing about
-programs changes.
+#### The `mut`-capture rule ✓
 
-#### Duration and Instant are host types
+One compile-time restriction, enforced as of M4c:
 
-The interpreter wraps Go's `time.Duration` and `time.Time`, which means
-the dual wall/monotonic semantics come free: elapsed-time arithmetic
-automatically uses the monotonic reading, so measuring a timeout across
-an NTP step does not produce a negative duration.
+> **Closures crossing task boundaries must not capture `mut`
+> bindings.**
 
-`==` on `Instant` compares as Go's `Equal` (wall + monotonic aware),
-not as a struct comparison. `Duration` renders as Go does — `1.5s`,
-`2m30s`.
+```glide
+fn main() {
+    let mut total = 0
+    scope s {
+        let t = s.spawn(|| { total = total + 1 })
+        let _ = t.join()
+    }
+    println(total)
+}
+```
 
-#### The deferred sub-question
+```
+app.gld:4:30: a spawned closure cannot capture the mutable binding "total" — the parent may still be writing it. Freeze it first (`let total_now = total`) or send it over a channel
+ 4 |         let t = s.spawn(|| { total = total + 1 })
+   |                              ^^^^^
+```
 
-`DESIGN.md` leaves one thing open: what happens when a `defer` block
-performs a blocking operation *during* cancellation? Leaning toward
-Trio's answer — cleanup gets a brief grace period, then blocking
-operations fail loudly — and undecided.
+This is the data-race archetype and it is statically visible: mut-ness
+is known and `spawn` is a known boundary. Freeze (`let snapshot =
+counter`) or clone to cross.
+
+`DESIGN.md`: cheap rule, whole race class turned into a compile error;
+the race detector backstops what escapes via reference-typed immutable
+captures.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why `context.Context` is function colouring by hand
+#### Why green threads and not `async`/`await`
 
-This is the central argument, and it is worth spelling out.
+`async`/`await` makes concurrency a **viral type-system property of
+every function** — Bob Nystrom's "What Color Is Your Function?".
 
-Go avoided `async`/`await` and therefore avoided a viral type-system
-property. Then cancellation had to come from somewhere, and Go's answer
-was a value threaded through every call:
+The evidence `DESIGN.md` cites is brutal and specific:
 
-```go
-func GetUser(ctx context.Context, id int) (*User, error)
-func loadPrefs(ctx context.Context, u *User) (*Prefs, error)
-func query(ctx context.Context, q string) (*Rows, error)
-```
+- **Python maintains two parallel ecosystems.** `requests` and
+  `aiohttp`, `psycopg2` and `asyncpg`, sync and async everything. A
+  library must pick, and a program must not mix.
+- **Async Rust is described by its own maintainers as a second, harder
+  language.** `Pin`, `Send + 'static`, executor fragmentation, and
+  functions that cannot be called from the wrong context.
+- **Java built reactive frameworks for fifteen years, shipped virtual
+  threads in Java 21, and its ecosystem is migrating back to plain
+  blocking style.** That is a fifteen-year controlled experiment ending
+  in a reversal.
 
-`DESIGN.md` names it: **the same disease, manual and unchecked.**
+The technical point: `async`/`await` exists as a compiler transform to
+stackless state machines, and it is *essential* when you cannot have a
+runtime (Rust, embedded) or cannot have threads (JavaScript). Neither
+constraint applies to Glide. Green threads are what the
+GC-and-runtime purchase buys.
 
-- It is **viral**: any function that might call a cancellable operation
-  needs a `ctx`, so `ctx` reaches everywhere.
-- It is **unchecked**: nothing stops you passing
-  `context.Background()`, or forgetting to check `ctx.Done()`, or
-  storing the ctx in a struct (which the documentation forbids and
-  people do anyway).
-- It is **two features in one**: cancellation *and* request-scoped
-  values, and `ctx.Value` is an untyped stringly grab bag where auth,
-  transactions, and loggers travel invisibly.
+The accepted cost, stated plainly: stackful tasks cost kilobytes where
+Rust futures cost bytes. At extreme task counts — millions of
+connections on tiny hardware — async wins on memory. That workload is
+conceded.
 
-The Glide answer takes the parameter away entirely: cancellation is a
-property of the *scope you are running in*, and blocking operations
-consult it. No signature changes.
+#### Why structure, and what `go` actually costs
 
-#### Why cancellation is uncatchable
+Go's `go f()` launches a goroutine with no parent, and three problems
+follow:
 
-Trio and Kotlin model cancellation as an exception that **convention
-forbids swallowing**. `DESIGN.md`: making it uncatchable turns the
-convention into a guarantee.
+**It outlives its spawner.** A function that starts a goroutine and
+returns has leaked it, unless something else arranges otherwise. Every
+mature Go codebase has a goroutine-leak story and a `pprof` screenshot.
 
-The failure mode with a catchable cancellation is specific and common:
-a `catch (Exception e)` or `except:` somewhere in the stack swallows
-the cancellation, the task keeps running, and the scope that was trying
-to shut down hangs waiting for it. Kotlin's documentation devotes real
-space to *not* catching `CancellationException`, which is the tell.
+**Its panic kills the program.** Not the goroutine — the process. Which
+is why `recover` is mandatory in every handler.
 
-Uncatchable removes the possibility.
+**Its errors vanish.** A goroutine returning an error has nowhere to
+put it. Which is why every mature Go codebase reinvents `errgroup`.
 
-#### The closure property
+Trio's insight — **nurseries** — is that a task's lifetime should be
+bounded by a lexical region. Since Trio, the idea has been adopted by
+Kotlin (`coroutineScope`), Swift (`TaskGroup`), and Java (Loom's
+`StructuredTaskScope`). It is not experimental.
 
-This is the subtle one and it is elegant:
+The consequence in Glide: **leaks are unrepresentable**, because
+`spawn` exists only on a scope handle and scope exit always joins.
 
-> **User code never observes a cancelled task.**
+#### Why one spawn primitive, not Kotlin's two
 
-Cancellation implies the scope is going down. If the scope is going
-down, no live code remains to `join()` a cancelled child. So there is
-nothing to observe, no `Cancelled` value to return, and — crucially —
-**no `Cancelled` error type leaking into any signature.**
+Kotlin has `launch` (fire-and-forget) and `async` (returns a
+`Deferred`). Glide has one.
 
-Kotlin leaks `CancellationException` into every `catch` block in its
-ecosystem. Glide's type system never mentions cancellation at all.
+`DESIGN.md`'s reasoning: **Kotlin needed two because exceptions are
+invisible control flow.** With `launch`, a failure propagates
+immediately to the scope; with `async`, it is stored in the `Deferred`
+and surfaces at `await`. And Kotlin's `async` carries the library's
+most-complained-about gotcha — a child's failure kills the scope
+*before* the planned `await`-and-handle, so the handler never runs.
 
-#### Why only scopes cancel
+Glide's `Result`s are visible values, so one primitive covers both
+roles. A `Task` holding an `Err` is just a task holding a value. Rules
+2 and 3 make it safe: the error waits to be joined, and if it is never
+joined it still cannot vanish.
 
-There is no `t.cancel()`, and Kotlin's `job.cancel()` is the thing
-being declined.
+#### Why "values wait, bugs don't"
 
-`DESIGN.md`: `job.cancel()` is a structured-concurrency escape hatch —
-arbitrary code killing a task it does not own. Once any code can cancel
-any task, the lexical reasoning that structured concurrency exists to
-provide is gone.
+The asymmetry is the interesting part of the design.
 
-The legitimate use case — "cancel the losers when one wins" — is a
-*race* construct, and it is `select`-shaped rather than
-cancel-shaped (Chapter 28).
+An `Err` is an expected outcome. The scope body may want to join other
+children first, may want partial success, may want to try a fallback.
+Cancelling everything the instant one child returns an `Err` would make
+partial success impossible.
 
-#### Why cancellation points are blocking operations only
+A panic is a bug. The program is in an unknown state, and there is no
+sensible reason to keep siblings running. So it cancels immediately.
 
-Because the alternative is worse.
+Both are recoverable-at-the-scope, and neither can be silently lost.
 
-`DESIGN.md` records that loop back-edge checks in the interpreter were
-**considered and rejected**: dev-tier programs would be more cancellable
-than release-tier, and **semantics that differ by tier are poison.**
+#### The accepted costs
 
-That is a strong principle worth noting — the tiered-backend design
-allows overflow, backtraces, hygiene, and debug info to differ, and it
-explicitly does not allow *semantics* to differ.
+`DESIGN.md` records three, honestly:
 
-The recorded cost: a pure compute loop cannot be cancelled. If you
-write `for { compute() }` with no blocking call, a timeout will not
-stop it. Trio, Kotlin, and Swift all have the same property, and the
-mitigation is the same: put a blocking operation (even a zero
-`sleep`) in a long compute loop if it must be interruptible.
+**No early cancellation on `Err`.** Child A runs for 60 seconds; child
+B fails at 1 second. `a.join()?` waits out the full 60 before the error
+propagates. The outcome is identical and the waste is bounded. Joining
+in completion order is `select` territory (Chapter 29).
 
-#### Why `errdefer` fires on cancellation
+**First error wins; the rest are dropped.** An M2 simplification —
+revisit if real code shows the dropped errors mattered.
 
-Because the operation did not complete, so compensations apply.
-`DESIGN.md` is explicit: skipping them would make timeouts corrupt
-state that errors do not.
-
-If a timeout leaves a half-written file that an error would have
-cleaned up, the timeout is a data-corruption mechanism. Firing
-`errdefer` makes the two paths consistent.
-
-#### Why `Duration` and `Instant` are distinct types
-
-What Go and C++ `chrono` got right. A duration and a point in time are
-different concepts, and conflating them permits nonsense:
-`now() + now()`, `sleep(timestamp)`, comparing a timeout to a clock
-reading.
-
-`DESIGN.md` goes further in the designed `time` module: four types —
-`Time` (an instant), `Date` (calendar date, no zone), `TimeOfDay`
-(09:00), and `ZonedTime` (civil time plus IANA zone) — because Go's
-single `time.Time` moonlighting as all four manufactures bugs, and
-`java.time` is the gold standard.
-
-The sharpest of those: **future events are civil time plus a zone,
-never instants.** "9am Sydney next March" is not a fixed point until it
-happens — DST legislation moves the instant, not the 9am. Storing
-future appointments as UTC is one of the subtlest widespread datetime
-bugs in production.
-
-#### The monotonic hybrid
-
-Kept from Go: `now()` carries both wall and monotonic readings, and
-elapsed-time arithmetic automatically uses monotonic. That kills the
-measured-a-timeout-across-an-NTP-step bug **in the default path**.
-
-`DESIGN.md`'s framing is worth keeping: Rust makes you choose
-correctly (`Instant` versus `SystemTime`); Go makes the correct thing
-happen when you do not think. For a bug this subtle, the second is
-better.
+**No ambient spawn.** `spawn` exists only on a scope handle, `main`
+included. That is the point, not a limitation, but it does mean a
+utility function cannot start background work without being handed a
+scope.
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** `context.Context` as an explicit first parameter, with
-`WithCancel`, `WithTimeout`, `WithDeadline`, and `WithValue`.
-Cancellation is cooperative — you must `select` on `ctx.Done()` — and
-unchecked. Go's own standard library duplicated its entire database API
-(`Query`/`QueryContext`, `Exec`/`ExecContext`) to retrofit it, which
-`DESIGN.md` cites as the cost.
+**Go.** `go f()`, unstructured, plus `sync.WaitGroup`, `errgroup`, and
+`context.Context` threaded manually. Every one of those three libraries
+is reconstructing a piece of what a scope gives you: waiting,
+error collection, and cancellation. Glide's scope is all three,
+built in, and unavoidable.
 
-**Python (Trio).** `move_on_after(5)` and `fail_after(5)` as scope
-config — the direct shape Glide copies. Cancellation is a
-`Cancelled` exception that convention says not to catch, and Trio's
-documentation works hard on that convention.
+**Python (Trio).** The origin of nurseries. `async with
+trio.open_nursery() as n: n.start_soon(f)`. Trio's `MultiError` handles
+several children failing at once, which Glide simplifies to
+first-wins.
 
-**Kotlin.** Structured cancellation with `withTimeout`, cooperative
-`isActive` checks, and `CancellationException`. Also `job.cancel()`,
-which Glide declines. The `CancellationException`-in-every-catch-block
-problem is the specific thing uncatchability fixes.
+**Kotlin.** `coroutineScope`, `launch`/`async`, `Job.cancel()`,
+`supervisorScope`. The closest full-featured relative. Glide declines
+the two-primitive split (above), `Job.cancel()` (Chapter 27), and
+`supervisorScope` (errgroup semantics fall out of composition).
 
-**Swift.** `Task.isCancelled` and `Task.checkCancellation()` —
-cooperative and explicit, so you must poll. `withTaskGroup` gives
-structure. Swift's approach is more visible and more manual than
-Glide's ambient delivery.
+**Swift.** `withTaskGroup`, structured concurrency with `async let`.
+Also `async`/`await`, so it pays the colouring cost that Glide avoids.
 
-**Java (Loom).** `StructuredTaskScope` with timeouts; interruption
-remains the underlying mechanism, and `InterruptedException` is a
-checked exception that everyone mishandles — the twenty-five-year
-version of the catch-the-cancellation problem.
+**Java (Loom).** Virtual threads plus `StructuredTaskScope`. The most
+significant vindication of the model — a conservative, enormous
+ecosystem concluded after fifteen years of reactive programming that
+plain blocking code on cheap threads is better.
 
-**Rust (async).** Dropping a future cancels it, which is elegant and
-has a sharp edge: cancellation can happen at *any* await point, so
-"cancellation safety" is a property every async function must document
-and most do not. `tokio::select!` is where this bites hardest.
+**Erlang.** Processes plus supervision trees. Architecturally similar
+at a different granularity: an Erlang supervisor restarts a dead child
+rather than propagating the failure. `DESIGN.md` flags Erlang-style
+supervision policies (`supervise(restart: .on_failure, backoff: …)`) as
+a likely future scope variant, and "likely the first-used adopt" for
+always-on services.
 
-**C#.** `CancellationToken` passed explicitly — Go's model in a
-language with exceptions. Same virality, same unchecked-ness.
+**Rust (async).** `tokio::spawn` is unstructured (a detached task);
+`JoinSet` and the `tokio-scoped`/`async-scoped` crates approximate
+scopes. Rust's difficulty here is downstream of the borrow checker: a
+scoped task borrowing from the parent's stack is exactly what
+lifetimes must reason about.
 
 ---
 
 ### 5. Common Mistakes
 
-**Expecting a compute loop to be cancellable.**
+**Expecting `spawn` outside a scope to work.** There is no ambient
+spawn. If a function needs to start background work, it takes a scope
+handle:
 
 ```glide
-// Bad — no blocking operation, so a timeout cannot stop this
-scope(timeout: 1.s) {
-    for { fibonacci(1_000_000) }
-}
-
-// Good — a blocking operation gives cancellation a delivery point
-scope(timeout: 1.s) {
-    for {
-        chunk_of_work()
-        time.sleep(0.ms)      // a cancellation point
-    }
+// Good
+fn start_sweeper(s: Scope, db: Db) {
+    _ = s.spawn(|| sweeper(db))
 }
 ```
 
-The second form is not elegant, and it is the honest mitigation for the
-recorded cost.
-
-**Trying to catch cancellation.** There is nothing to catch. If you
-need to know that a deadline was hit, that is the scope's `Result`:
+**Forgetting that scope exit blocks.**
 
 ```glide
-match scope(timeout: 5.s) { work() } {
-    Ok(v)        => v
-    Err(Timeout) => fallback()
+// This does not return until the task finishes
+scope s {
+    _ = s.spawn(|| slow_thing())
 }
+println("after")      // runs after slow_thing completes
 ```
 
-**Looking for `t.cancel()`.** It does not exist. Restructure so the
-scope's lifetime is the cancellation boundary, or use `select`
-(Chapter 28) for a race.
+That is the guarantee, not a surprise — but if you wanted the function
+to return immediately, you wanted a *longer-lived* scope, not a
+fire-and-forget task.
 
-**Expecting body errors to nest inside the timeout Result.** They do
-not — scopes are control-flow transparent, so a `?` in the body exits
-the enclosing function.
+**Assuming an unjoined error is ignored.** It is not — rule 3. If you
+genuinely want to ignore it, `let _ = t.join()`.
 
-**Passing a timeout as a parameter.**
-
-```glide
-// Bad — this is ctx-threading reinvented
-fn fetch_all(urls: List<String>, timeout: Duration) -> …
-
-// Good — the caller sets the scope
-scope(timeout: 5.s) {
-    fetch_all(urls)
-}
-```
-
-The whole point is that the timeout is ambient. Reintroducing it as a
-parameter is the disease coming back.
-
-**Using bare integers for durations.**
+**Capturing a `mut` binding in a spawned closure.**
 
 ```glide
-// Bad — 60 what?
-sleep(60)
+// A compile error: the data-race archetype
+let mut count = 0
+s.spawn(|| { count += 1 })
 
 // Good
-time.sleep(1.mins)
+let snapshot = count
+s.spawn(|| use(snapshot))
 ```
 
-Duration literals are the reason `sleep(1.mins)` cannot be confused
-with `sleep(60)` of unknown unit. There is no implicit conversion.
+Adopt the freeze idiom now, before the rule is enforced.
 
-**Reaching for `.days`.** It does not exist. A day is calendar
-arithmetic. Use `24.h` if you genuinely mean 24 hours, and note that on
-a DST boundary that is *not* the same as "tomorrow at the same time".
+**Expecting `a.join()?` to cancel `b` immediately.** It does — but only
+when the `?` fires, which is after `a` completes. If `b` fails first
+and `a` runs for a minute, you wait the minute. Joining in completion
+order is `select`'s job.
 
-**Comparing Instants with struct equality intuitions.** `==` on
-`Instant` behaves like Go's `Equal`, which is wall-clock aware. Two
-Instants representing the same moment compare equal even if their
-monotonic readings differ.
+**Using a scope for a single task.** A scope with one child that you
+immediately join is a function call with extra steps:
+
+```glide
+// Pointless
+let x = scope s { s.spawn(|| work()).join() }
+
+// Just call it
+let x = work()
+```
+
+Scopes earn their keep with concurrency, or with a long-lived child
+whose lifetime should be bounded.
+
+**Benchmarking compute parallelism in the interpreter.** One
+interpreter lock means two compute-bound tasks serialise. IO-bound
+concurrency works properly.
 
 ---
 
 ### 6. Performance Considerations
 
-**Cancellation costs nothing on the happy path.** There is no polling
-loop and no periodic check. A blocking operation registers with the
-task's cancellation channel; if nothing cancels, nothing happens.
+**Tasks are green threads.** In the compiled tier they are goroutines
+— a few kilobytes of stack that grows on demand, multiplexed onto OS
+threads by a work-stealing scheduler. Spawning thousands is ordinary.
 
-**Delivery is at the next blocking operation**, so the latency between
-"the scope cancelled" and "the task stopped" is the duration of the
-current non-blocking stretch. For IO-bound code that is microseconds;
-for a long compute stretch it is the length of the compute.
+**Stackful is the cost.** Kilobytes per task where Rust futures are
+bytes. At a million concurrent connections on small hardware, async
+wins. `DESIGN.md` concedes that workload explicitly.
 
-**`hostCtx()` allocates a context per blocking call** in the
-interpreter, plus a goroutine when the task has a cancellation channel.
-That is a real per-call cost at this tier and not at the compiled one.
+**Scope exit costs a join per child**, which is a synchronisation per
+task, not per operation.
 
-**Unwinding runs every `defer` and `errdefer` frame.** That is required
-for correctness and happens once, on the way out.
+**In the interpreter**, one lock means no compute parallelism.
+IO-bound work interleaves correctly because the lock is released around
+blocking operations. Do not measure CPU-bound speedup here.
 
-**`Duration` and `Instant` are value types** — 64-bit integers plus, in
-`Instant`'s case, the monotonic reading. Arithmetic is integer
-arithmetic. No allocation.
+**`join()` is a cancellation point** and blocks. So is `sleep`, so are
+channel operations and IO.
 
-**Scope exit with a timeout costs one timer.**
+**The drain-join loop handles children spawning siblings**, so scope
+exit is O(total children) rather than O(children at exit time).
 
 ---
 
 ### 7. Best Practices
 
-**Put the timeout at the boundary where the operation has a deadline.**
+**Let the scope define the lifetime.** The idiom is that a scope's
+extent *is* the answer to "how long should this run?":
 
 ```glide
-// Good — the request has a budget; everything inside inherits it
-fn handle(req: Request) -> Result<Response, ApiError> {
-    scope(timeout: 2.s) {
-        let user = load_user(req.user_id)?
-        let prefs = load_prefs(user)?
-        Ok(render(user, prefs))
-    }
+scope s {
+    _ = s.spawn(|| sweeper(db))              // dies with the server
+    _ = s.spawn(|| metrics_reporter())       // dies with the server
+    http.serve(":8080", router)              // the long-running thing
 }
 ```
 
-Neither `load_user` nor `load_prefs` mentions a timeout. Their database
-queries are cancellation points, so both are bounded by the scope.
+When `serve` returns — for any reason, including an error — the sweeper
+and reporter are cancelled and joined. **No shutdown code exists
+anywhere.** That is the design working.
 
-**Do not thread timeouts as parameters.** If you find a `timeout:
-Duration` parameter spreading through your call graph, you have
-rebuilt `ctx`.
-
-**Use `deadline:` for a shared budget, `timeout:` for a fresh one.**
+**Join deliberately, or discard deliberately.**
 
 ```glide
-// A per-attempt budget
-for attempt in 1..=3 {
-    match scope(timeout: 1.s) { try_once() } {
-        Ok(v)        => return Ok(v)
-        Err(Timeout) => continue
-    }
-}
+// Good — the error matters
+let x = t.join()?
 
-// A total budget across attempts
-let end = time.now() + 3.s
-for attempt in 1..=3 {
-    match scope(deadline: end) { try_once() } {
-        Ok(v)        => return Ok(v)
-        Err(Timeout) => break        // the whole budget is gone
+// Good — the error genuinely does not matter, and it says so
+let _ = t.join()
+
+// Bad — relying on rule 3 to notice
+_ = s.spawn(|| might_fail())
+```
+
+The third form works (rule 3 catches it), and it is worse because the
+reader cannot tell whether you thought about it.
+
+**Freeze before spawning.**
+
+```glide
+let snapshot = config
+let id = request.id
+s.spawn(|| handle(snapshot, id))
+```
+
+**Prefer partial success where it is meaningful.**
+
+```glide
+// Good — fetch everything, report what failed, use what worked
+scope s {
+    let tasks = urls.iter().map(|u| s.spawn(|| fetch(u))).collect()
+    let mut pages = []
+    for t in tasks {
+        match t.join() {
+            Ok(p)  => pages.push(p)
+            Err(e) => eprintln("fetch failed: {e}")
+        }
     }
+    pages
 }
 ```
 
-**Write durations with units, always.** `500.ms`, `30.s`, `2.h`. Never
-a bare integer that a reader has to interpret.
+Rule 2 is what makes this trivial: an `Err` waits in the handle rather
+than killing the scope.
 
-**Give long compute loops a cancellation point** if they need to be
-interruptible. This is the honest mitigation, and it should be a
-conscious decision rather than a surprise.
-
-**Use `s.deadline()` to adapt, not to poll.**
+**Prefer fail-fast where it is meaningful.**
 
 ```glide
-// Good — size the batch to the remaining budget
-scope(timeout: 5.s) s {
-    if let d = s.deadline() {
-        let remaining = d - time.now()
-        let batch = if remaining > 3.s { 1000 } else { 100 }
-        process(batch)
-    }
+// Good — if any leg fails, the request fails
+scope s {
+    let user = s.spawn(|| load_user(id))
+    let prefs = s.spawn(|| load_prefs(id))
+    Ok(Page{ user: user.join()?, prefs: prefs.join()? })
 }
 ```
 
-**Never write cancellation-detection logic.** There is nothing to
-detect. If you want to know that a deadline was hit, read the scope's
-`Result`.
+Same primitive, different composition. That is why there is no mode to
+configure.
+
+**Keep spawned closures small.** A `spawn` whose closure is fifteen
+lines is fifteen lines you cannot test independently. Spawn a call to a
+named function.
+
+```glide
+// Good
+_ = s.spawn(|| sweeper(db))
+```
+
+**Do not nest scopes without a reason.** Each nesting level is a
+synchronisation barrier. Nest when the lifetimes genuinely differ.
 
 ---
 
 ### 8. Examples
 
-**The timeout, complete:**
+**Parallel work with a joined result:**
 
-```glide
+```glide-run
 import time
 
-fn with_deadline() -> String {
-    let r = scope(timeout: 25.ms) s {
-        _ = s.spawn(|| time.sleep(10.s))
-        time.sleep(10.s)
-        "finished"
-    }
-    match r {
-        Ok(msg)      => msg
-        Err(Timeout) => "timed out (children cancelled and joined)"
-        Err(_)       => "other"
+fn work(id: Int, ms: Int) -> Int {
+    time.sleep(ms.ms)
+    id * 10
+}
+
+fn parallel() -> Int {
+    scope s {
+        let a = s.spawn(|| work(1, 20))
+        let b = s.spawn(|| work(2, 10))
+        a.join() + b.join()
     }
 }
 
 fn main() {
-    println(with_deadline())
+    println(parallel())
 }
 ```
 
 ```
-timed out (children cancelled and joined)
+30
 ```
 
-Both the body's `sleep` and the child's `sleep` were cancelled at their
-next cancellation point (immediately, since they were blocked), the
-child was joined, and the scope produced `Err(Timeout)`. No shutdown
-code, no `done` channel, no polling.
+Two tasks, 20ms and 10ms, and the scope takes about 20ms rather than
+30. (In the interpreter, `sleep` releases the lock, so this genuinely
+overlaps.)
 
-**Duration arithmetic:**
+**All four rules, demonstrated:**
 
-```glide
+```glide-run
 import time
 
-fn main() {
-    let d = 1.s + 500.ms
-    println("{d}")                  // 1.5s
-    println(d > 1.s)                // true
-    println("{d * 3}")              // 4.5s
-    println("{2.mins + 30.s}")      // 2m30s
+// Rule 1 + 2: an Err is a value; join it and decide.
+fn partial() -> List<String> {
+    scope s {
+        let a = s.spawn(|| Ok("alpha"))
+        let b = s.spawn(|| Err("beta failed"))
+        let c = s.spawn(|| Ok("gamma"))
 
-    let start = time.now()
-    time.sleep(20.ms)
-    let elapsed = time.now() - start
-    println("elapsed at least 20ms: {elapsed >= 20.ms}")
-}
-```
-
-```
-1.5s
-true
-4.5s
-2m30s
-elapsed at least 20ms: true
-```
-
-`Duration` renders as Go does. Note `time.now() - time.now()` is an
-`Instant - Instant`, producing a `Duration` — and using the monotonic
-reading, so an NTP step during the sleep cannot make it negative.
-
-**Side by side with Go — the shape that motivates the whole design:**
-
-```go
-// Go: ctx in every signature, a select in every loop
-func Sweeper(ctx context.Context, db *sql.DB) error {
-    ticker := time.NewTicker(time.Minute)
-    defer ticker.Stop()
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case <-ticker.C:
-            if _, err := db.ExecContext(ctx, "delete from stale"); err != nil {
-                return err
+        let mut good = []
+        for t in [a, b, c] {
+            match t.join() {
+                Ok(v)  => good.push(v)
+                Err(e) => eprintln("  skipped: {e}")
             }
         }
+        good
     }
 }
 
-func Run() error {
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+// Rule 1: `?` exits the body; the scope cancels and joins the rest.
+fn fail_fast() -> Result<Int, String> {
+    scope s {
+        let a = s.spawn(|| Err("boom"))
+        let b = s.spawn(|| Ok(5))
+        let x = a.join()?
+        let y = b.join()?
+        Ok(x + y)
+    }
+}
 
-    g, ctx := errgroup.WithContext(ctx)
-    g.Go(func() error { return Sweeper(ctx, db) })
-    g.Go(func() error { return server.ListenAndServe() })
-    return g.Wait()
+// Rule 3: an unjoined Err still fails the scope.
+fn cannot_vanish() -> Result<Int, String> {
+    scope s {
+        _ = s.spawn(|| Err("silent failure"))
+        Ok(1)
+    }
+}
+
+fn main() {
+    println("{partial():?}")
+    println("{fail_fast():?}")
+    println("{cannot_vanish():?}")
 }
 ```
 
+```
+  skipped: beta failed
+["alpha", "gamma"]
+Err("boom")
+Err("silent failure")
+```
+
+Three different behaviours from one primitive, chosen by how the body
+composes.
+
+**The server pattern — the shape most real programs have:**
+
 ```glide
-// Glide: no ctx, no select, no errgroup, no cancel
+import http
+import sql
+import time
+
 fn sweeper(db: Db) {
     for {
-        time.sleep(1.mins)
-        _ = db.exec("delete from stale") ?? 0
+        time.sleep(10.mins)
+        _ = db.exec("delete from sessions where expires < :now",
+                    ["now": time.now()]) ?? 0
     }
 }
 
-fn run(db: Db, r: Router) -> Result<(), Error> {
+fn run() -> Result<(), Error> {
+    let db = sql.open("sqlite:app.db")?
+    defer { _ = db.close() }
+
+    let mut r = http.router()
+    r.get(`/health`, |req| http.text("ok"))
+
     scope s {
         _ = s.spawn(|| sweeper(db))
         http.serve("127.0.0.1:8080", r)
@@ -724,77 +712,57 @@ fn run(db: Db, r: Router) -> Result<(), Error> {
 }
 ```
 
-Count what disappeared: the `ctx` parameter on `sweeper`, the `select`
-with its `ctx.Done()` arm, the ticker (a plain `sleep` is a
-cancellation point), the `errgroup`, the `WithCancel`, and the
-`defer cancel()`.
+`sweeper` is an infinite loop. It has no shutdown flag, no `done`
+channel, no `context.Context` parameter, and no way to be told to stop.
+When `serve` returns — because of an error, because the scope was
+cancelled by an enclosing timeout, or because the whole thing is
+unwinding — the sweeper is cancelled at its next blocking operation
+(`time.sleep`), its `defer`s run, and the scope joins it.
 
-`sweeper` has no way to be told to stop, and it stops correctly.
-`time.sleep` is a cancellation point, so when the scope dies — because
-`serve` returned, or because an enclosing timeout fired, or because
-something panicked — the sleeping sweeper unwinds, runs its defers, and
-is joined.
+Count the lines of shutdown code: zero.
 
-That is the payoff `DESIGN.md` is claiming when it says the
-ctx-replacement covers HTTP for free.
+The Go equivalent needs a `context.Context` threaded into `sweeper`, a
+`select` on `ctx.Done()` inside its loop, an `errgroup` to collect the
+server's error, and a `defer cancel()`. Chapter 27 does that comparison
+properly.
 
-**Cancellation reaching an HTTP client:**
+**Bad versus good: the leaked goroutine**
 
-```glide
-import http
-import time
-
-fn fetch_with_budget(url: String) -> String {
-    let r = scope(timeout: 50.ms) {
-        match http.get(url) {
-            Ok(resp) => "{resp.status()}"
-            Err(e)   => "error: {e}"
+```go
+// Go — this compiles, runs, and leaks
+func StartMonitor(db *sql.DB) {
+    go func() {
+        for {
+            time.Sleep(time.Minute)
+            checkHealth(db)
         }
-    }
-    match r {
-        Ok(s)        => s
-        Err(Timeout) => "gave up after 50ms"
-        Err(_)       => "other"
-    }
+    }()
 }
 ```
 
-`http.get` is a cancellation point, so the scope's deadline aborts the
-in-flight request. Nothing in `fetch_with_budget`'s signature mentions
-a timeout, and `http.get` takes no `ctx`.
-
-**Bad versus good: the timeout parameter**
+`StartMonitor` returns immediately. The goroutine runs until the
+process dies. If `StartMonitor` is called per request, you have a leak
+that grows linearly with traffic, and it is invisible until a heap
+dump.
 
 ```glide
-// Bad — ctx-threading, rebuilt by hand
-fn load_page(id: Int, timeout: Duration) -> Result<Page, Error> {
-    let user = load_user(id, timeout)?
-    let prefs = load_prefs(user, timeout)?      // …and now the budget doubles
-    Ok(render(user, prefs))
+// Glide — unwritable. `spawn` needs a scope, so the caller must
+// decide how long the monitor should live.
+fn start_monitor(s: Scope, db: Db) {
+    _ = s.spawn(|| monitor(db))
+}
+
+fn main() -> Result<(), Error> {
+    let db = sql.open(dsn)?
+    scope s {
+        start_monitor(s, db)
+        serve_forever()
+    }
 }
 ```
 
-Two problems. The parameter is viral — `load_user` and `load_prefs`
-both need it, and so does everything they call. And the semantics are
-wrong: passing the same `timeout` to two sequential calls gives a total
-budget of twice the timeout.
-
-```glide
-// Good
-fn load_page(id: Int) -> Result<Page, Error> {
-    let user = load_user(id)?
-    let prefs = load_prefs(user)?
-    Ok(render(user, prefs))
-}
-
-// The caller sets the budget, once, for the whole subtree
-scope(timeout: 2.s) {
-    load_page(id)?
-}
-```
-
-One budget, applied to the whole subtree, and no signature mentions
-it.
+The lifetime is now visible at the call site, and it is bounded by a
+lexical region a reader can see.
 
 ---
 
@@ -802,59 +770,57 @@ it.
 
 **Summary**
 
-- **Cancellation belongs to the scope.** No `ctx` parameter, no
-  signature changes. `scope(timeout: 5.s) { … }` bounds everything in
-  the subtree.
-- `scope(timeout: d)` and `scope(deadline: t)` evaluate to
-  `Result<T, Timeout>`. Body errors propagate *through* the scope, so
-  they never nest inside the timeout's Result. `Timeout` converts at
-  the outer `?` via `E.from(Timeout)`.
-- **Cancellation is a third unwind** — neither error nor panic. It is
-  **uncatchable**, which turns Trio's and Kotlin's "do not swallow
-  this" convention into a guarantee.
-- **`defer` and `errdefer` both run** during cancellation: locks must
-  be released, and compensations apply because the operation did not
-  complete.
-- **Closure property:** user code never observes a cancelled task, so
-  no `Cancelled` type leaks into any signature. Kotlin leaks
-  `CancellationException` into every catch block; Glide's type system
-  never mentions cancellation.
-- **Only scopes cancel.** There is no `t.cancel()` — arbitrary code
-  killing a task it does not own is the escape hatch that destroys the
-  lexical reasoning.
-- **Cancellation points are blocking operations**: `join`, `sleep`,
-  channel ops, `select`, IO, generator handoffs. Pure compute loops are
-  uncancellable — a recorded cost, uniform with Trio/Kotlin/Swift. Loop
-  back-edge checks were rejected because semantics that differ by tier
-  are poison.
-- **`Duration` and `Instant` are distinct types.** Constructors are
-  suffix properties (`250.ms`, `0.5.s`, `2.h`); no `.days`, because a
-  day is calendar arithmetic. No `Instant + Instant`, no
-  `Duration / Duration`.
-- The **monotonic hybrid** is kept from Go: elapsed-time arithmetic
-  uses the monotonic reading automatically, so an NTP step cannot
-  corrupt a measurement.
-- `s.deadline()` reads the nearest inherited deadline — the one place
-  cancellation state is readable, through an explicit handle.
+- Glide is **green-threaded** — cheap tasks, no `async`/`await`, no
+  function colouring. Async exists as a compiler transform for
+  languages that cannot have a runtime or threads; Glide has both.
+- Every task belongs to a **scope**. `scope s { … }` is an expression;
+  `s.spawn(f)` returns a `Task`; `t.join()` blocks and returns exactly
+  what the closure returned.
+- **There is no ambient spawn.** `spawn` exists only on a scope handle,
+  `main` included, which is what makes leaks unrepresentable.
+- The four rules: **(1)** scope exit always joins every child on every
+  path, cancelling first on early exit; **(2)** a child's `Err` is a
+  value that waits in the handle; **(3)** an unjoined child's `Err`
+  fails the scope at normal exit, first-wins, ignorable only with an
+  explicit `let _ = t.join()`; **(4)** a child's panic cancels siblings
+  immediately and re-panics at exit.
+- Slogan: **values wait, bugs don't.**
+- There is **no fail-fast mode**. `errgroup` semantics fall out of
+  composition — `a.join()?` exits the body and rule 1 does the rest.
+- One spawn primitive, not Kotlin's `launch`/`async` split: Kotlin
+  needed two because exceptions are invisible; Glide's `Result`s are
+  visible values.
+- Accepted costs: no early cancellation on `Err` (a slow sibling is
+  waited out); first error wins and the rest are dropped; stackful
+  tasks cost kilobytes where async futures cost bytes.
+- Interpreter: one lock, released around blocking operations, so tasks
+  interleave exactly at cancellation points. No compute parallelism at
+  this tier.
+- **A spawned closure may not capture a `mut` binding** ✓ — the
+  data-race archetype, turned into a compile error that names the
+  binding and the two fixes. Immutable captures cross freely.
+- ○: ownership transfer on channel send, and `Mutex<T>`.
 
 **Exercises**
 
-1. **Count the `ctx`s.** In a Go service, count how many function
-   signatures take a `context.Context`. Then count how many of those
-   functions actually *use* it for anything other than passing it
-   along. The ratio is the tax the parameter charges, and it is what
-   ambient cancellation deletes.
+1. **Find the leaked goroutine.** In a Go codebase, find a function
+   that starts a goroutine and returns without providing any way to
+   stop it. Trace how the goroutine eventually terminates — if the
+   answer is "when the process exits", you have found the shape Glide
+   makes unwritable. Then write down what the scope would have to be
+   and where it would live.
 
-2. **Find the uncancellable loop.** Write a Glide program with a
-   compute-only loop inside a `scope(timeout:)` and confirm the timeout
-   does not stop it. Then add a cancellation point and confirm it does.
-   Decide where you would put such a point in a real CPU-bound job —
-   per batch, per row, per second? — and note that this is a decision
-   Go, Rust, Trio, Kotlin, and Swift all make you take.
+2. **Implement partial success and fail-fast with the same
+   primitive.** Write one function that fetches five URLs and returns
+   all successes, and another that fetches five URLs and fails if any
+   fails. Note that the difference is entirely in how the body joins,
+   not in any configuration. Then write a third that fails only if
+   *more than two* fail.
 
-3. **Design the datetime types.** `DESIGN.md` specifies four —
-   `Time`, `Date`, `TimeOfDay`, `ZonedTime` — with the rule that future
-   events are civil time plus zone, never instants. Take a scheduling
-   feature you have built and write down which type each stored field
-   should be. Then find the field that was stored as UTC and should not
-   have been; almost every calendar application has one.
+3. **Cost the concession.** `DESIGN.md` concedes that async wins at
+   extreme task counts. Estimate the crossover: at what number of
+   concurrent idle connections does a few-kilobyte stack per task
+   become a problem on a machine you actually deploy to? Then decide
+   whether your real workloads live on either side of that line — for
+   most backends the answer is "nowhere near", which is why the
+   concession was affordable.

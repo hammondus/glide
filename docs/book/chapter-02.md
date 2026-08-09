@@ -6,7 +6,7 @@ toolchain is the language*. Formatter, test runner, documentation
 generator, LSP, and package manager ship in the same executable as the
 compiler, on day one, with no configuration file format.
 
-Today that binary is a tree-walking interpreter with two subcommands.
+Today that binary is a tree-walking interpreter with three subcommands.
 This chapter covers what exists (✓), what is designed (○), and — more
 usefully — *why* a language project would spend its earliest effort on
 tooling rather than on features.
@@ -77,8 +77,8 @@ with_deadline = timed out (children cancelled and joined)
 ```
 
 That second one is a worker pool, a `select`-based fan-in, and a
-cancelling timeout, all running on the tree-walker. Chapter 25 through
-Chapter 28 pull it apart.
+cancelling timeout, all running on the tree-walker. Chapter 26 through
+Chapter 29 pull it apart.
 
 #### Running tests ✓
 
@@ -98,29 +98,74 @@ skip  bench "insert 10k" (benchmarks not implemented yet)
 ```
 
 The exit code reflects failures, so `glide test` slots into CI without
-a wrapper script. Chapter 22 covers the testing model in full.
+a wrapper script. Chapter 23 covers the testing model in full.
 
-#### Script mode ○
+#### Checking without running ✓
+
+```bash
+glide check file.gld
+```
+
+Report and stop, in the shape of `go vet`: every diagnostic the checker
+can produce, nothing executed, non-zero exit if anything was found.
+
+```bash
+$ glide check app.gld
+app.gld:6:19: expected String, found Int
+ 6 |     println(greet(42))
+   |                   ^^
+```
+
+This is a *convenience*, never a way to skip checking. `glide run` and
+`glide test` run the identical check first, there is no `--no-check`,
+and there is not going to be one — Chapter 19 explains why that
+particular door stays shut.
+
+Put it in a Makefile and in your editor's save hook; it is the fast
+feedback loop.
+
+#### Script mode ✓
 
 Because the dev tier is an interpreter, type-checked scripting is
-nearly free. The designed spelling is a shebang:
+nearly free — and a `#!` line on the first line is skipped, so a script
+is an executable:
 
 ```glide
-#!/usr/bin/env glide run
+#!/usr/bin/env -S glide run
 // tidy.gld — a maintenance script with real types
+import os
+
 fn main() {
-    println("hello from a script")
+    println("{os.args()}")
 }
 ```
 
 ```bash
-chmod +x tidy.gld
-./tidy.gld
+$ chmod +x tidy.gld
+$ ./tidy.gld alpha "two words"
+["./tidy.gld", "alpha", "two words"]
 ```
 
-Shebang handling is not wired up today (the `#!` line is not yet
-skipped by the lexer), but `glide run tidy.gld` works now and is the
-same program.
+Arguments reach `os.args()` exactly as they would through
+`glide run tidy.gld alpha "two words"`, which is the same program.
+
+**Write `env -S`, not bare `env`.** Linux passes everything after the
+interpreter path to `execve` as a *single* argument, so
+`#!/usr/bin/env glide run` sends `env` looking for a binary literally
+named `glide run` and fails. macOS splits the line instead, so the bare
+form works there and breaks the moment the script reaches a Linux box —
+the worst shape a portability bug can take. `-S` (GNU coreutils 8.30+,
+and BSD/macOS `env`) does the splitting explicitly on both.
+
+Two details of the implementation are worth knowing, because both are
+the kind of thing that is annoying to retrofit:
+
+- The line is **skipped, not stripped**. Its newline is still counted,
+  so every diagnostic in the file reports the line your editor shows.
+  A `sed 1d` approach would put every error one line out.
+- `#` is a comment character **nowhere else** — not on line 2, not
+  mid-line. It is recognised only as the first two bytes of a file, so
+  nothing about the rest of the grammar changes.
 
 #### The designed command surface ○
 
@@ -130,8 +175,9 @@ The full command set is *closed* — this list is the whole thing, and
 | Command | Purpose | Status |
 |---|---|---|
 | `glide build` | Compile to a native binary | ○ |
-| `glide run` | Build (or interpret) and execute | ✓ (interprets) |
-| `glide test` | Run tests — **and** format check, lints, race detector, doc-link validation, examples | ✓ (tests only) |
+| `glide run` | Build (or interpret) and execute | ✓ (interprets; checks first) |
+| `glide test` | Run tests — **and** format check, lints, race detector, doc-link validation, examples | ✓ (tests only; checks first) |
+| `glide check` | Type-check and report, changing nothing | ✓ |
 | `glide fmt` | Canonical formatter | ○ |
 | `glide vet` | Advisory lints | ○ |
 | `glide doc` | Terminal lookup + local HTML docs server | ○ |
@@ -189,7 +235,7 @@ thing to know about running Glide today — and it is the thing M4, the
 work currently in progress, exists to end.
 
 An earlier plan deferred the checker to a compiler frontend written in
-Glide. That was reversed, for reasons Chapter 35 covers: the frontend
+Glide. That was reversed, for reasons Chapter 37 covers: the frontend
 would have been the most type-dense Glide program ever written, written
 in the one tier that checks nothing. The checker is being built in Go
 first, and the interpreter keeps it — `glide run` is meant to be a
@@ -444,7 +490,7 @@ what `tree.gld` is.
 **Forgetting that arguments come after the filename.** `glide run
 prog.gld a b c` passes `a b c` to the program. `os.args()` returns the
 program name first, then those arguments — so a one-argument program
-destructures `[_, path]`, matching a two-element list. Chapter 30
+destructures `[_, path]`, matching a two-element list. Chapter 31
 covers this properly.
 
 **Assuming `glide test` is only tests.** In the designed toolchain it
@@ -615,7 +661,7 @@ $ echo $?
 ```
 
 Out-of-bounds indexing is a **panic**, not an error value — bug
-territory, per the philosophy in Chapter 20. The exit code is 1, so
+territory, per the philosophy in Chapter 21. The exit code is 1, so
 scripts notice.
 
 **Cross-compiling the toolchain itself** (a preview of what
@@ -675,7 +721,7 @@ direct reward for exiling C FFI to the margins.
 2. **Measure the tiers.** Run `examples/sieve.gld` and time it. Then
    write the equivalent Go program and time that. The ratio you get is
    the price of the current dev tier; keep the number in mind when
-   Chapter 35 discusses the transpiler. (Do not draw conclusions about
+   Chapter 37 discusses the transpiler. (Do not draw conclusions about
    the *language* from it — you are measuring a tree-walker.)
 
 3. **Design the tenth command.** The command surface is closed at nine.

@@ -15,7 +15,7 @@ Everything in this chapter is ✓ — it runs today.
 
 #### The smallest complete program
 
-```glide
+```glide-run
 fn main() {
     println("hello, world")
 }
@@ -34,7 +34,7 @@ Six tokens of significance:
 - **`main`** is the entry point, and *nothing runs before it*. No
   `init()` functions, no module-level `let`, no import side effects, no
   static initialisers. Line one of `main` is line one of your program.
-  This is a load-bearing guarantee, not a convenience — Chapter 29
+  This is a load-bearing guarantee, not a convenience — Chapter 30
   explains what it buys.
 - **`()`** is the parameter list. `main` takes none. Command-line
   arguments arrive through `os.args()`, not through a parameter.
@@ -47,7 +47,7 @@ Six tokens of significance:
 
 #### Two functions
 
-```glide
+```glide-run
 fn greet(name: String) -> String {
     "Hello, {name}!"
 }
@@ -81,7 +81,7 @@ compile time in the designed language.
 
 #### Declaration order does not matter
 
-```glide
+```glide-run
 fn main() {
     println(greet("world"))
 }
@@ -103,7 +103,7 @@ only downstream of its line.
 
 #### Imports
 
-```glide
+```glide-run
 import os
 
 fn main() {
@@ -158,7 +158,7 @@ $ echo $?
 1
 ```
 
-Chapter 19 covers `Result` and `?` properly. For now, three
+Chapter 20 covers `Result` and `?` properly. For now, three
 observations about the *shape*:
 
 - `main`'s caller is the runtime. It turns `Ok(())` into exit code 0,
@@ -315,7 +315,7 @@ exactly why Go could afford to spend the case axis on visibility
 instead.
 
 Since the case axis is spent, visibility needs its own keyword — `pub`.
-Chapter 29 argues that this is an improvement anyway: a visibility
+Chapter 30 argues that this is an improvement anyway: a visibility
 change becomes a one-line diff that *says* "this became public,"
 reviewable in a way that a whole-codebase capitalisation rename is not.
 
@@ -549,7 +549,7 @@ fn setup() {
 Yes, this is more typing than Go. It is also the reason Glide can
 promise there are no silent discards anywhere — the same rule applies
 inside `defer` blocks, which is how Go's worst `defer f.Close()`
-data-loss bug is prevented (Chapter 21).
+data-loss bug is prevented (Chapter 22).
 
 **Expecting `os.args()` to exclude the program name.** It does not.
 `os.args()[0]` is the program name, exactly as in C and Go. A
@@ -674,7 +674,7 @@ curate imports.
 **A program with no imports, demonstrating the tail rule and
 interpolation:**
 
-```glide
+```glide-run
 fn fizzbuzz(n: Int) -> String {
     match {
         n % 15 == 0 => "FizzBuzz"
@@ -836,5 +836,5 @@ does not fit the value's type is an error rather than
    something you ignore, or where a called function's return value is
    dropped silently. Would Glide's rule have caught a real bug, or
    would it just have cost you a `_ =`? Write down the ratio you would
-   expect across the whole codebase. Chapter 21 asks you the same
+   expect across the whole codebase. Chapter 22 asks you the same
    question about `defer`.

@@ -65,7 +65,7 @@ is the word *closure*.
 A closure can read and write bindings from the scope where it was
 created — and it keeps them alive after that scope has gone:
 
-```glide
+```glide-run
 fn make_counter() -> fn() -> Int {
     let mut n = 0
     || {
@@ -104,7 +104,7 @@ every "object with one method" you will ever need.
 
 The everyday use:
 
-```glide
+```glide-run
 fn main() {
     let mut entries = [("a", 3), ("b", 1), ("c", 2)]
     entries.sort_by(|a, b| a.1.cmp(b.1))
@@ -126,7 +126,7 @@ entries.sort_by(|a, b| b.1.cmp(a.1))     // descending
 
 Iterator adapters are the other big consumer:
 
-```glide
+```glide-run
 fn main() {
     let nums = [1, 2, 3, 4, 5, 6]
     let evens = nums.iter().filter(|n| n % 2 == 0).collect()
@@ -143,7 +143,7 @@ fn main() {
 
 #### Capture is by reference, and it is live
 
-```glide
+```glide-run
 fn main() {
     let mut total = 0
     let add = |n| { total += n }
@@ -169,7 +169,7 @@ let add = |n| { total += n }     // error: total is not mut
 This is the subtle one, and it follows from Chapter 4's rule that
 redeclaration creates a *new* binding:
 
-```glide
+```glide-run
 fn main() {
     let name = "first"
     let who = || name
@@ -185,7 +185,7 @@ made a different binding.
 
 #### Loop variables are fresh per iteration
 
-```glide
+```glide-run
 fn main() {
     let mut fs = []
     for i in 0..3 {
@@ -217,7 +217,7 @@ language. Glide has the correct behaviour from day one.
 A closure body is a new *function* boundary, not a nested block, so the
 shadow ban from Chapter 4 does not apply:
 
-```glide
+```glide-run
 fn main() {
     let n = 100
     let g = |n| n + 1
@@ -317,6 +317,34 @@ The important part is not the spelling; it is that there is exactly
 value", "closure that captures by mutable reference", and "closure that
 consumes its captures".
 
+#### Annotating a closure's parameters
+
+Parameters may be annotated, and any subset of them:
+
+```glide
+let inc = |x: Int| x + 1
+let add = |a: Int, b| a + b       // partial annotation is fine
+```
+
+You rarely need this — a closure handed to `sort_by`, `map` or a
+declared `fn(Int) -> Int` parameter takes its types from the slot, and
+is fully checked as a result. But a closure that **nothing
+constrains** has no types to check against, and the checker stays
+silent about it (Chapter 19):
+
+```glide
+let f = |x| x + 1
+println(f("hello"))       // accepted; fails at runtime
+
+let g = |x: Int| x + 1
+println(g("hello"))       // expected Int, found String
+```
+
+The rule of thumb: **if a closure lands in a `let`, annotate it.** If
+it goes straight into a call, do not bother. Where an annotation
+contradicts what the slot expects, the conflict is reported once, at
+the annotation.
+
 #### Why Rust needs three and Glide needs one
 
 Rust's `Fn` / `FnMut` / `FnOnce` hierarchy is not gratuitous. It exists
@@ -351,7 +379,7 @@ tight loop that creates a closure per iteration, that is measurable
 today and largely disappears when compiled — the compiler can stack-
 allocate a non-escaping closure.
 
-#### Task boundaries have an extra rule ○
+#### Task boundaries have an extra rule ✓
 
 There is one compile-time restriction, and as of M4c it is enforced:
 
@@ -371,7 +399,7 @@ This is the data-race archetype, and it is statically visible:
 mut-ness is known and `spawn` is a known boundary. The escape hatches
 are to freeze (`let snapshot = counter`) or to clone. Cheap rule, whole
 race class turned into a compile error; the race detector backstops
-what escapes via reference-typed immutable captures. Chapter 25 returns
+what escapes via reference-typed immutable captures. Chapter 26 returns
 to this.
 
 ---
@@ -543,7 +571,7 @@ fn find_admin(users: List<User>) -> User? {
 
 A closure is a function. Its `return` is its own. This is also why the
 `or |e| { … }` construct was declined in the error-handling design
-(Chapter 19): a block that *looks* like a closure but whose `return`
+(Chapter 20): a block that *looks* like a closure but whose `return`
 exits the enclosing function is impersonating something it is not.
 
 **Trying to `break` out of a loop from inside a closure.** Parse error.
@@ -631,7 +659,7 @@ This is a real performance difference in tight functional pipelines and
 is part of the "roughly the last 20% of performance" that `DESIGN.md`
 lists as a deliberate sacrifice.
 
-**Adapters are lazy** (Chapter 23), so `xs.iter().map(f).take(3)`
+**Adapters are lazy** (Chapter 24), so `xs.iter().map(f).take(3)`
 calls `f` three times, not `xs.len()` times. The closure cost scales
 with what you consume, not with what you have.
 
@@ -673,7 +701,7 @@ fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
 
 Notice the good version still needs a closure — a one-line adapter that
 supplies `db`. That is the idiomatic shape for dependency injection in
-Glide, and it appears throughout Chapter 32.
+Glide, and it appears throughout Chapter 34.
 
 **Prefer a nested `fn` when the helper does not need to capture.**
 Chapter 7's rule. If the body only uses its parameters, `fn` states
@@ -726,7 +754,7 @@ s.spawn(|| { use(snapshot) })
 
 **Building a small pipeline, one step at a time:**
 
-```glide
+```glide-run
 type Note = struct {
     pub title: String
     pub words: Int
@@ -908,9 +936,13 @@ using a callback to *simulate* a loop.
   the types are identical.
 - No trailing closures, no `$0`/`it`. Closures are arguments and sit in
   the parens; naming the parameter is documentation.
-- ○: the `fn(A) -> B` type spelling is not parsed yet; the rule that
-  task-crossing closures may not capture `mut` bindings is designed and
-  unenforced.
+- **Parameter annotations are optional** ✓ — `|x: Int| x + 1`, any
+  subset. Rarely needed, because a closure passed to a typed slot takes
+  its parameter types from the slot; necessary when nothing constrains
+  the closure, because an unconstrained closure is otherwise unchecked
+  (Chapter 19).
+- ○: an *optional function* type has no spelling, and method values
+  (`x.method` unapplied) do not exist.
 
 **Exercises**
 
@@ -924,7 +956,7 @@ using a callback to *simulate* a loop.
 2. **Build a memoiser.** Write `memoize(f)` that returns a closure with
    the same behaviour as `f` but caching results in a captured `Map`.
    Then answer: what happens if two tasks call the memoised closure
-   concurrently? (You will need Chapter 25 for the real answer, but
+   concurrently? (You will need Chapter 26 for the real answer, but
    predict it now — the captured map is a `mut` binding crossing a task
    boundary.)
 

@@ -164,6 +164,138 @@ and `DESIGN.md` records it as the cheaper mistake: a check is a branch
 the hardware predicts, while a silent wrap is a wrong answer that
 propagates.
 
+#### Arithmetic beyond the operators
+
+Four operations live as **methods on the number**, at every width:
+
+```glide-run
+fn main() {
+    println((-5).abs())          // 5
+    println(3.min(7))            // 3
+    println(3.max(7))            // 7
+    println(2.pow(10))           // 1024
+    println((2.0).pow(0.5))      // 1.4142135623730951
+}
+```
+
+| Method | Signature | Notes |
+|---|---|---|
+| `abs()` | `() -> Self` | **signed only**; traps at the type's minimum |
+| `min(o)` / `max(o)` | `(Self) -> Self` | ordered by the same comparison `<` and `sorted()` use |
+| `pow(e)` | `(Int) -> Self` on integers, `(Float) -> Float` on floats | traps on overflow; a negative integer exponent is an error |
+
+`abs` is signed-only on purpose: an unsigned `abs` is the identity
+function, and writing it reads like a sign was handled. It traps at the
+minimum, which has no positive counterpart — the same rule as `-x`.
+
+Everything **Float-only** lives in the `math` module instead:
+
+```glide-run
+import math
+
+fn main() {
+    println(math.sqrt(2))            // 1.4142135623730951
+    println(math.floor(-1.5))        // -2
+    println(math.ceil(-1.5))         // -1
+    println(math.round(-1.5))        // -2   — half away from zero
+    println(math.trunc(-1.5))        // -1
+    println(math.pi)                 // 3.141592653589793
+    println(math.is_nan(math.nan))   // true
+}
+```
+
+`math.pi`, `math.e`, `math.inf` and `math.nan` are **values, not
+calls** — `math.pi()` is an error naming the constant. Modules can hold
+values as of this module; before it they held functions only, which is
+why `pi` had nowhere in the language to exist.
+
+**The dividing line is width, and it is worth understanding.** A method
+earns its place on a number by needing the receiver to say *which of
+the nine numeric types* it is: `abs` must work at `u8` and at `Int`
+alike, and a `Self` receiver binds that for free. `sqrt` needs none of
+that — there is only ever one type involved — so it is a plain
+function.
+
+Reaching for one in the wrong place says where it went:
+
+```glide
+println((2.0).sqrt())   // error: sqrt lives in the math module — write math.sqrt(x)
+println(5.sqrt())       // error: sqrt lives in the math module and takes a Float
+                        //        — write math.sqrt(Float(n))
+```
+
+Go's history is the corroboration rather than the counterexample:
+`math.Min` was float64-only because Go could not write it generically,
+and Go 1.21's fix was not a generic `math.Min` — it was to make
+`min`/`max` universe *builtins*. That third option is worse here for
+its own reason: it would reserve `min` and `max` program-wide, and both
+are common variable names.
+
+None of this is permanent. When operator traits (`Add`, `Mul`) make a
+`Numeric` bound expressible ○, `math.abs<T: Numeric>(v: T) -> T` types
+itself with no special case, and the four can move.
+
+#### Comparison, and Float's total order
+
+`< <= > >=` route through `Ord` (Chapter 17), and so does `sorted()`,
+so a comparison and a sort can never disagree. For `Float` that
+requires a decision, and Glide's is a **total** order:
+
+```glide-run
+import math
+
+fn main() {
+    let nan = math.nan
+    println(nan == nan)                 // false  — IEEE 754
+    println(nan.cmp(nan))               // 0      — total order
+    println(nan.min(1.0))               // 1
+    println(nan.max(1.0))               // NaN
+    println([3.0, nan, 1.0].sorted())   // [1, 3, NaN]
+}
+```
+
+NaN sorts after every number and equals itself under `cmp`; `-0.0`
+compares equal to `0.0`. Meanwhile `==` obeys IEEE 754, so `nan == nan`
+is `false`.
+
+That split is deliberate and it is what Java's `Double.compare` and
+Rust's `total_cmp` also ship. A *partial* `cmp` would let sorting a
+list containing NaN silently drop elements — a far worse outcome than
+one surprising comparison. Rust's `f64::min` agrees about
+`nan.min(1.0)` and Go's `math.Max` about `nan.max(1.0)`; one coherent
+order beats matching either piecemeal, because here `min`, `<` and
+`sorted()` must never disagree.
+
+#### `==` is structural and universal
+
+```glide-run
+fn main() {
+    println([1, 2] == [1, 2])                    // true
+    println(["a": 1, "b": 2] == ["b": 2, "a": 1]) // true  — order is not identity
+    println(Some(1) == Some(1))                  // true
+    println(1 == 1.0)                            // error: Int and Float can never be equal
+}
+```
+
+There is no `Eq` trait to declare and no way to redefine `==`. It
+compares byte-for-byte on strings, reaches inside the `Option` box, and
+recurses through structs, variants, tuples, `List`, `Map`, `Result`,
+`Error`, `distinct` and `Range`.
+
+**A `Map` ignores insertion order.** Order is a specified *iteration*
+property, not part of a map's identity, so two maps with the same pairs
+are equal however they were built — Python's rule. A `List` stays
+order-sensitive, because a list is a sequence.
+
+The only values that are *not* comparable are the ones with no
+structure: functions, iterators, and the concurrency handles (`Scope`,
+`Task`, `Sender`, `Receiver`). There `==` could only mean identity,
+which is not a question this language lets you ask.
+
+Comparing two types that can never be equal is a compile error rather
+than a `false` — a silent `false` is how `interface{} == interface{}`
+bugs survive in Go.
+
 #### Booleans, and the absence of truthiness
 
 ```glide
@@ -311,18 +443,33 @@ nobody enjoys: `0.1 + 0.2 != 0.3`, `NaN != NaN`, and signed zero. Glide
 does not attempt to fix floating point, and money belongs in `Decimal`
 (○, stdlib, chosen by name).
 
-#### Constant arithmetic is arbitrary-precision ○
+#### Literals are magnitudes, and range is checked
 
-Literals are arbitrary-precision until they land in a type — Go's
-untyped constants, Zig's `comptime_int`, falling out of the comptime
-design:
+A literal carries no type until something gives it one, and the sign is
+a separate token. That is what makes both ends of every type's range
+writable:
 
 ```glide
-const k = 1 << 100        // ○ fine in constant math
-let x: u8 = 300           // ○ compile error, not a wrap
+let a: u64 = 18446744073709551615     // fine — larger than Int's maximum
+let b: i8  = -128                     // fine — no positive counterpart
+let c: Int = -9223372036854775808     // fine
+let d: u8  = 300                      // 300 does not fit in u8
+let e: u64 = -1                       // -1 does not fit in u64
 ```
 
-This is not implemented; today a literal is an `int64` immediately.
+The last two are **compile errors**, reported by the checker before
+anything runs. A literal larger than `u64`'s maximum is rejected by the
+lexer, since no type could hold it.
+
+Constant *expressions* wider than 64 bits are still ○:
+
+```glide
+const k = 1 << 100        // ○ waits for comptime const evaluation
+```
+
+Arbitrary-precision constant arithmetic — Go's untyped constants, Zig's
+`comptime_int` — falls out of the comptime design (Chapter 36) and
+arrives with it.
 
 #### Why the interpreter prints `1` for `1.0`
 
@@ -346,18 +493,20 @@ Debug quotes it.
 invalid byte, rather than erroring — a recorded decision that keeps
 lossy input from becoming a crash.
 
-#### Sized integers ○
+#### The widths that are not there
 
-`i8` through `i128` and `u8` through `u128` are designed and not
-implemented. Two design notes worth knowing now:
+`i8`–`i64` and `u8`–`u64` all run. Two notes on what is missing and
+what was never coming:
 
-- **`i128`/`u128` are primitives, not a library type.** A `u128` *is*
-  an IPv6 address, a UUID, a 128-bit hash. They lower to pairs of
-  64-bit operations, which LLVM does well. (Watch the historical i128
-  ABI mismatch at C boundaries.)
-- **There is no `usize`.** Lengths and indices are signed `Int`. The
-  reasoning is in the next section and it is one of the more
-  contrarian decisions in the language.
+- **`i128`/`u128` are ○, and deliberately deferred past M4.** They are
+  ratified as *primitives*, not a library type — a `u128` *is* an IPv6
+  address, a UUID, a 128-bit hash — but Go has no native 128-bit
+  integer, so the interpreter would need a software implementation
+  that the compiled tier would then throw away. (Watch the historical
+  i128 ABI mismatch at C boundaries when they land.)
+- **There is no `usize`, and there will not be.** Lengths and indices
+  are signed `Int`. The reasoning is in the next section and it is one
+  of the more contrarian decisions in the language.
 
 ---
 
@@ -538,14 +687,14 @@ reasoning for each is above.
 
 **JavaScript.** One number type (f64) until `BigInt` arrived, so
 integer IDs past 2^53 silently corrupt — a bug Glide addresses even in
-its JSON design (Chapter 31 keeps numbers in lexical form for exactly
+its JSON design (Chapter 33 keeps numbers in lexical form for exactly
 this reason). Truthiness as discussed. `==` versus `===`. It is the
 cautionary tale in almost every section of `DESIGN.md`.
 
 **Java.** No unsigned types at all until the awkward static methods in
 Java 8; silent overflow; `int` versus `Integer` boxing. Java's
 `java.time` is the one part of Java that Glide steals without irony
-(Chapter 26).
+(Chapter 27).
 
 ---
 
@@ -558,8 +707,8 @@ let avg = total / count.len()        // fine if both Int
 let avg = total / 2.0                // error if total is Int
 ```
 
-There is no implicit widening. Convert explicitly. (The conversion
-functions are ○; today you would restructure the arithmetic.)
+There is no implicit widening. Convert explicitly:
+`Float(total) / Float(count.len())`.
 
 **Expecting integer division to produce a Float.** `7 / 2` is `3`, not
 `3.5`. If you want the second, both operands must be `Float`.
@@ -710,7 +859,7 @@ which is genuinely how Rust's history forced them to add `..=`.
 
 **A numeric-formatting tour, complete and runnable:**
 
-```glide
+```glide-run
 fn main() {
     let bytes = 1_048_576
     let ratio = 0.8734
@@ -757,17 +906,21 @@ fn mean(xs: List<Int>) -> Float? {
     }
     let mut total = 0
     for x in xs {
-        total += x            // traps on overflow in dev
+        total += x            // traps on overflow, in every tier
     }
     // Integer division would truncate; the sum is converted first.
-    Some(total.to_float() / xs.len().to_float())     // ○ to_float()
+    Some(Float(total) / Float(xs.len()))
 }
 ```
 
-The `to_float()` calls are ○ — the conversion surface is not
-implemented yet. The point stands: the conversion is a *call*, visible
-on the line, and you cannot write `total / xs.len()` and accidentally
-get truncation when you wanted a mean.
+```
+Some(2.5)
+```
+
+The conversion is a *call*, visible on the line. You cannot write
+`total / xs.len()` and accidentally get truncation when you wanted a
+mean, because the return type is `Float?` and an `Int` does not fit
+it.
 
 **Demonstrating the trap, deliberately:**
 
@@ -789,7 +942,7 @@ error: line 2: Int overflow: 9000000000000000000 * 2 (use wrapping_mul for modul
 
 The error names the line inside `checked_double`, not the call site.
 That is correct — the overflow happened there — and in the designed
-compiler an error return trace (Chapter 19, ○) would show the
+compiler an error return trace (Chapter 20, ○) would show the
 propagation path.
 
 **Bad code, and why:**
@@ -844,8 +997,21 @@ signature.
   precision, thousands, hex, Debug. A mismatched spec is an error, not
   noise.
 - No `++`, no ternary, no assignment-as-expression, no user-defined
-  operators. Operator traits (○) are scoped to arithmetic and
-  comparison only.
+  operators. Arithmetic operator traits (`Add`, `Mul`) are ○ and scoped
+  hard; `Ord` ✓ already drives `< <= > >=` and `sorted()` from one
+  `cmp`.
+- **`abs`, `min`, `max` and `pow` are methods on the number** ✓,
+  because they need the receiver to say which of the nine numeric
+  types it is. Everything Float-only — `sqrt`, the rounding family, the
+  classification family, and the constants `pi`/`e`/`inf`/`nan` — is in
+  the **`math` module** ✓.
+- **`Float`'s `cmp` is a total order** ✓ (NaN sorts last and equals
+  itself) while `==` obeys IEEE 754 (`nan == nan` is `false`). One
+  coherent order, so `min`, `<` and `sorted()` never disagree.
+- **`==` is structural and universal** ✓ — no `Eq` trait, not
+  redefinable, recursing through every structured value. A `Map`
+  ignores insertion order; a `List` does not. Comparing two types that
+  can never be equal is a compile error, not a silent `false`.
 - `??` binds loosest of all binary operators. Parenthesise when mixing
   it with arithmetic.
 

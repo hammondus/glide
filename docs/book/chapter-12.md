@@ -155,7 +155,7 @@ type Note = struct {
 
 `derive` asks the compiler to generate implementations by walking the
 type's structure at compile time — JSON encoding, database row mapping,
-debug printing. It is ○, comptime-era work (Chapter 34).
+debug printing. It is ○, comptime-era work (Chapter 36).
 
 Today, structural Debug output works without deriving anything, because
 the interpreter renders values structurally:
@@ -291,7 +291,7 @@ Notice how this composes with the rest of the design:
 - No zero values + mandatory struct patterns (Chapter 10) means adding
   a field breaks exactly the places that claimed to account for
   everything.
-- No zero values + JSON decoding (Chapter 31) means "field absent from
+- No zero values + JSON decoding (Chapter 33) means "field absent from
   input" is a decode error rather than a silent zero — Go's
   `encoding/json` disease, cured upstream.
 
@@ -566,7 +566,7 @@ sum type in a struct costume, and the next chapter is about why.
 
 **A configuration type with a constructor and update:**
 
-```glide
+```glide-run
 type Config = struct {
     pub host: String
     pub port: Int
@@ -608,7 +608,7 @@ That is the encapsulation story working.
 
 **Parse, don't validate — the pattern private fields exist for:**
 
-```glide
+```glide-run
 type Email = struct { raw: String }
 
 impl Email {
@@ -742,7 +742,7 @@ Chapter 13 is entirely about this transformation.
 - Types opt into a default via the `Default` trait (○), so `Mutex` and
   `Builder` still construct bare while domain types get no fake
   instances.
-- `derive(Json, Row, Debug)` is ○ and is Chapter 34. Structural Debug
+- `derive(Json, Row, Debug)` is ○ and is Chapter 36. Structural Debug
   output works today without it.
 - Interpreter caveat: structs are shared behind pointers, so assignment
   does not copy yet. Prefer struct update where the distinction

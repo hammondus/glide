@@ -1,40 +1,634 @@
-# Chapter 38: Architecture and Project Structure
+# Chapter 38: Effective Glide
 
-Most architecture advice is compensation for missing language features.
-Repository patterns exist because ORMs leak. Dependency-injection
-containers exist because constructors cannot fail and globals are the
-alternative. Hexagonal architecture exists to keep an untyped boundary
-from contaminating a domain model.
+Thirty-five chapters have covered what the language *is*. This one is
+about what a good Glide program *looks like* — the judgement calls that
+no individual feature chapter can settle because they are about
+choosing between features.
 
-Glide deletes several of those pressures, so this chapter is shorter
-than the equivalent chapter in a Java or Go book — and its central
-claim is that **for most programs, the right architecture is almost
-none**.
+There is a single organising heuristic, and it comes from Chapter 1's
+third pillar:
 
-Most of this chapter is judgement rather than syntax, and the
-package-manager pieces are ○.
+> **The source code should tell you what it costs.**
+
+Almost every style question in this chapter reduces to that.
 
 ---
 
 ### 1. Basic Usage
 
-#### The three-section `main`
+#### Naming
 
-Almost every Glide program has this shape, and it is worth memorising:
+| Kind | Convention | Examples |
+|---|---|---|
+| Types, variants, constructors | `PascalCase` | `Note`, `NoteId`, `NotFound`, `Some` |
+| Bindings, functions, fields, modules | `snake_case` | `note_id`, `read_config`, `http` |
+| Constants | `snake_case` — same as any binding | `max_retries`, `default_timeout` |
+
+**The case rule is enforced by the formatter**, and it is grammar
+rather than style: pattern matching depends on it (Chapter 3).
+
+There is no SCREAMING_CASE. `DESIGN.md`: it is C-preprocessor scar
+tissue, and an earlier evaluation time is not a siren.
+
+#### Naming, beyond case
+
+**Types are nouns; functions are verbs; predicates ask questions.**
 
 ```glide
+type Connection = struct { … }
+fn connect(host: String) -> Result<Connection, Error>
+fn is_open(c: Connection) -> Bool
+```
+
+**Methods that mutate are verbs; methods that read are nouns.** Because
+there is no call-site `mut` marker on receivers (Chapter 16), the
+method name is the only signal a reader gets:
+
+```glide
+fn len(self) -> Int              // reads
+fn is_empty(self) -> Bool        // reads
+fn push(mut self, v: T)          // mutates
+fn clear(mut self)               // mutates
+```
+
+**A past participle means "give me a new one".** `sorted()` returns a
+copy; `sort_by()` mutates in place. Rust's convention, and it maps
+exactly onto `self` versus `mut self`.
+
+**Traits name capabilities; types name identities.** `Reader`,
+`Iterable`, `Ord`, `Display` — what you can *do*. `SqlStore`,
+`Circle`, `Config` — what something *is*.
+
+**Do not repeat the module in the name.** `http.get`, not
+`http.http_get`. Cross-module calls are already qualified.
+
+#### File and declaration order
+
+**File order is narrative order.** The formatter deliberately does not
+reorder declarations, because sequence is the author's storytelling
+channel. Put the important thing first; helpers after.
+
+```glide
+// Good
+fn main() -> Result<(), Error> { … }
+fn run(cfg: Config) -> Result<(), Error> { … }
+fn load_config(path: String) -> Result<Config, ConfigError> { … }
+fn parse_line(s: String) -> Result<Entry, ConfigError> { … }
+```
+
+**Split a module across files freely.** Files share one namespace
+(Chapter 30), so splitting is editorial and has no API consequence.
+
+#### Signature design
+
+A reader should be able to use a function without reading its body.
+That means:
+
+**Precise error types.** `Result<Note, ApiError>` where the failure
+modes are known; `Result<Note, Error>` only in application code where
+the caller is `main`.
+
+**Optionality in the type.** `User?` when absence is possible; `User`
+when it is not — and the second half matters as much as the first
+(Chapter 14).
+
+**Distinct types for identifiers.** `fn get(id: NoteId)`, not
+`fn get(id: Int)` (Chapter 15).
+
+**Named arguments for anything a reader cannot infer from the value** —
+booleans always, and any two parameters of the same type:
+
+```glide
+copy(from: src, to: dst)
+resize(width: 800, height: 600)
+connect("db.local", tls: false)
+```
+
+**Defaults for optional configuration**, not a `Config` struct — unless
+the configuration travels to more than one function, in which case it
+is a struct (Chapter 7).
+
+#### Choosing between constructs
+
+The decision table that this book has been building toward:
+
+| Question | Answer |
+|---|---|
+| One of N shapes, closed set, want exhaustiveness | **Sum type** (13) |
+| One of N shapes, open set, third parties extend | **Trait** (17) |
+| Same code for many types | **Generics** (18) |
+| Might be absent | **`T?`** (14) |
+| Might fail, caller distinguishes causes | **`Result<T, SumError>`** (19) |
+| Might fail, caller only reports | **`Result<T, Error>`** (19) |
+| Bug, no caller can handle it | **panic** (20) |
+| Named identifier, no arithmetic | **`distinct`** (15) |
+| Two things, briefly | **Tuple** (11) |
+| Three things, or crossing an API boundary | **Struct** (12) |
+| Assign once, two branches | **`if` expression** (9) |
+| Assign once, many branches | **`match`** (10) |
+| Transform a value through stages | **Sequential redeclaration** (4) |
+| Accumulate across iterations | **`let mut`, then seal** (4) |
+| Absence has a sensible default | **`??`** (14) |
+| Absence aborts | **`let … else`** (14) |
+| Both cases have code | **`if let`** (14) |
+| Transforming a sequence | **Iterator adapters** (23) |
+| Doing something to each element | **`for` loop** (23) |
+| Writing an iterator | **Generator** (24) |
+| Bound a task's lifetime | **`scope`** (25) |
+| Bound an operation's time | **`scope(timeout:)`** (26) |
+| Stream of values between tasks | **Channel** (27) |
+| One value from a task | **`Task` + `join()`** (25) |
+| Wait on several channels | **`select`** (28) |
+| Cleanup always | **`defer`** (21) |
+| Cleanup only on failure | **`errdefer`** (21) |
+
+#### Reading a diff
+
+What a reviewer should look for, in rough order of value:
+
+1. **A new `mut`.** Is it a genuine accumulator, or an
+   assign-in-both-branches that wants an expression-`if`?
+2. **A new `_ =>` arm.** Has someone just opted out of exhaustiveness?
+3. **A new `??` on a `Result`.** An error was discarded — deliberately?
+4. **A new `?` on a line that had none.** A new early-exit path.
+5. **A widened signature** — `T` becoming `T?`, or a precise error type
+   becoming `Error`. Both are work pushed onto every caller.
+6. **A `pub` added.** A one-line diff that says "this became public",
+   and now it is a contract.
+7. **A `spawn` without a visible join or discard.**
+8. **An interpolation inside a query string.** The one place discipline
+   is entirely manual (Chapter 35).
+
+That list is short *because* the language makes most other changes
+either impossible or visible. There is no "did they forget a null
+check", no "does this new field break the JSON decoder", no "is this
+goroutine leaked".
+
+---
+
+### 2. Under the Hood
+
+#### Why the formatter enforces case
+
+Because pattern matching is ambiguous without it (Chapter 3), and
+because "conventions the tool enforces" and "conventions people
+remember" have very different adherence rates.
+
+The formatter is a **pure function from AST to bytes** with **no
+configuration file format** (Chapter 2). Same code, byte-identical
+output, everywhere.
+
+One escape valve, and it is grammatical rather than configurable: **a
+trailing comma forces one-element-per-line.** That lets you preserve
+structural intent — a matrix-shaped literal, a routing table where each
+line is a route — through the grammar rather than through whitespace
+the formatter would erase.
+
+#### Why `glide test` is the style gate
+
+Format check, lints, unused-code errors, doc-link validation, and the
+race detector all run there, and **none of them is a compile error**.
+
+The reasoning (Chapter 2): a codebase compiling with 400 warnings
+trains everyone to ignore number 401, so hygiene must be an error
+*somewhere* — but a compiler that yells about whitespace while you
+think is hostile, and Go's comment-out-a-line-and-get-a-cascade
+experience is the failure mode. Dev builds warn; `glide test` and
+release builds error.
+
+#### Documentation is ordinary comments
+
+```glide
+// read_config loads and parses the configuration at path.
+// It returns Missing when the file does not exist, and Malformed
+// with a line number when parsing fails.
+pub fn read_config(path: String) -> Result<Config, ConfigError> { … }
+```
+
+Four rules, each with a reason:
+
+**No tag language.** `@param`/`@returns` is write-only noise restating
+a signature that is already explicit. Prose says what the signature
+cannot.
+
+**The first sentence starts with the identifier name.** Load-bearing,
+not fussy: it is what makes one-line summaries readable in search,
+tooltips, and listings. A lint at test tier.
+
+**Markdown subset from day one** — headings, lists, fences, links. Go
+spent twelve years on plain text before conceding in 1.19.
+
+**Checked identifier links.** `[Config]` resolves against real
+declarations, and a stale link fails at the test tier. `DESIGN.md` is
+blunt about the consequence: "renaming a function can fail
+`glide test` over a comment. That's correct."
+
+Examples are Go-style **Example functions** — real compiled,
+output-checked code in test files, rendered into docs. Rust's
+doc-tests are rejected: runnable code inside comments is code invisible
+to the formatter, LSP, refactoring, and grep.
+
+Undocumented `pub` items are a **vet-tier lint, advisory not gating** —
+full strictness breeds `// Foo does foo.`, which is worse than no doc
+because it occupies the space where a real one would go.
+
+---
+
+### 3. Why This Design?
+
+#### Why `mut` scarcity is the highest-value habit
+
+`mut` is an audit mark, and **an audit mark is only worth anything if
+it is rare**.
+
+If 90% of your locals are `let`, then `mut` on a binding is a signal a
+reviewer reads. If everything is `mut` by reflex, the marker carries no
+information, readers stop seeing it, and the one genuinely stateful
+variable in a function gets missed.
+
+This is why Chapter 4 spends so long on the alternatives —
+expression-`if`, `match`, sequential redeclaration, block expressions,
+build-then-seal. Each one is a way to not spend a `mut`.
+
+The same logic applies to every marker in the language. `_ =` is
+meaningful because silent discards do not exist. `?` is scannable
+because there is no invisible propagation. `pub` is reviewable because
+it is a keyword rather than a capitalisation.
+
+#### Why "parse, don't validate" is the central pattern
+
+Three chapters build to it — private fields (12), `Option` (14), and
+`distinct` (15) — and it is the most valuable pattern in the book:
+
+```glide
+type Email = struct { raw: String }
+
+impl Email {
+    pub fn parse(s: String) -> Email? { … }
+    pub fn value(self) -> String { self.raw }
+}
+
+fn send(to: Email, body: String) { … }
+```
+
+`send` does not validate, because it **cannot receive an invalid
+address**. Validation happened once, at the boundary, and the type
+carries the proof forward.
+
+Count what disappears: every downstream null check, every "is this
+string actually an email" comment, every defensive re-validation, and
+the possibility of two call sites validating differently.
+
+It needs three things together — mandatory initialisation so a bare
+`Email{}` is unwritable, private fields so `parse` is the only door,
+and `Option` so the failure has somewhere to go. Chapter 12's summary
+called it "the single most valuable pattern in the chapter", and it is
+the single most valuable pattern in the language.
+
+#### Why "maps at the boundary, structs inside"
+
+The same shape, applied to data rather than validation (Chapters 11,
+31, 33).
+
+Untrusted or unstructured data arrives as a `Map` — from JSON, from a
+config file, from a database row. That is the honest representation of
+"text of unknown shape". Then it lives for three lines and becomes a
+type.
+
+The alternative — letting the map flow downstream — means every
+function knows the schema, restates the defaults, and handles absence.
+Two call sites can disagree about the default for a field, and nothing
+notices.
+
+#### Why signatures are the documentation
+
+Because Glide spent its budget making signatures carry information:
+explicit types, precise errors, `T?` for absence, `distinct` for
+identity, `mut` for mutation, default values for optional
+configuration, and named arguments at call sites.
+
+A signature that says
+`fn get(db: Db, id: NoteId) -> Result<Note?, StoreError>` tells you:
+what it needs, that the ID cannot be confused with another ID, that the
+note might not exist, that it might fail, and how it might fail.
+
+A signature that says `fn get(db, id)` tells you nothing, and it is
+what you get if you skip the annotations because the checker is not
+watching yet.
+
+---
+
+### 4. Competing Approaches
+
+**Go.** *Effective Go* plus the community's accumulated conventions:
+short receiver names, `err` last, accept interfaces return structs,
+don't panic in libraries. Most of it transfers. What does not: Go's
+"a little copying is better than a little dependency" applies with less
+force when generics work, and Go's naming conventions around
+capitalisation do not exist here.
+
+**Rust.** The API guidelines checklist plus clippy. Glide's style is
+mostly Rust's, minus lifetime-related conventions, minus the
+combinator-heavy style (`ok_or_else`, `map_err`, `and_then`) that
+Glide's three-construct approach replaces.
+
+**Python.** PEP 8 (formatting, superseded in practice by Black) and
+PEP 20 (the Zen). "Explicit is better than implicit" is Glide's
+visibility pillar; "there should be one obvious way to do it" is
+`DESIGN.md`'s second principle.
+
+**Java.** Effective Java — still the best book of its kind, and
+half of its items are workarounds for language limitations Glide does
+not have. "Prefer immutability", "consider a builder", "use Optional
+sparingly", "prefer enums to int constants" — each is a chapter here
+instead of an item.
+
+---
+
+### 5. Common Mistakes
+
+**Go-in-Glide, Rust-in-Glide, Java-in-Glide.** Chapter 39 is entirely
+about these.
+
+**Spending `mut` on assign-once variables.** The single most common
+translation artifact.
+
+**Widening a signature to avoid a decision.** Changing `Note` to
+`Note?` because one caller might not have one, or `ApiError` to `Error`
+because a new failure mode does not fit — both push work onto every
+caller, and both are usually a sign the boundary is wrong.
+
+**Adding `_ =>` to silence an exhaustiveness error.** You have
+converted a compile-time work list into a silent default.
+
+**Letting a map escape the boundary.** Every downstream function now
+knows the schema.
+
+**Validating instead of parsing.** If a function starts with a
+precondition check, ask whether the type could make the precondition
+unnecessary.
+
+**Over-abstracting early.** A trait with one implementation is a type
+with extra steps; a generic parameter that never varies is pure
+overhead; a module per type is a namespace, not a boundary.
+
+**Under-abstracting where it is cheap.** A `distinct` type is ten
+characters and kills a bug class. A sum type is one line and makes
+illegal states unrepresentable. These are not the expensive
+abstractions.
+
+**Writing documentation that restates the signature.**
+
+```glide
+// Bad
+// get_note gets a note.
+// Params: db - the database. id - the id.
+// Returns: the note, or an error.
+pub fn get_note(db: Db, id: NoteId) -> Result<Note?, StoreError>
+
+// Good
+// get_note loads a single note. It returns None when no note has
+// that id, which is not an error — callers routinely check for
+// existence this way.
+pub fn get_note(db: Db, id: NoteId) -> Result<Note?, StoreError>
+```
+
+Prose says what the signature cannot.
+
+---
+
+### 6. Performance Considerations
+
+**The pricing pillar in one table.** The expensive thing has the longer
+name — which means style and performance mostly agree:
+
+| Idiomatic (cheap) | Named alternative (costly, deliberate) |
+|---|---|
+| `String` interpolation | `StringBuilder` for loops (○) |
+| `Int` | `BigInt` (○) |
+| Generic bound `<T: Shape>` (static) | `any Shape` (boxed, ○) |
+| `for x in xs` | adapter chain (lazy, composable) |
+| Immutable + struct update | `mut` accumulation |
+| Unbuffered `println` | buffered writer (○) |
+| `Duration` literals | — |
+| Scope-based cancellation | — |
+
+Two rules of thumb follow:
+
+**Write the idiomatic version first.** It is usually the fast one, and
+where it is not, the slow-but-clear version is a better starting point
+than a fast-but-wrong one.
+
+**When you do reach for the costly form, the source says so.** That is
+the property worth protecting — a reviewer can see the decision.
+
+**Do not tune against the interpreter.** Two orders of magnitude
+slower than compiled Go, with a goroutine per generator, an environment
+allocation per call and per block, hash lookups for field access, and
+one interpreter lock.
+
+---
+
+### 7. Best Practices
+
+The distilled list. Most have appeared in a chapter; the value here is
+seeing them together.
+
+**Structure**
+
+1. **Parse, don't validate.** Private fields plus a validating
+   constructor, at the boundary, once.
+2. **Maps at the boundary, structs inside.**
+3. **Make illegal states unrepresentable.** Correlated booleans and
+   correlated Options are sum types in disguise.
+4. **Create dependencies in `main` and pass them down.** No globals,
+   no `init()`, no service locator.
+5. **Attach data to the state that owns it.** `Running{ since }`, not
+   a `since` field that is meaningless in three of four states.
+
+**Mutability and bindings**
+
+6. **Default to `let`. Earn every `mut`.**
+7. **Build with `mut`, then seal** — `let mut acc = …; …; let acc = acc`.
+8. **Use sequential redeclaration for refinement pipelines.**
+9. **Prefer expression-`if` and `match` to assign-in-every-branch.**
+
+**Types**
+
+10. **Wrap identifiers in `distinct` types.** Ten characters, one bug
+    class.
+11. **Let the signature carry the information** — `T?` for absence,
+    precise error sums, distinct IDs, defaults for optional config.
+12. **Do not widen a signature to avoid a decision.**
+
+**Errors**
+
+13. **Libraries enumerate failures; applications use dynamic `Error`.**
+14. **Write `from` for every error type that wraps another.**
+15. **Add context at boundaries, not at every frame.**
+16. **Panics are for bugs.** A library that panics on bad input is
+    unusable.
+
+**Control flow**
+
+17. **Guard clauses first, happy path last, unindented.**
+18. **Avoid `_ =>` on closed types.** It spends the exhaustiveness
+    guarantee.
+19. **Adapters for transformations, loops for effects.** `?` does not
+    work inside a closure, which settles most cases.
+
+**Resources and concurrency**
+
+20. **`defer` on the line after the acquisition. Always.**
+21. **`errdefer` for compensation; do the success path explicitly.**
+22. **Let the scope own the lifetime** — of a task, a server, a
+    timeout.
+23. **Freeze before spawning.**
+24. **`os.exit` before you open anything; `Err` after.**
+
+**Testing and docs**
+
+25. **Write the property, then the examples.**
+26. **Do not mock what you can construct.**
+27. **Documentation says what the signature cannot.**
+
+---
+
+### 8. Examples
+
+**One function, refactored through the whole book.**
+
+Version 1 — a faithful translation of how this would be written in Go:
+
+```glide
+fn process_order(db: Db, order_id: Int, user_id: Int, notify: Bool) -> Int {
+    let mut status = 0
+    let rows = db.query("select * from orders where id = :id",
+                        ["id": order_id]) ?? []
+    if rows.len() == 0 {
+        status = 404
+    } else {
+        let row = rows[0]
+        let total = row["total"] ?? 0
+        if total <= 0 {
+            status = 400
+        } else {
+            _ = db.exec("update orders set state = 'paid' where id = :id",
+                        ["id": order_id])
+            if notify {
+                _ = send_email(user_id, "paid")
+            }
+            status = 200
+        }
+    }
+    status
+}
+```
+
+Everything here compiles. What is wrong with it:
+
+- `order_id` and `user_id` are both `Int` and adjacent —
+  **transposable**.
+- `notify: Bool` at the call site is a bare `true` or `false` —
+  **a boolean trap**.
+- The return type is `Int`, so the caller must know that 404 means
+  not-found — **stringly-typed, in integers**.
+- `?? []` and `?? 0` **discard two errors silently** (well —
+  visibly, but without thought).
+- `rows[0]` **panics** if the invariant breaks.
+- `status` is a **`mut` return slot**, which is what expression-`if`
+  exists to delete.
+- Three levels of nesting for three preconditions.
+
+Version 2 — the same function written in the language:
+
+```glide
+type OrderId = distinct Int
+type UserId = distinct Int
+
+type OrderError =
+    NotFound{ id: OrderId }
+    | InvalidTotal{ id: OrderId, total: Int }
+    | Db{ cause: Error }
+
+impl OrderError {
+    fn from(e: Error) -> OrderError { Db{ cause: e } }
+}
+
+fn process_order(db: Db,
+                 order: OrderId,
+                 user: UserId,
+                 notify: Bool = true) -> Result<(), OrderError> {
+    let Some(row) = db.query_one(
+        "select total from orders where id = :id",
+        ["id": order],
+    )? else {
+        return Err(.NotFound{ id: order })
+    }
+
+    let total = row["total"] ?? 0
+    if total <= 0 {
+        return Err(.InvalidTotal{ id: order, total: total })
+    }
+
+    _ = db.exec("update orders set state = 'paid' where id = :id",
+                ["id": order])?
+
+    if notify {
+        _ = send_email(user, "paid")?
+    }
+    Ok(())
+}
+```
+
+And the call site:
+
+```glide
+match process_order(db, order_id, user_id, notify: false) {
+    Ok(())                          => http.text("ok")
+    Err(NotFound{ .. })             => http.not_found()
+    Err(InvalidTotal{ total, .. })  => http.bad_request("bad total {total}")
+    Err(Db{ cause })                => { eprintln("{cause}"); http.text("error") }
+}
+```
+
+Count the changes:
+
+| Was | Now |
+|---|---|
+| Two adjacent `Int` parameters | `OrderId` and `UserId` — transposition is a type error |
+| `notify` as a positional bool | `notify: false`, named, with a default |
+| `Int` return encoding statuses | `Result<(), OrderError>` — three named failures |
+| Two silent `??` | Two `?`, propagating with conversion |
+| `rows[0]` | `query_one` + `let … else` |
+| `mut status` | no mutable bindings at all |
+| Three levels of nesting | zero |
+| Caller must know 404 means not-found | caller `match`es, exhaustively |
+
+Nothing here is clever. Every change is a feature from an earlier
+chapter, applied because the situation called for it — and the result
+is shorter, flatter, and impossible to misuse in four specific ways.
+
+**The idiomatic service skeleton**, which is worth memorising because
+almost every Glide program has this shape:
+
+```glide
+import http
+import sql
+import time
+
 fn main() -> Result<(), Error> {
-    // 1. Dependencies — created once, visibly.
+    // 1. Dependencies, created once, visibly.
     let db = sql.open(dsn)?
     defer { _ = db.close() }
 
-    // 2. Wiring — closures inject dependencies into handlers.
+    // 2. Wiring: closures inject dependencies into handlers.
     let mut r = http.router()
     r.get(`/notes/{id}`, |req| get_note(db, req))
     r.post(`/notes`, |req| create_note(db, req))
-    let r = r
+    let r = r                                     // sealed
 
-    // 3. Lifetime — the scope owns everything that runs.
+    // 3. Lifetime: the scope owns everything that runs.
     scope s {
         _ = s.spawn(|| sweeper(db))
         http.serve(addr, r)
@@ -42,605 +636,8 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-**That is the dependency-injection framework.** No container, no
-registry, no annotations, no reflection. Section 1 constructs, section
-2 wires with one-line closures, section 3 bounds lifetimes.
-
-#### Small programs need no structure
-
-```
-tool/
-  main.gld
-  glide.mod
-```
-
-One module, one file, `main` at the top and helpers below in narrative
-order (Chapter 3). A CLI of a few hundred lines does not need a
-`cmd/` directory, an `internal/` directory, or a layer.
-
-Files within a module share one namespace (Chapter 29), so splitting is
-editorial:
-
-```
-tool/
-  main.gld        # main, run, argument handling
-  parse.gld       # the parser
-  render.gld      # output formatting
-  glide.mod
-```
-
-Splitting changes nothing about the API. It is a filing decision.
-
-#### Modules are boundaries with contracts
-
-A directory is a module. Reach for a second module when there is a
-genuine **contract** — a set of `pub` items that other code depends on
-and that you intend to keep stable:
-
-```
-service/
-  main.gld              # module: service
-  notes/                # module: notes
-    store.gld
-    types.gld
-  billing/              # module: billing
-    charge.gld
-  glide.mod
-```
-
-The test: can you write down what the module promises without
-describing its implementation? If not, it is not a boundary.
-
-**Name modules after the domain, not the pattern.** `notes`,
-`billing`, `auth` — not `services`, `helpers`, `utils`. A `utils`
-module has no boundary, so it grows until it depends on everything.
-
-#### Consumer-defined traits are the seam
-
-When you need to substitute an implementation — for a test, for a
-second backend — define the trait **where it is used**, not where the
-type lives (Chapter 17):
-
-```glide
-// In the module that needs it
-trait NoteStore {
-    fn get(self, id: NoteId) -> Result<Note?, StoreError>
-    fn put(mut self, n: Note) -> Result<(), StoreError>
-}
-
-// Also here — conformance for the dependency's type
-impl NoteStore for SqlStore { … }
-impl NoteStore for MemStore { … }
-```
-
-This is Go's "accept interfaces, return structs", and it survives
-explicit conformance intact (Chapter 17). The pattern was always about
-*who owns the abstraction*.
-
-#### Layering, when it earns its place
-
-The pressure that produces layers is real: you want the code that knows
-about HTTP separated from the code that knows about SQL, so that
-neither leaks into your domain logic.
-
-Glide's version is usually **two** layers, not four:
-
-```glide
-// Transport: knows HTTP, knows nothing about storage
-fn get_note(store: SqlStore, req: Request) -> Result<Response, ApiError> {
-    let Some(raw) = req.path_param("id") else {
-        return Ok(http.bad_request("missing id"))
-    }
-    let Some(n) = raw.parse_int() else {
-        return Ok(http.bad_request("bad id"))
-    }
-    match store.get(NoteId(n))? {
-        Some(note) => Ok(http.json(note))
-        None       => Ok(http.not_found())
-    }
-}
-
-// Domain + storage: knows SQL, knows nothing about HTTP
-impl SqlStore {
-    fn get(self, id: NoteId) -> Result<Note?, StoreError> { … }
-}
-```
-
-Two functions, one boundary, and the boundary is a *type* (`NoteId`,
-`Note`, `StoreError`) rather than an interface.
-
-#### Testing shapes the seams
-
-```glide
-// A real implementation, for tests
-type MemStore = struct { notes: List<Note> }
-
-impl NoteStore for MemStore {
-    fn get(self, id: NoteId) -> Result<Note?, StoreError> { … }
-    fn put(mut self, n: Note) -> Result<(), StoreError> { … }
-}
-
-test "get returns None for a missing note" {
-    let store = MemStore{ notes: [] }
-    expect(store.get(NoteId(1)) == Ok(None))
-}
-```
-
-Because mandatory initialisation makes real values cheap to construct
-and sum types make states explicit, a real in-memory implementation is
-usually less work than a mock — and it is honest.
-
-#### The designed project layout ○
-
-```
-myservice/
-  glide.mod          # module name, toolchain pin, deps with hashes
-  vendor/            # the dependencies, committed
-  main.gld
-  notes/
-  billing/
-```
-
-`glide.mod` is **data, not a program** — no scripts, hooks, profiles,
-or feature flags. `vendor/` is committed and is what actually builds.
-There is no `build.gld`, ever.
-
----
-
-### 2. Under the Hood
-
-#### Why the wiring closure works
-
-```glide
-r.get(`/notes/{id}`, |req| get_note(db, req))
-```
-
-The handler `get_note(db: Db, req: Request)` is an ordinary function
-you can call from a test. The closure adapts it to the router's
-expected shape and captures `db`.
-
-That is the whole mechanism, and it costs one line per route. In Java
-it is a container, annotations, and a lifecycle; in Go it is either a
-struct with methods or the same closure.
-
-#### Why there is no framework-shaped pressure
-
-Four language decisions remove it:
-
-**No globals** (Chapter 29) — so dependencies must be passed, so they
-must be visible in signatures, so the graph is explicit.
-
-**Constructors can fail** — `sql.open` returns a `Result`, so there is
-no "construct then initialise" two-phase problem that DI containers
-exist to sequence.
-
-**No reflection** (Chapter 34) — so a container *cannot* autowire, and
-the honest alternative is the only alternative.
-
-**Scopes own lifetimes** (Chapter 25) — so "when is this shut down" has
-a structural answer rather than a lifecycle interface.
-
-#### Why the module namespace matters for structure
-
-A directory is a module and files share one namespace, which means the
-file system is **not** the dependency structure. That decouples two
-things most languages conflate:
-
-- **Files** organise for a *reader* — "where would I look for this?"
-- **Modules** organise for a *contract* — "what does this promise?"
-
-In Python and JavaScript, splitting a file changes the import graph. In
-Rust, the module tree must be maintained alongside the file tree. Here,
-you can reorganise files freely and only module boundaries are API.
-
----
-
-### 3. Why This Design?
-
-#### Why "almost none" is the right amount of architecture
-
-Because architecture is inventory. Every layer, interface, and
-indirection is something a reader must traverse and a change must
-propagate through, and it earns its place only by absorbing variation
-that actually happens.
-
-`DESIGN.md`'s posture throughout is **add it when a program needs it**
-— the dogfood rule (Chapter 30) applied to the standard library, and it
-applies to your architecture too.
-
-The specific claim: for a service with one database, one transport, and
-one deployment target, `main` plus a handful of modules is not a
-compromise. It is correct, and adding layers makes it worse.
-
-#### Why repository patterns mostly disappear
-
-A repository exists to hide an ORM's leakage — lazy loading, identity
-maps, session lifecycle, N+1 queries that look like field access.
-
-Glide has no ORM, permanently (Chapter 33). `db.query` returns rows;
-`derive Row` (○) maps them to a type. There is nothing to hide, so the
-"repository" is a module with functions that run SQL — which is what
-you wanted, without the pattern name.
-
-What survives is the *seam*: `trait NoteStore` when you genuinely need
-to substitute. That is one trait with two implementations, not a
-repository interface per entity.
-
-#### Why hexagonal architecture is mostly type-shaped here
-
-The valuable insight in hexagonal/clean architecture is real:
-**the boundary should not contaminate the core.** Untyped JSON should
-not reach your domain logic; HTTP concepts should not appear in your
-business rules.
-
-Glide achieves most of it with types rather than layers
-(Chapters 12, 31):
-
-- **Maps at the boundary, structs inside.** JSON becomes a `Note` in
-  three lines, and the map never travels.
-- **Parse, don't validate.** An `Email` that exists is valid, so
-  validation does not spread inward.
-- **`distinct` types.** A `NoteId` cannot be confused with a raw `Int`
-  from a query.
-
-What is left of hexagonal architecture is one honest boundary — the
-transport function and the domain function — and a trait if you need
-substitution.
-
-The ports-and-adapters *ceremony* (an interface per port, a DTO per
-boundary, a mapper per DTO) exists because the languages it was
-designed for cannot express the boundary in the type system.
-
-#### Why "when structure becomes ceremony"
-
-The test `DESIGN.md` implies and this chapter states:
-
-> **A layer earns its place if it absorbs variation that actually
-> happens.**
-
-A `NoteService` between `NoteController` and `NoteRepository` earns its
-place if there are two controllers, or two repositories, or business
-logic that belongs to neither. If it is a pass-through that calls one
-method on one repository, it is inventory.
-
-The honest version of the question: *what would break if I deleted this
-layer?* If the answer is "nothing, I would just call the next one
-directly", delete it.
-
-#### Why vendoring is an architectural decision
-
-`DESIGN.md`: **a dependency is a liability to justify.**
-
-Vendoring makes that concrete — a new dependency puts its source in
-your repository, in your diffs, and in review. A one-line manifest
-change becomes thousands of added lines, which is an honest
-representation of what you just took on.
-
-That friction is deliberate, and it shapes architecture: a codebase
-that vendors reaches for the standard library first, which is exactly
-why the standard library is batteries-included.
-
----
-
-### 4. Competing Approaches
-
-**Go.** `cmd/`, `internal/`, `pkg/`, and a long-running community
-argument about whether `pkg/` is useful (consensus: no).
-`internal/` is a real language feature and is Glide's two-level
-visibility, roughly. Go's architecture culture is notably lighter than
-Java's, and Glide's is lighter still because sum types and `Option`
-absorb more of the variation.
-
-**Java / Spring.** Layers, DI containers, annotations, and
-reflection-driven autowiring. Every piece of that is a response to a
-constraint Glide removed — no globals means explicit passing, no
-reflection means no autowiring, failing constructors mean no two-phase
-initialisation.
-
-**Rust.** Crates, modules, and a preference for concrete types with
-traits introduced when needed — very close to Glide's posture. Rust's
-architecture discussions are dominated by ownership questions that do
-not arise here.
-
-**Elixir/Phoenix.** Contexts as domain boundaries, explicitly designed
-to resist the layer-cake reflex. Phoenix's "contexts" documentation is
-the best mainstream writing on when a boundary earns its place.
-
-**Node.** Historically almost no structure, then a wholesale import of
-Java patterns (NestJS) — the same overcorrection, twenty years later.
-
-**Clean/Hexagonal architecture as a movement.** The insight is right
-and the ceremony is language-specific. Read it for the boundary
-argument; do not import the ports-and-adapters file layout.
-
----
-
-### 5. Common Mistakes
-
-**Building the four-layer cake.**
-
-```
-NoteController → NoteService → NoteRepository → NoteEntity
-```
-
-Each layer a thin pass-through, each interface with one implementation,
-existing for a DI framework that does not exist here.
-
-**Creating a module per type.** A module is a boundary with a contract,
-not a namespace for one struct.
-
-**Creating `utils`.** A module with no boundary grows until it depends
-on everything and everything depends on it. Name modules after
-domains.
-
-**Introducing a trait before the second implementation.** A trait with
-one implementation is a type with extra steps (Chapter 17). Introduce
-the seam when a test or a second backend actually needs it — and make
-the trait the shape the *test* needs, which is usually much smaller
-than the real type's API.
-
-**Mocking what you could construct.** Mandatory initialisation makes
-real values cheap. A test with a real `MemStore` is more honest than
-one with a mock and a verification script.
-
-**Threading a dependency through layers that do not use it.** If
-`render(db, page)` passes `db` to something three calls down and
-touches it nowhere, the layering is wrong.
-
-**Splitting files for architectural reasons.** Files within a module
-share a namespace. Split them for readers, not for structure.
-
-**Reaching for a DI container.** There is no reflection, so it cannot
-autowire, so it would be a hand-maintained registry — which is
-strictly worse than the three-section `main`.
-
-**Structuring for a future that has not arrived.** Two databases, three
-transports, plugin architecture. Add the abstraction when the second
-case exists; the language makes that refactor cheap because signatures
-are explicit and `glide fix` handles mechanical rewrites.
-
----
-
-### 6. Performance Considerations
-
-Architecture's performance cost is mostly **indirection**, and Glide
-makes it visible:
-
-**A trait used through a generic bound is free** (monomorphised,
-Chapter 18). A trait used through `any Trait` (○) boxes and dispatches
-dynamically. Layers built on trait objects pay per call, and the `any`
-keyword is where you see it.
-
-**Each layer is a function call.** In the compiled tier, thin
-pass-throughs inline. In the interpreter they do not, which is one more
-reason not to benchmark architecture on the tree-walker.
-
-**Explicit dependency passing costs nothing** — a pointer per argument,
-usually in a register.
-
-**Module boundaries cost nothing at runtime.** They are a compile-time
-visibility concept.
-
-**Monomorphisation interacts with boundaries** (○): a generic used
-across modules is instantiated per concrete type in the *using* module,
-so binary size grows with usage. Keep generic shells small and delegate
-the bulk to a non-generic inner function.
-
-**Vendoring costs disk and repository size** — the price of the audit
-trail.
-
----
-
-### 7. Best Practices
-
-**Start with one module and one file.** Split when a reader would
-thank you; add a module when there is a contract.
-
-**Use the three-section `main`.** Dependencies, wiring, lifetime — in
-that order, every time. It is recognisable, and section three is what
-makes shutdown correct with no shutdown code.
-
-**Make the boundary a type, not a layer.**
-
-```glide
-// Good — the boundary is Note/NoteId/StoreError
-fn get_note(store: SqlStore, req: Request) -> Result<Response, ApiError>
-impl SqlStore { fn get(self, id: NoteId) -> Result<Note?, StoreError> }
-```
-
-The transport function knows HTTP and `Note`. The store knows SQL and
-`Note`. Neither knows the other's world, and no interface was needed to
-achieve that.
-
-**Define traits where they are consumed, and keep them small.** One to
-three methods. A small trait is easy to implement for real in a test,
-which is what makes the seam useful.
-
-**Let the type system carry the invariants inward.** Parse at the
-boundary, and everything inside gets a value that is already valid.
-That is what replaces most of the validation layer.
-
-**Apply the deletion test.** For every layer, interface, and
-indirection: *what would break if I deleted this?* If the answer is
-"nothing, I would call the next thing directly", delete it.
-
-**Justify every dependency.** Vendoring makes it visible; treat the
-visibility as the point.
-
-**Refactor toward structure, not into it.** Explicit signatures and
-canonical formatting make mechanical refactors cheap, so the cost of
-adding a boundary *later* is low — much lower than the cost of
-maintaining one you did not need.
-
----
-
-### 8. Examples
-
-**A complete small service, structured as little as possible:**
-
-```glide
-// notes.gld — the whole service, one module, one file.
-import http
-import sql
-import time
-
-// --- Types: the boundary between transport and storage ---
-
-type NoteId = distinct Int
-
-type Note = struct {
-    pub id: NoteId
-    pub title: String
-    pub body: String?
-}
-
-type StoreError = Backend{ cause: Error }
-type ApiError = BadInput{ msg: String } | Store{ cause: StoreError }
-
-impl StoreError { fn from(e: Error) -> StoreError { Backend{ cause: e } } }
-impl ApiError   { fn from(e: StoreError) -> ApiError { Store{ cause: e } } }
-
-// --- Storage: knows SQL, knows nothing about HTTP ---
-
-fn load(db: Db, id: NoteId) -> Result<Note?, StoreError> {
-    let found = db.query_one(
-        "select id, title, body from notes where id = :id",
-        ["id": id],
-    )?
-    match found {
-        None      => Ok(None)
-        Some(row) => Ok(Some(Note{
-            id:    NoteId(row["id"] ?? 0),
-            title: row["title"] ?? "",
-            body:  row["body"],
-        }))
-    }
-}
-
-// --- Transport: knows HTTP, knows nothing about SQL ---
-
-fn get_note(db: Db, req: Request) -> Result<Response, ApiError> {
-    let Some(raw) = req.path_param("id") else {
-        return Err(.BadInput{ msg: "missing id" })
-    }
-    let Some(n) = raw.parse_int() else {
-        return Err(.BadInput{ msg: "bad id" })
-    }
-    match load(db, NoteId(n))? {
-        Some(note) => Ok(http.json(note))
-        None       => Ok(http.not_found())
-    }
-}
-
-// --- Background work ---
-
-fn sweeper(db: Db) {
-    for {
-        time.sleep(10.mins)
-        _ = db.exec("delete from notes where title = ''") ?? 0
-    }
-}
-
-// --- main: dependencies, wiring, lifetime ---
-
-fn main() -> Result<(), Error> {
-    let db = sql.open("sqlite:notes.db")?
-    defer { _ = db.close() }
-
-    let mut r = http.router()
-    r.get(`/notes/{id}`, |req| get_note(db, req))
-    let r = r
-
-    scope s {
-        _ = s.spawn(|| sweeper(db))
-        http.serve("127.0.0.1:8080", r)
-    }
-}
-```
-
-Sixty lines, one file, and it has: a typed boundary, separated
-transport and storage, error types that convert across the boundary
-with `?`, background work bounded by the server's lifetime, and no
-shutdown code.
-
-Count what is absent: no interface, no repository, no service layer, no
-DTO, no mapper, no container, no `internal/` directory, and no
-`AbstractNoteServiceFactory`.
-
-**The same service, when it grows.** Two things force structure: a
-second implementation, and a second team.
-
-```
-service/
-  main.gld              # module: service — dependencies, wiring, lifetime
-  notes/
-    types.gld           # Note, NoteId, StoreError
-    store.gld           # trait NoteStore, impl for SqlStore and MemStore
-    handlers.gld        # transport
-  billing/
-    …
-  glide.mod
-  vendor/
-```
-
-And the seam appears only now, because only now is there a second
-implementation:
-
-```glide
-// notes/store.gld
-pub trait NoteStore {
-    fn get(self, id: NoteId) -> Result<Note?, StoreError>
-    fn put(mut self, n: Note) -> Result<(), StoreError>
-
-    // Added later. Breaks nobody; SqlStore can override with a
-    // single query.
-    fn count(self) -> Result<Int, StoreError> { … }
-}
-
-pub type SqlStore = struct { db: Db }
-impl NoteStore for SqlStore { … }
-
-pub type MemStore = struct { notes: List<Note> }
-impl NoteStore for MemStore { … }
-```
-
-Note `count` with a default (Chapter 17) — the trait can grow without
-breaking implementors, which is the property Go's interfaces lack and
-the reason a trait here is a safer commitment than a Go interface.
-
-**Bad versus good: the layer cake**
-
-```glide
-// Bad — four layers, each a pass-through, three interfaces with
-// one implementation each
-trait NoteRepository { fn find_by_id(self, id: Int) -> Note? }
-trait NoteService    { fn get_note(self, id: Int) -> Note? }
-trait NoteMapper     { fn to_dto(self, n: Note) -> NoteDto }
-
-type NoteRepositoryImpl = struct { db: Db }
-type NoteServiceImpl    = struct { repo: NoteRepositoryImpl }
-type NoteControllerImpl = struct { svc: NoteServiceImpl, mapper: NoteMapperImpl }
-
-impl NoteService for NoteServiceImpl {
-    fn get_note(self, id: Int) -> Note? {
-        self.repo.find_by_id(id)        // that is the entire layer
-    }
-}
-```
-
-`NoteServiceImpl.get_note` calls one method and returns the result.
-Apply the deletion test: what breaks if it goes? Nothing.
-
-```glide
-// Good
-fn get_note(db: Db, req: Request) -> Result<Response, ApiError> { … }
-fn load(db: Db, id: NoteId) -> Result<Note?, StoreError> { … }
-```
-
-Two functions, one boundary, typed. When a second store arrives, the
-trait appears — and it appears with exactly the methods the second
-store needs, which is usually far fewer than the speculative version
-would have had.
+Three sections, in that order, and the third one is what makes the
+program correct on shutdown without any shutdown code.
 
 ---
 
@@ -648,58 +645,50 @@ would have had.
 
 **Summary**
 
-- **Most architecture advice is compensation for missing language
-  features.** Repositories hide ORM leakage; DI containers work around
-  globals and failing constructors; ports-and-adapters ceremony
-  expresses a boundary the type system could not. Glide removes those
-  pressures.
-- **The three-section `main` is the DI framework**: dependencies
-  created once, wiring by one-line closures, lifetime owned by a scope.
-  No container, no annotations, no reflection.
-- **Small programs need no structure.** One module, one file, `main` at
-  the top. Files within a module share a namespace, so splitting is
-  editorial and changes no API.
-- **A module is a boundary with a contract.** The test: can you write
-  down what it promises without describing how? Name modules after
-  domains, never `utils`.
-- **Make the boundary a type, not a layer.** `NoteId`, `Note`,
-  `StoreError` separate transport from storage without an interface.
-- **Consumer-defined traits are the seam** — defined where used, one to
-  three methods, introduced when a second implementation or a test
-  substitution actually exists. Default methods (Chapter 17) mean a
-  trait can grow later, which makes it a safer commitment than a Go
-  interface.
-- **What survives of hexagonal architecture** is the boundary
-  insight — and Glide gets most of it from *maps at the boundary,
-  structs inside* plus *parse, don't validate* plus `distinct` types.
-- **The deletion test:** for every layer, ask what would break if you
-  removed it. "Nothing, I would call the next thing directly" means
-  delete it.
-- **A layer earns its place if it absorbs variation that actually
-  happens** — two transports, two stores, logic belonging to neither.
-- **A dependency is a liability to justify**, and vendoring makes the
-  liability visible in review.
-- Refactor *toward* structure. Explicit signatures and canonical
-  formatting make adding a boundary later cheap; maintaining one you
-  did not need is not.
+- The organising heuristic: **the source code should tell you what it
+  costs.** Almost every style question reduces to it.
+- **Case is grammar**, enforced by the formatter: `PascalCase` for
+  types and variants, `snake_case` for everything else, including
+  constants. No SCREAMING_CASE.
+- **Method names carry mutation intent**, because receivers take no
+  call-site marker. Verbs mutate; nouns read; past participles return a
+  copy.
+- **File order is narrative order** — the formatter will not reorder
+  declarations.
+- **`mut` scarcity is the highest-value habit.** An audit mark is worth
+  nothing if it is common, and the language provides five ways to avoid
+  spending one.
+- **Parse, don't validate** is the central pattern, and it needs
+  mandatory initialisation, private fields, and `Option` together.
+- **Maps at the boundary, structs inside.**
+- **Signatures are the documentation**, and Glide spent its budget
+  making them carry information. Do not widen one to avoid a decision.
+- **Documentation says what the signature cannot** — no tag language,
+  first sentence starts with the identifier, checked `[Identifier]`
+  links that break the build when stale, Example functions rather than
+  doc-tests.
+- **`glide test` is the style gate**, and formatting is never a compile
+  error, because a compiler that yells about whitespace while you think
+  is hostile.
+- The construct decision table in section 1 is the book's index in one
+  page.
 
 **Exercises**
 
-1. **Apply the deletion test.** Take a service you maintain and, for
-   every layer and interface, write down what would break if it were
-   removed. Be honest about "nothing, I would call the next thing
-   directly". Then count how many of the survivors exist because of a
-   language limitation Glide does not have.
+1. **Run the Version 1 → Version 2 refactor on your own code.** Take a
+   function from a service you maintain, translate it literally, then
+   apply the changes in the Examples section one at a time. Note which
+   changes were mechanical and which required a decision you had been
+   avoiding — the second category is where the language earns its keep.
 
-2. **Rebuild a service in one file.** Take a small service — five or
-   six endpoints, one database — and write it as a single Glide module,
-   with types as the only boundary. Then identify the first place it
-   genuinely wants a module split, and note what triggered it. In most
-   cases it is a second team rather than a second implementation, which
-   is worth knowing about your own architecture pressures.
+2. **Audit `mut` in a file.** Write anything of a hundred lines, then
+   count the `mut` bindings and, for each, identify which of the five
+   alternatives from Chapter 4 could replace it. If more than a third
+   survive, look again at the ones assigned in every branch of an `if`.
 
-3. **Design a trait from its test.** Pick a dependency you currently
-   mock. Write the trait containing only what the *test* needs — not
-   what the real implementation offers. Compare its size with the real
-   type's API. The gap is how much interface you would have written
-   speculatively, and it is usually large.
+3. **Write the review checklist.** Take the "reading a diff" list from
+   section 1 and adapt it to a codebase you actually review. Then note
+   which items on your *existing* mental checklist disappear entirely —
+   null checks, goroutine leaks, forgotten error handling, switch
+   statements missing a case. The size of that deleted list is the
+   argument for the whole language.

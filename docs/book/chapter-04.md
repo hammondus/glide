@@ -91,7 +91,7 @@ impossible: assignment is not an expression, *and* conditions require a
 
 This is the rule that surprises people, and it is deliberate:
 
-```glide
+```glide-run
 fn main() {
     let input = "  8080  "
     let input = input.trim()             // new binding, same name
@@ -172,7 +172,7 @@ Because a loop body is a nested block, loop accumulators genuinely need
 `mut`. The idiom is to be mutable during construction and immutable
 after:
 
-```glide
+```glide-run
 fn main() {
     let mut acc = []
     for i in 0..3 {
@@ -196,7 +196,7 @@ the two rules for free — it is not a special feature.
 A `{ … }` anywhere an expression can go is a scope whose tail
 expression is its value:
 
-```glide
+```glide-run
 fn main() {
     let size = {
         let n = 42
@@ -282,7 +282,7 @@ it is important enough to state twice.
 Collections are reference types. Two bindings can refer to one object,
 and the object can change under a `let` binding via the other path:
 
-```glide
+```glide-run
 fn main() {
     let mut a = [1, 2, 3]
     let b = a              // b and a refer to the SAME list
@@ -311,7 +311,7 @@ nobody mistakes it for a semantic decision.
 This is the subtlest consequence of "redeclaration creates a new
 binding", and it is worth seeing run:
 
-```glide
+```glide-run
 fn main() {
     let mut total = 0
     let add = |n| { total += n }
@@ -347,14 +347,27 @@ implementation got this wrong — it looked names up in a live
 environment map at call time — and the bug was invisible until a
 closure straddled a redeclare.
 
-#### Why the shadow ban is checked dynamically today
+#### Why the shadow ban is still checked dynamically
 
 The nested-shadow ban is a static property: it depends only on scope
-structure, not on values. The interpreter still enforces it at
-evaluation time, because there is no static pass at all yet. The
-practical consequence is that a shadow on a branch you never execute
-will not be reported. When the checker lands, it will be a compile
-error found without running anything.
+structure, not on values. It is nevertheless one of the few rules the
+**evaluator** still owns, so it fires when the shadowing `let`
+actually runs:
+
+```glide
+fn main() {
+    let count = 1
+    if false {
+        let count = 2       // never reported: this branch never runs
+        println(count)
+    }
+    println(count)
+}
+```
+
+`glide check` accepts that program. Change `false` to `true` and the
+error appears. It is a gap of the safe kind — under-approximating,
+never wrong — and it is listed with the others in Appendix D.
 
 ---
 
@@ -672,7 +685,7 @@ is not live. The worst answer is `x2`.
 
 **A parser stage using every rule in the chapter:**
 
-```glide
+```glide-run
 // Parse "KEY=value" lines into a map, skipping blanks and comments.
 fn parse_env(text: String) -> Map<String, String> {
     let mut out: Map<String, String> = [:]

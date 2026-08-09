@@ -1,802 +1,819 @@
-# Chapter 24: Generators
+# Chapter 24: Iterators
 
-Chapter 23 covered how to *consume* an iterator. This chapter covers
-how to *write* one — and it is the feature that Go and Rust both
-struggled with for a decade.
+An **iterator** is a value that produces a sequence of elements on
+demand. Not a collection holding them — a thing that yields the next
+one when asked. That distinction is the whole chapter: iterators are
+**lazy**, and laziness is what makes infinite sequences ordinary values
+and pipelines cheap.
 
-The problem: to write an iterator by hand, you must turn your traversal
-inside out. A recursive tree walk becomes an explicit stack, a resume
-point, and a `next()` method that reconstructs where it was. That is
-real code, and it looks nothing like a traversal.
+Glide uses **external iteration** with a one-method protocol, adapters
+as lazy default methods, and a hard separation between `Iterable` and
+`Iterator`. Chapter 25 covers how you *write* one.
 
-In Glide, **a function containing `yield` is an iterator**:
-
-```glide
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left  { yield from walk(l) }
-    yield n.value
-    if let r = n.right { yield from walk(r) }
-}
-```
-
-Three lines. In-order tree traversal — the canonical "iterators are
-hard" example — reads as the three lines it conceptually is.
-
-Everything here is ✓.
+Everything here is ✓ except the adapters marked ○ (the set grows on
+demand) and the trait declarations, which are asserted rather than
+checked.
 
 ---
 
 ### 1. Basic Usage
 
-#### `yield`
-
-Any function whose body contains `yield` becomes a **generator**:
-calling it returns an `Iterator` rather than running the body.
+#### Getting an iterator
 
 ```glide
-fn three() -> Iterator<Int> {
-    yield 1
-    yield 2
-    yield 3
+let xs = [1, 2, 3, 4, 5, 6]
+let it = xs.iter()
+```
+
+`xs.iter()` does **not** walk the list. It produces a value that will
+yield elements when something pulls on it.
+
+Iterators come from three places: `.iter()` on a `List`, `Map`, or
+`Range`; a generator function (Chapter 25); or any type with an
+`iter()` method — which is what makes a user type participate.
+
+#### Adapters compose, lazily
+
+```glide-run
+fn main() {
+    let nums = [1, 2, 3, 4, 5, 6]
+
+    let evens = nums.iter().filter(|n| n % 2 == 0).collect()
+    println("{evens:?}")
+
+    let doubled = nums.iter().map(|n| n * 2).collect()
+    println("{doubled:?}")
+
+    let first_two_big = nums.iter().map(|n| n * 10).take(2).collect()
+    println("{first_two_big:?}")
+}
+```
+
+```
+[2, 4, 6]
+[2, 4, 6, 8, 10, 12]
+[10, 20]
+```
+
+The third line is the important one. `.map(|n| n * 10).take(2)` calls
+the closure **twice**, not six times. Nothing runs until something
+consumes, and `take(2)` stops pulling after two.
+
+#### The adapter set
+
+Lazy — they build a new iterator and run nothing:
+
+| Adapter | Produces |
+|---|---|
+| `map(f)` | each element transformed |
+| `filter(pred)` | elements where `pred` is true |
+| `take(n)` | the first `n`, then stops the source |
+| `enumerate()` | `(Int, T)` pairs, indexed from 0 |
+| `zip(other)` | `(T, U)` pairs; stops at the shorter side |
+
+Consumers — they drain the iterator and produce a value:
+
+| Consumer | Produces |
+|---|---|
+| `collect()` | a `List<T>` |
+| `count()` | an `Int` |
+| `sum()` | folds `+` from the first element |
+
+```glide-run
+fn main() {
+    println([1, 2, 3].iter().sum())                     // 6
+    println((0..5).iter().filter(|n| n % 2 == 1).count()) // 2
+
+    let z = [1, 2, 3].iter().zip(["a", "b", "c"]).collect()
+    println("{z:?}")
+
+    let en = ["a", "b"].iter().enumerate().collect()
+    println("{en:?}")
+}
+```
+
+```
+6
+2
+[(1, "a"), (2, "b"), (3, "c")]
+[(0, "a"), (1, "b")]
+```
+
+Note that `zip` takes **any iterable** — a list, a range, another
+iterator — not just an iterator. And `sum()` folds `+` from the first
+element, so `Int`, `Float`, and `String` all work; an empty sum is
+`Int` 0.
+
+Further adapters (`skip`, `take_while`, `fold`, `flat_map`, `any`,
+`all`, `min`, `max`) are ○ and arrive on demand — the dogfood rule.
+
+#### Chains read one per line
+
+```glide
+let top = entries
+    .iter()
+    .filter(|e| e.1 > 1)
+    .map(|e| e.0)
+    .take(20)
+    .collect()
+```
+
+A line beginning with `.` continues the previous statement (Chapter 3).
+This rule exists specifically because of adapter chains.
+
+#### `for` consumes an iterator
+
+```glide
+for x in xs { … }              // xs is iterable
+for x in xs.iter().take(3) { … }   // an iterator is iterable too
+```
+
+`for … in` accepts an iterator directly, or anything with an `iter()`
+method.
+
+#### `Iterable` is not `Iterator`
+
+This distinction matters and catches people:
+
+```glide
+let xs = [1, 2, 3]
+println(xs.iter().count())     // 3
+println(xs.iter().count())     // 3 — a fresh iterator each time
+```
+
+A `List` is **iterable**: you can ask it for an iterator, many times.
+An `Iterator` is a cursor: consuming it exhausts it.
+
+```glide
+let it = xs.iter()
+println(it.count())            // 3
+println(it.count())            // 0 — already drained
+```
+
+#### Making a user type iterable
+
+Provide an `iter()` method:
+
+```glide-run
+type Bag = struct { items: List<Int> }
+
+impl Bag {
+    fn iter(self) -> Iterator<Int> {
+        for x in self.items { yield x }
+    }
 }
 
 fn main() {
-    println("{three().collect():?}")     // [1, 2, 3]
+    let b = Bag{ items: [1, 2, 3] }
+    for x in b { print("{x} ") }
+    println("")
+
+    let doubled = b.iter().map(|x| x * 2).collect()
+    println("{doubled:?}")
 }
 ```
 
-`yield` hands the next value to whoever is consuming and **pauses the
-function mid-flight**. The next pull resumes it exactly where it
-stopped, with all locals intact.
+```
+1 2 3
+[2, 4, 6]
+```
 
-That last sentence is the whole feature. The function's local
-variables, its position in a loop, its place in a recursion — all of it
-survives the pause.
+One method, and `Bag` works with `for` and with every adapter. The body
+uses `yield` — that is a generator, and Chapter 25 explains it.
 
-#### Loops inside generators
+#### Iterating a Map
 
 ```glide
-fn evens(xs: List<Int>) -> Iterator<Int> {
-    for x in xs {
-        if x % 2 == 0 {
-            yield x
-        }
-    }
+for (k, v) in m { … }          // insertion order
+m.iter()                        // an Iterator<(K, V)>
+```
+
+---
+
+### 2. Under the Hood
+
+#### The protocol is one method
+
+```glide
+trait Iterator<T> {
+    fn next(mut self) -> T?
 }
 ```
 
-The `for` loop's state is part of what gets suspended. Between pulls,
-the loop is paused mid-iteration.
-
-#### Infinite generators are ordinary values
+That is the whole thing. `for x in xs` desugars to:
 
 ```glide
-fn fib() -> Iterator<Int> {
-    let mut a = 0
-    let mut b = 1
+let it = xs.iter()
+for {
+    let Some(x) = it.next() else { break }
+    body
+}
+```
+
+One method with an `Option` return means:
+
+- **No invalid states.** There is no "have I called `hasNext`?"
+  question.
+- **No desynchronisation.** Java's `hasNext()`/`next()` pair can get
+  out of step; a single method cannot.
+- **No `(value, ok)` tuple.** Go's older iteration idioms and channel
+  receives use this shape; `Option` is the same information with a type
+  that composes.
+
+#### External versus internal iteration
+
+This is the design axis, and it is worth understanding because it
+explains why `zip` is easy here and hard in Go.
+
+**External iteration** (Glide, Rust, Java, Python): the *consumer*
+drives. It calls `next()` when it wants an element. The iterator holds
+its own position.
+
+**Internal iteration** (Go 1.23's `iter.Seq`, Ruby's `each`, callback
+APIs): the *producer* drives. You hand it a callback and it calls you
+for each element.
+
+External iteration makes `zip` trivial — pull one from each side, pair
+them, stop when either is exhausted. With internal iteration, zipping
+two callback-driven sequences requires either coroutines or running one
+side to completion into a buffer. Go's `iter.Seq` addresses this with a
+`yield`-returning-bool protocol that is workable and awkward, and it is
+why `DESIGN.md` calls Go's function-iterators "late and awkward".
+
+External iteration also makes early exit natural: stop calling `next()`.
+Internal iteration needs the callback to signal "stop", which is where
+Go's `func(yield func(T) bool)` shape comes from.
+
+#### Adapters are lazy default methods
+
+`map`, `filter`, and `take` are default methods on the `Iterator` trait
+(Chapter 17). Each returns a *new* iterator that wraps the source:
+
+```
+xs.iter()                    →  ListIter over [1..6]
+    .map(f)                  →  MapIter { source: ListIter, f }
+    .take(2)                 →  TakeIter { source: MapIter, n: 2 }
+    .collect()               →  pulls twice, stops
+```
+
+`collect()` calls `next()` on `TakeIter`, which calls `next()` on
+`MapIter`, which calls `next()` on `ListIter`, applies `f`, and returns.
+Two pulls, two calls to `f`.
+
+Nothing was allocated for intermediate lists. That is the entire
+performance argument for laziness.
+
+#### Generators are the same protocol
+
+A function containing `yield` returns an `Iterator` when called. It is
+sugar for the trait, **not a second protocol** — which is why
+generators compose with every adapter.
+
+In the interpreter, a generator runs on a goroutine with a channel:
+`yield` sends, `next()` receives. `glide/DESIGN-DECISIONS.md` calls it
+"the cheapest correct lazy implementation for a tree-walker", and
+records that this costs one goroutine per delegation level for
+`yield from` recursion.
+
+The compiled tier lowers generators to state machines, which is the
+fiddly part of the transpiler and is flagged in `DESIGN.md` as
+something to prototype early.
+
+#### Why user types are iterable through `iter()`
+
+`for x in v` looks for an `iter()` method on `v`. That is the
+`Iterable` half of the protocol, and it is why one method is enough to
+join the ecosystem.
+
+---
+
+### 3. Why This Design?
+
+#### Why laziness
+
+Three things fall out of it, and none is available otherwise.
+
+**Infinite sequences become ordinary values.**
+
+```glide
+fn counter(from: Int) -> Iterator<Int> {
+    let mut n = from
     for {
-        yield a
-        let next = a + b
-        a = b
-        b = next
+        yield n
+        n += 1
     }
+}
+
+let first_five = counter(10).take(5).collect()   // [10, 11, 12, 13, 14]
+```
+
+`counter` never terminates. `take(5)` makes it terminate. With eager
+evaluation this program does not exist.
+
+**Pipelines cost what you consume, not what you have.**
+`xs.iter().map(expensive).take(3)` calls `expensive` three times, even
+if `xs` has a million elements.
+
+**No intermediate collections.** An eager `map` over a million-element
+list allocates a million-element list, and a subsequent `filter`
+allocates another. Lazy adapters allocate nothing until `collect()`.
+
+The accepted cost, recorded honestly in `DESIGN.md`: **laziness
+surprises.** `xs.map(f)` does nothing until consumed, so a `map` used
+for its side effects silently does not happen. That is a real footgun,
+and the mitigation is a cultural one — use a `for` loop for effects.
+
+#### Why external iteration
+
+Covered above mechanically; the design argument is `zip`.
+
+`DESIGN.md`: "External iteration is what makes `zip` trivial — the
+thing Go's callback-style `iter.Seq` makes miserable." Any operation
+that consumes two sequences in lockstep — zip, merge, diff, interleave
+— is natural with external iteration and requires coroutines or
+buffering with internal iteration.
+
+Early exit is the second argument, and it is the one people hit daily.
+
+#### Why `Iterable` is separate from `Iterator`
+
+Because a `List` can be iterated many times and an iterator cannot be
+iterated at all — it *is* the iteration.
+
+Collapsing the two bites every language that tries. In Python, a `list`
+is iterable and `iter(list)` is an iterator, and the distinction is
+learned by hitting it: a generator expression consumed twice gives you
+elements then nothing. Java's `Iterable`/`Iterator` split is the same
+one Glide makes and is one of the parts of Java's collections framework
+that is straightforwardly right.
+
+#### Why generators are sugar, not a second protocol
+
+If generators produced something other than an `Iterator`, the
+ecosystem would fragment: adapters would work on one and not the other,
+and `for` would need to handle both.
+
+Making `yield` produce an ordinary `Iterator` means a generator
+composes with everything, and a consumer cannot tell whether the
+sequence came from a list, an adapter chain, or a hand-written
+traversal.
+
+#### Why channels are not the iteration protocol
+
+`DESIGN.md` is explicit, and this is worth stating because the
+implementation happens to use channels:
+
+> Channels are not the iterator protocol. A green thread + channel per
+> loop means synchronisation per element, and early exit leaks a
+> thread. Iteration is control flow, not communication.
+
+The ban is on *implementing* an iterator with a thread and a channel as
+a user-facing pattern. Consuming an existing stream is the legitimate
+direction, which is why `for v in rx` over a channel receiver works
+(Chapter 28).
+
+That the tree-walking interpreter implements generators with a
+goroutine and a channel is an implementation detail of the dev tier,
+and it is exactly the thing the compiled tier replaces with a state
+machine.
+
+#### The accepted costs
+
+`DESIGN.md` lists three, and they are worth knowing:
+
+1. **Adapter-chain type errors are ugly.**
+   `Map<Filter<Take<ListIter<Int>>>>` in an error message is not
+   friendly. This is Rust's experience too.
+2. **The release backend must compile generator state machines well.**
+   Known-hard-but-solved — C# has done it for twenty years.
+3. **Laziness surprises**, as above.
+
+---
+
+### 4. Competing Approaches
+
+**Go.** Iteration was `for … range` over built-in types only for
+thirteen years; user types needed a `Next()` method by convention or a
+channel-based generator (which leaks a goroutine on early exit). Go
+1.23 added `iter.Seq` — internal iteration via
+`func(yield func(T) bool)` — which works and is awkward, and standard
+library adapters arrived even later. `DESIGN.md` cites this as the
+example of designing iteration in from the start rather than bolting it
+on.
+
+**Rust.** `Iterator` with one required method (`next`) and a large set
+of provided adapters — the direct model. Rust's adapter surface is much
+larger than Glide's current one, and Glide's will grow toward it on
+demand. Rust's generators took a decade to stabilise because yielded
+references borrow from suspended stack state; with a GC that problem
+does not exist, which `DESIGN.md` calls the asymmetry to build around.
+
+**Python.** Iterables and iterators separated correctly, generators
+with `yield` and `yield from` (the direct source of Glide's spelling),
+and lazy `itertools`. Python's model is the closest ergonomic
+relative. The difference is that Python's laziness is opt-in per
+function (`map` is lazy, list comprehensions are eager) whereas Glide's
+adapters are uniformly lazy.
+
+**Java.** `Iterable`/`Iterator` with `hasNext()`/`next()` — the
+two-method protocol that can desynchronise — plus Streams (lazy,
+adapter-based, single-use) as a parallel system. Two iteration
+mechanisms in one language, which is what happens when you retrofit.
+
+**C#.** `IEnumerable`/`IEnumerator`, LINQ as the lazy adapter set, and
+`yield return` generators compiled to state machines — since 2005.
+`DESIGN.md` cites C# as the proof that compiling generator state
+machines well is a solved problem.
+
+**Haskell.** Lazy by default, everywhere, so iteration is just list
+processing. Maximally elegant and the source of the "laziness
+surprises" critique in its strongest form — space leaks from unevaluated
+thunks are a real Haskell problem. Glide's laziness is confined to
+iterators, deliberately.
+
+---
+
+### 5. Common Mistakes
+
+**Using an adapter for side effects.**
+
+```glide
+// Bad — nothing happens; map is lazy and nothing consumes it
+notes.iter().map(|n| publish(n))
+
+// Bad — even with a consumer, this is a loop wearing a costume
+notes.iter().map(|n| publish(n)).count()
+
+// Good
+for n in notes {
+    publish(n)?
+}
+```
+
+The `?` in the good version is decisive: error propagation works in a
+loop and does not work inside a closure, because `?` returns from the
+*closure* (Chapter 8).
+
+**Consuming an iterator twice.**
+
+```glide
+// Bad
+let it = xs.iter()
+let n = it.count()
+let doubled = it.map(|x| x * 2).collect()    // empty — it is drained
+
+// Good
+let n = xs.iter().count()
+let doubled = xs.iter().map(|x| x * 2).collect()
+```
+
+**Collecting in the middle of a chain.**
+
+```glide
+// Bad — materialises a million-element list for no reason
+let result = xs.iter().map(f).collect().iter().filter(g).collect()
+
+// Good
+let result = xs.iter().map(f).filter(g).collect()
+```
+
+**Indexing instead of iterating.**
+
+```glide
+// Bad
+for i in 0..xs.len() { process(xs[i]) }
+
+// Good
+for x in xs { process(x) }
+
+// Good, when the index is genuinely needed
+for (i, x) in xs.iter().enumerate() { process(i, x) }
+```
+
+**Expecting `zip` to fail on different lengths.** It stops at the
+shorter side, silently. If mismatched lengths are a bug in your data,
+check the lengths first.
+
+**Trying to `?` inside an adapter.**
+
+```glide
+// Bad — the ? returns from the closure
+let contents = paths.iter().map(|p| fs.read_string(p)?).collect()
+
+// Good
+let mut contents = []
+for p in paths {
+    contents.push(fs.read_string(p)?)
+}
+```
+
+This is the single biggest reason loops remain the right tool for
+fallible work.
+
+**Reaching for an adapter that does not exist yet.** The set is
+deliberately small and grows when a program needs one. Write the loop.
+
+**Assuming laziness is free in the interpreter.** Generators cost a
+goroutine each today, and `yield from` recursion costs one per level.
+Fine for correctness; not a benchmark target.
+
+---
+
+### 6. Performance Considerations
+
+**Adapters allocate nothing.** A chain of five adapters is five small
+wrapper values, and no intermediate lists. Compare an eager `map` over
+a million elements, which allocates a million-element list per stage.
+
+**`take(n)` bounds the work.** `xs.iter().map(expensive).take(3)` calls
+`expensive` three times regardless of `xs.len()`.
+
+**Each element passes through one `next()` call per adapter.** A
+five-adapter chain is five calls per element. In the compiled tier
+these inline into a single loop — this is Rust's "zero-cost
+abstraction" claim and it holds when the closures are known at the call
+site. In the interpreter they do not inline, so a long chain over a
+large list is measurably slower than a hand-written loop.
+
+**`collect()` allocates once**, growing geometrically. `count()` and
+`sum()` allocate nothing.
+
+**Generators cost a goroutine and a channel each** in the interpreter.
+`yield from` recursion costs one goroutine per delegation level, so a
+depth-20 tree traversal has 20 live goroutines mid-walk. This is a
+tree-walker artifact; the compiled tier uses state machines.
+
+**A `for` loop over a `List` is the cheapest thing.** In the compiled
+tier, `for x in xs` over a list degenerates to an index-and-bounds-check
+loop. If you are not transforming, do not build a pipeline.
+
+**Adapter-chain error messages are ugly**, which is a compile-time
+ergonomics cost rather than a runtime one, and it is recorded as an
+accepted cost.
+
+---
+
+### 7. Best Practices
+
+**Use adapters for transformations, loops for effects.**
+
+```glide
+// Good — a transformation
+let titles = notes
+    .iter()
+    .filter(|n| n.published)
+    .map(|n| n.title)
+    .collect()
+
+// Good — an effect
+for note in notes {
+    publish(note)?
+}
+```
+
+The rule of thumb: if the pipeline ends in `collect()`, `count()`, or
+`sum()`, adapters are right. If it ends in a side effect or needs `?`,
+write the loop.
+
+**Put `take` and `filter` early.** Adapters run per element in chain
+order, so filtering before mapping means the map runs on fewer
+elements:
+
+```glide
+// Better
+xs.iter().filter(cheap_test).map(expensive).collect()
+
+// Worse
+xs.iter().map(expensive).filter(cheap_test).collect()
+```
+
+**Write chains one adapter per line.**
+
+```glide
+// Good
+let result = entries
+    .iter()
+    .filter(|e| e.1 > threshold)
+    .map(|e| e.0)
+    .take(20)
+    .collect()
+```
+
+The leading-dot continuation rule exists for this, and it is what the
+formatter will produce.
+
+**Give a user type an `iter()` method rather than exposing its
+backing list.**
+
+```glide
+// Bad — leaks the representation, and the caller can mutate it
+impl Bag {
+    pub fn items(self) -> List<Int> { self.items }
+}
+
+// Good
+impl Bag {
+    pub fn iter(self) -> Iterator<Int> {
+        for x in self.items { yield x }
+    }
+}
+```
+
+The good version makes `Bag` `for`-able and adapter-able, keeps the
+representation private, and hands out no mutable reference.
+
+**Do not collect just to get a length or a sum.**
+
+```glide
+// Bad
+let n = xs.iter().filter(p).collect().len()
+
+// Good
+let n = xs.iter().filter(p).count()
+```
+
+**Consume an iterator once, and name it if you need it twice.** If you
+find yourself wanting to iterate the same iterator twice, you wanted
+the *iterable* — call `.iter()` again.
+
+**Prefer `enumerate()` to a manual counter.**
+
+```glide
+// Bad
+let mut i = 0
+for x in xs {
+    use(i, x)
+    i += 1
+}
+
+// Good
+for (i, x) in xs.iter().enumerate() {
+    use(i, x)
+}
+```
+
+---
+
+### 8. Examples
+
+**Laziness, demonstrated:**
+
+```glide-run
+fn expensive(n: Int) -> Int {
+    println("  computing {n}")
+    n * 10
 }
 
 fn main() {
-    println("{fib().take(10).collect():?}")
+    let xs = [1, 2, 3, 4, 5, 6]
+
+    println("building the chain:")
+    let chain = xs.iter().map(|n| expensive(n)).take(2)
+    println("  (nothing has happened yet)")
+
+    println("consuming:")
+    let result = chain.collect()
+    println("{result:?}")
 }
 ```
 
 ```
-[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+building the chain:
+  (nothing has happened yet)
+consuming:
+  computing 1
+  computing 2
+[10, 20]
 ```
 
-`fib` never returns. `take(10)` makes it terminate. Because generators
-are lazy iterators (Chapter 23), an infinite sequence is a perfectly
-good value — you compose it with adapters and bound it at the point of
-use.
+Two calls, not six. The chain existed as a value for two lines and did
+nothing.
 
-#### `yield from` delegates
+**A word-frequency pipeline, adapters and loop each where they belong:**
 
-```glide
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left  { yield from walk(l) }
-    yield n.value
-    if let r = n.right { yield from walk(r) }
-}
-```
-
-`yield from iter` yields every element of a sub-iterator in turn. Here
-the sub-iterator is a recursive call, which is what makes recursive
-traversal work.
-
-Written out, an in-order traversal:
-
-```glide
-type Node = struct { value: Int, left: Node?, right: Node? }
-
-fn leaf(v: Int) -> Node { Node{ value: v, left: None, right: None } }
-
-fn insert(at: Node?, v: Int) -> Node {
-    match at {
-        None                   => leaf(v)
-        Some(n) if v < n.value => Node{ left: insert(n.left, v), ..n }
-        Some(n)                => Node{ right: insert(n.right, v), ..n }
-    }
-}
-
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left  { yield from walk(l) }
-    yield n.value
-    if let r = n.right { yield from walk(r) }
-}
-
+```glide-run
 fn main() {
-    let mut root = leaf(5)
-    for v in [3, 8, 1, 4, 7, 9] {
-        root = insert(Some(root), v)
+    let text = `
+        the quick brown fox
+        jumps over the lazy dog
+        the dog sleeps
+    `
+
+    // A loop, because we are accumulating into a map (an effect).
+    let mut counts: Map<String, Int> = [:]
+    for word in text.split_whitespace() {
+        let word = word.to_lower()
+        counts[word] = (counts[word] ?? 0) + 1
     }
-    println("{walk(root).collect():?}")
-    println("{walk(root).take(3).collect():?}")
+
+    // A pipeline, because we are transforming.
+    let mut entries = counts.entries()
+    entries.sort_by(|a, b| b.1.cmp(a.1))
+
+    let report = entries
+        .iter()
+        .take(3)
+        .map(|e| "{e.1} {e.0}")
+        .collect()
+
+    for line in report {
+        println(line)
+    }
 }
 ```
 
 ```
-[1, 3, 4, 5, 7, 8, 9]
-[1, 3, 4]
+3 the
+2 dog
+1 quick
 ```
 
-The second line is the payoff of laziness: `take(3)` visits three nodes
-and stops. The traversal is abandoned mid-recursion.
+**Making a type first-class:**
 
-#### Generators are iterators
-
-A generator's result is an ordinary `Iterator`, so everything from
-Chapter 23 applies:
-
-```glide
-walk(root).filter(|v| v % 2 == 1).map(|v| v * 10).collect()
-fib().take(5).sum()
-for v in walk(root) { … }
-```
-
-There is no second protocol and no adapter that works on one and not
-the other.
-
-#### Making a type iterable with a generator
-
-This is the most common use in practice — Chapter 17's `iter()` method:
-
-```glide
-type Grid = struct { width: Int, cells: List<Int> }
+```glide-run
+type Grid = struct {
+    width: Int
+    cells: List<Int>
+}
 
 impl Grid {
+    fn new(width: Int, cells: List<Int>) -> Grid {
+        Grid{ width: width, cells: cells }
+    }
+
+    // Iterate cells.
     fn iter(self) -> Iterator<Int> {
         for c in self.cells { yield c }
     }
 
+    // Iterate (row, col, value) triples — a second, named iterator.
     fn positions(self) -> Iterator<(Int, Int, Int)> {
         for (i, c) in self.cells.iter().enumerate() {
             yield (i / self.width, i % self.width, c)
         }
     }
 }
-```
-
-Two named traversals, each three lines. Offering more than one way to
-walk a structure costs almost nothing.
-
----
-
-### 2. Under the Hood
-
-#### What a suspended function is
-
-A generator needs to store, between pulls: the values of all its
-locals, and the exact point in the body where it paused. That bundle is
-a **continuation**, and there are two ways to build one.
-
-**A state machine.** The compiler rewrites the function into a struct
-holding the locals plus a state integer, and a `next()` method that
-switches on the state, runs to the next `yield`, saves the state, and
-returns. This is what C# has done since 2005 and what Glide's compiled
-tier will do.
-
-**A separate stack.** Run the body on its own thread of control and
-hand values across. That is what the interpreter does.
-
-#### The interpreter's implementation
-
-`glide/DESIGN-DECISIONS.md`: **generators run on a goroutine plus a
-channel.** `yield` sends; `next()` receives. Body panics are forwarded
-to the consumer. An abandoned iterator's producer is unblocked by a GC
-cleanup hook closing a stop channel.
-
-It is described as "the cheapest correct lazy implementation for a
-tree-walker", and it is: a suspended goroutine *is* a suspended frame
-with its locals intact, which is exactly what a generator needs.
-
-Two consequences you can measure today:
-
-- **One goroutine per generator**, and **one per `yield from`
-  delegation level**. A depth-20 tree traversal has 20 live goroutines
-  mid-walk. Fine here; irrelevant to the compiled tier.
-- **Generator handoffs release the interpreter lock** on both ends, so
-  a generator inside a task cannot wedge the interpreter.
-
-There is a good war story recorded in that file, worth reading because
-it illustrates how sharp lazy-plus-GC can be. The `Next` closure must
-keep its iterator value reachable (`runtime.KeepAlive`): `iterate()`
-hands the bare function around, and when only the function was live,
-the GC cleanup hook fired mid-loop and **silently truncated the stream
-at a GC-chosen point**. The symptom was the tree property test failing
-on a *prefix* of the sorted list, nondeterministically, despite a fixed
-seed.
-
-#### Why this is easy here and hard in Rust
-
-`DESIGN.md` names the asymmetry directly.
-
-Generators are hard in Rust — a decade unstabilised — because a yielded
-reference borrows from suspended stack state, and the borrow checker
-must prove that reference is still valid when the generator resumes.
-That is a genuinely hard problem, and it is why `Pin` exists.
-
-There are no lifetimes here. In a GC language, generators are almost
-boring: values yielded from a suspended frame are just values, kept
-alive by the collector like anything else.
-
-Build around the asymmetry: the feature that costs Rust a decade costs
-Glide a goroutine.
-
-#### The transpiler's known-hard piece
-
-`DESIGN.md` flags this explicitly on the de-risk list: lowering
-generators to Go is "the fiddly one — prototype before depending on the
-transpiler". The options are goroutine pairs (what the interpreter
-does, correct but heavy) or CPS/state-machine transformation
-(correct and fast, and real work).
-
-C# proves it is solvable. It is on the list because it is the piece
-most likely to bite.
-
----
-
-### 3. Why This Design?
-
-#### The problem generators solve
-
-Write an in-order tree traversal as a hand-rolled iterator. You need:
-
-- an explicit stack of nodes,
-- a flag or a state variable per stack entry recording whether you have
-  descended left, emitted the value, or descended right,
-- a `next()` method that resumes from that state.
-
-That is twenty-plus lines of stack manipulation for a traversal that is
-three lines recursively, and every line of it is a chance to get the
-state machine wrong.
-
-`DESIGN.md`: "Hand-writing `next()` for a tree traversal means manually
-maintaining the stack the compiler should build — this is why Go
-resisted iterators for a decade and then shipped the awkward callback
-form."
-
-The compiler *can* build that state machine. Generators are the syntax
-that asks it to.
-
-#### Why `yield` and not a callback
-
-Go's answer (1.23's `iter.Seq`) is internal iteration: you write
-`func(yield func(T) bool)` and call `yield` for each element, checking
-the return to know when to stop.
-
-That is a real solution and it has two costs. It is *internal*
-iteration, so `zip` and lockstep consumption become hard (Chapter 23).
-And the early-exit protocol is manual — you must check `yield`'s return
-value and thread the "stop" signal back out through your recursion,
-which for a recursive traversal is exactly the bookkeeping generators
-were meant to remove.
-
-With external iteration plus generators, abandoning a traversal is
-"stop calling `next()`", and the producer simply never resumes.
-
-#### Why `yield from` rather than a loop
-
-You could write:
-
-```glide
-for v in walk(l) { yield v }
-```
-
-and `yield from walk(l)` is sugar for it. The sugar earns its place
-because delegation is the *common* case in recursive generators, and
-because a compiled implementation can flatten `yield from` chains
-rather than nesting a state machine per level — which matters when the
-recursion is deep.
-
-Python has exactly this (`yield from`, PEP 380) and for exactly this
-reason.
-
-#### Why generators are sugar, not a second protocol
-
-Restated from Chapter 23 because it is the decision that keeps the
-ecosystem coherent: a generator returns an ordinary `Iterator`. Every
-adapter works on it. A consumer cannot tell whether a sequence came
-from a list, an adapter chain, or a hand-written traversal.
-
-If generators produced a distinct type, half the library would work on
-one and half on the other, and `for` would need to handle both.
-
-#### Why not channels for this
-
-A green thread plus a channel *is* a generator, and `DESIGN.md`
-explicitly bans it as the user-facing pattern:
-
-> Channels are not the iterator protocol. A green thread + channel per
-> loop means synchronisation per element, and early exit leaks a
-> thread. Iteration is control flow, not communication.
-
-Two costs. **Synchronisation per element** — every value crosses a
-channel, which is orders of magnitude more expensive than a function
-call. And **early exit leaks a thread**: abandon the loop and the
-producer is blocked forever on a send nobody will receive.
-
-The interpreter uses a goroutine and a channel *internally*, and it
-solves the leak with a GC cleanup hook — machinery a user writing the
-pattern by hand would not have. That is the difference between an
-implementation detail of the dev tier and a pattern you are told to
-write.
-
----
-
-### 4. Competing Approaches
-
-**Python.** `yield` and `yield from` — the direct source of Glide's
-spelling and semantics. Python generators also support `send()`
-(two-way communication), which Glide does not adopt: it turns a
-generator into a coroutine and the use cases belong to structured
-concurrency.
-
-**C#.** `yield return` and `yield break`, compiled to state machines,
-since 2005. The existence proof that this compiles well, cited in
-`DESIGN.md` as the reason the backend obligation is
-"known-hard-but-solved".
-
-**JavaScript.** `function*` and `yield`, `yield*` for delegation. Same
-model, and the foundation `async`/`await` was built on.
-
-**Go.** Nothing for thirteen years, then `iter.Seq` in 1.23 — internal
-iteration via a `yield` callback returning `bool`. Workable, awkward
-for `zip` and early exit, and arriving after the ecosystem had built
-its own conventions. The cautionary tale that motivates designing
-iteration in from the start.
-
-**Rust.** Generators unstable for a decade because of the borrow-
-checker interaction; the ecosystem uses `impl Iterator` with
-hand-written state or the `genawaiter`/`async-stream` crates. Rust's
-`async` blocks are generators wearing a different name, which is why
-the two features share machinery and both need `Pin`.
-
-**Java.** No generators. `Iterator` implemented by hand, or a thread
-plus a `BlockingQueue` (with the leak problem), or Streams built from
-`Spliterator`. The absence is felt.
-
-**Kotlin.** `sequence { yield(x) }` — coroutine-based, so genuinely
-suspendable, and one of the nicer mainstream implementations.
-
-**CLU.** The origin, 1975. Iterators as a first-class language
-construct with `yield`. `LINEAGE.md` credits it, and it is worth noting
-that the feature is fifty years old and still absent from most
-mainstream languages.
-
----
-
-### 5. Common Mistakes
-
-**Expecting the body to run when you call it.**
-
-```glide
-fn setup() -> Iterator<Int> {
-    println("starting")       // does NOT print at call time
-    yield 1
-}
 
 fn main() {
-    let it = setup()          // nothing printed
-    println("created")
-    let _ = it.collect()      // now "starting" prints
-}
-```
+    let g = Grid.new(3, [1, 2, 3, 4, 5, 6])
 
-```
-created
-starting
-```
+    println(g.iter().sum())
 
-Calling a generator creates an iterator. The body runs when something
-pulls.
-
-**Putting side effects in a generator.** Because of the above, a
-generator whose body has effects has them at unpredictable times — or
-never, if nobody consumes it. Generators should produce values.
-
-**Forgetting `yield from` and yielding the iterator itself.**
-
-```glide
-// Bad — yields one element, which happens to be an iterator
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left { yield walk(l) }
-    yield n.value
-}
-
-// Good
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left { yield from walk(l) }
-    yield n.value
-}
-```
-
-**Using a generator where a list would do.** If the sequence is small,
-already materialised, and consumed once, `collect()`ing it into a list
-is simpler and, in the interpreter, cheaper (no goroutine).
-
-```glide
-// Overkill
-fn keys(m: Map<String, Int>) -> Iterator<String> {
-    for (k, _) in m { yield k }
-}
-
-// Fine
-fn keys(m: Map<String, Int>) -> List<String> {
-    m.entries().iter().map(|e| e.0).collect()
-}
-```
-
-Use a generator when the sequence is large, infinite, expensive to
-produce, or when the caller may not want all of it.
-
-**Deep `yield from` recursion in the interpreter.** One goroutine per
-level. A depth-1000 recursion is 1000 goroutines. Correct, and not
-free.
-
-**Trying to `?` out of a generator.** A generator's early exits are
-`return` (ending the sequence) and yielding. Propagating an error out
-of a generator means the iterator's element type has to carry it —
-`Iterator<Result<T, E>>` — which is workable and awkward. For fallible
-production, a loop that collects and returns `Result<List<T>, E>` is
-usually clearer.
-
-**Expecting a generator to be restartable.** It is an iterator: consume
-it once. Call the generator function again for a fresh one.
-
-```glide
-// Bad
-let it = walk(root)
-let a = it.collect()
-let b = it.collect()      // empty
-
-// Good
-let a = walk(root).collect()
-let b = walk(root).collect()
-```
-
-**Mutating the structure you are walking.** The generator is suspended
-mid-traversal holding references. Mutating underneath it is undefined
-in the practical sense — do not.
-
----
-
-### 6. Performance Considerations
-
-**In the interpreter: one goroutine and one channel per generator**,
-plus one per `yield from` delegation level. Every `yield` is a channel
-send and every `next()` a receive — orders of magnitude more expensive
-than a function call.
-
-This is the dev tier's cost and it is why generator-heavy code should
-not be benchmarked here.
-
-**In the compiled tier** (○): a state machine. A `yield` becomes "store
-the state, return the value"; a `next()` becomes "switch on the state,
-run to the next yield". Roughly the cost of a function call plus a
-switch, and the whole thing inlines into the consuming loop when the
-generator is known statically. This is C#'s cost model.
-
-**Laziness is the win.** `walk(root).take(3)` visits three nodes of a
-million-node tree. No amount of implementation efficiency in an eager
-version competes with not doing the work.
-
-**`yield from` nesting has a cost at both tiers.** In the interpreter
-it is a goroutine per level; in a naive state-machine lowering it is a
-`next()` call per level per element, so a depth-*d* tree costs O(d) per
-element yielded — the classic "yield from is O(depth)" problem. A good
-lowering flattens the chain; Python does not, which is why deep
-`yield from` recursion is slow there too.
-
-**A generator keeps its captured state alive.** A generator over a
-large structure holds that structure reachable until the iterator is
-dropped. If you `take(3)` and abandon it, the rest stays alive until
-collection.
-
-**Abandonment is handled.** The interpreter's GC cleanup hook closes a
-stop channel so an abandoned producer does not block forever. A
-hand-written thread-plus-channel generator would leak — which is
-exactly why the pattern is banned as a user-facing idiom.
-
----
-
-### 7. Best Practices
-
-**Write the traversal, not the state machine.** That is the entire
-point:
-
-```glide
-// Good — reads as what it is
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left  { yield from walk(l) }
-    yield n.value
-    if let r = n.right { yield from walk(r) }
-}
-```
-
-If you find yourself building an explicit stack inside a generator, ask
-whether recursion plus `yield from` would say it.
-
-**Name your traversals.** A structure often has more than one useful
-order, and generators make each one three lines:
-
-```glide
-impl Tree {
-    fn in_order(self) -> Iterator<Int> { … }
-    fn pre_order(self) -> Iterator<Int> { … }
-    fn leaves(self) -> Iterator<Int> { … }
-}
-```
-
-Reserve the name `iter()` for the default traversal, since that is what
-`for … in` calls.
-
-**Use a generator for the sequence, a loop for the effects.**
-
-```glide
-// Good
-for line in file_lines(path) {
-    process(line)?
-}
-```
-
-The generator produces; the loop consumes and can propagate errors.
-
-**Keep generators pure.** No IO, no mutation of shared state, no
-printing. The body runs at unpredictable times and may never finish, so
-effects inside are hard to reason about.
-
-**Bound infinite generators at the point of use, visibly.**
-
-```glide
-// Good — the bound is right there
-let sample = sensor_readings().take(100).collect()
-
-// Dangerous — nothing stops this
-for reading in sensor_readings() { … }
-```
-
-An unbounded `for` over an infinite generator is an infinite loop, and
-it should look like one.
-
-**Prefer returning a `List` for small, eagerly-known sequences.**
-Generators earn their keep when the sequence is large, infinite,
-expensive, or partially consumed. For "the three keys of this config",
-a list is simpler.
-
-**Do not build a generator out of a thread and a channel by hand.**
-The language provides the construct; the hand-rolled version
-synchronises per element and leaks on early exit.
-
----
-
-### 8. Examples
-
-**The canonical example, complete:**
-
-```glide
-type Node = struct { value: Int, left: Node?, right: Node? }
-
-fn leaf(v: Int) -> Node { Node{ value: v, left: None, right: None } }
-
-fn insert(at: Node?, v: Int) -> Node {
-    match at {
-        None                   => leaf(v)
-        Some(n) if v < n.value => Node{ left: insert(n.left, v), ..n }
-        Some(n)                => Node{ right: insert(n.right, v), ..n }
-    }
-}
-
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left  { yield from walk(l) }
-    yield n.value
-    if let r = n.right { yield from walk(r) }
-}
-
-fn main() {
-    let mut root = leaf(5)
-    for v in [3, 8, 1, 4, 7, 9] {
-        root = insert(Some(root), v)
+    for (row, col, v) in g.positions() {
+        if v % 2 == 0 {
+            println("even {v} at ({row}, {col})")
+        }
     }
 
-    println("{walk(root).collect():?}")
-    println("{walk(root).take(3).collect():?}")
-
-    let odds = walk(root).filter(|v| v % 2 == 1).collect()
-    println("{odds:?}")
-
-    println(walk(root).sum())
+    let big = g.iter().filter(|v| v > 3).collect()
+    println("{big:?}")
 }
 ```
 
 ```
-[1, 3, 4, 5, 7, 8, 9]
-[1, 3, 4]
-[1, 3, 5, 7, 9]
 21
+even 2 at (0, 1)
+even 4 at (1, 0)
+even 6 at (1, 2)
+[4, 5, 6]
 ```
 
-Three lines of generator, and the tree composes with every adapter.
-Note `take(3)`: three nodes visited, the recursion abandoned.
+`iter()` makes `Grid` work with `for` and every adapter; `positions()`
+is a second iterator with a name, which is how you offer more than one
+traversal.
 
-Compare what the hand-written version needs — an explicit stack, a
-per-entry phase marker, and a `next()` that resumes the state machine.
-The `insert` function above uses struct update so untouched subtrees
-are shared, which is the other half of why this code is short.
-
-**An infinite sequence:**
+**Bad versus good: the pipeline that should be a loop**
 
 ```glide
-fn fib() -> Iterator<Int> {
-    let mut a = 0
-    let mut b = 1
-    for {
-        yield a
-        let next = a + b
-        a = b
-        b = next
-    }
-}
-
-fn primes() -> Iterator<Int> {
-    let mut found = []
-    let mut n = 2
-    for {
-        let mut is_prime = true
-        for p in found {
-            if p * p > n { break }
-            if n % p == 0 {
-                is_prime = false
-                break
-            }
-        }
-        if is_prime {
-            found.push(n)
-            yield n
-        }
-        n += 1
-    }
-}
-
-fn main() {
-    println("{fib().take(10).collect():?}")
-    println("{primes().take(10).collect():?}")
-
-    let big_fibs = fib().filter(|n| n > 100).take(3).collect()
-    println("{big_fibs:?}")
+// Bad — three problems in three lines
+fn save_all(notes: List<Note>) -> Int {
+    let mut saved = 0
+    notes.iter().map(|n| {
+        save(n)
+        saved += 1
+    }).count()
+    saved
 }
 ```
 
-```
-[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
-[2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
-[144, 233, 377]
-```
-
-The third one is worth pausing on: `filter` over an infinite sequence,
-bounded by `take(3)`. The generator produced exactly as many Fibonacci
-numbers as were needed to find three above 100, and then stopped
-mid-loop.
-
-**Two traversals of one structure:**
-
-```glide
-type Doc = struct {
-    title: String
-    sections: List<String>
-}
-
-impl Doc {
-    // The default traversal — what `for x in doc` uses.
-    fn iter(self) -> Iterator<String> {
-        yield self.title
-        for s in self.sections { yield s }
-    }
-
-    // A different order, named.
-    fn body_only(self) -> Iterator<String> {
-        for s in self.sections { yield s }
-    }
-
-    // A derived sequence.
-    fn word_counts(self) -> Iterator<(String, Int)> {
-        for s in self.sections {
-            yield (s, s.split_whitespace().len())
-        }
-    }
-}
-
-fn main() {
-    let d = Doc{
-        title: "Report",
-        sections: ["intro para here", "body of the text", "end"],
-    }
-
-    for line in d {
-        println("- {line}")
-    }
-
-    println("{d.body_only().count()} sections")
-
-    for (s, n) in d.word_counts() {
-        println("{n} words: {s}")
-    }
-}
-```
-
-```
-- Report
-- intro para here
-- body of the text
-- end
-3 sections
-3 words: intro para here
-4 words: body of the text
-1 words: end
-```
-
-Three traversals, nine lines. Offering multiple views of a structure is
-cheap enough that you do it by default.
-
-**Bad versus good: the eager traversal**
-
-```glide
-// Bad — builds the whole list, even when the caller wants three
-fn walk_eager(n: Node) -> List<Int> {
-    let mut out = []
-    if let l = n.left {
-        for v in walk_eager(l) { out.push(v) }
-    }
-    out.push(n.value)
-    if let r = n.right {
-        for v in walk_eager(r) { out.push(v) }
-    }
-    out
-}
-```
-
-For a million-node tree, `walk_eager(root)` allocates a million-element
-list — plus intermediate lists at every level of the recursion, which
-makes it O(n log n) allocations rather than O(n). And a caller wanting
-the smallest three elements pays for all million.
+The `map` is being used for its side effect; `count()` is there only to
+force the chain to run; `saved` is a `mut` binding mutated from inside
+a closure (which the task-boundary rule will eventually forbid); and
+`save` returning a `Result` cannot be propagated with `?`.
 
 ```glide
 // Good
-fn walk(n: Node) -> Iterator<Int> {
-    if let l = n.left  { yield from walk(l) }
-    yield n.value
-    if let r = n.right { yield from walk(r) }
+fn save_all(notes: List<Note>) -> Result<Int, Error> {
+    let mut saved = 0
+    for n in notes {
+        save(n)?
+        saved += 1
+    }
+    Ok(saved)
 }
 ```
 
-Shorter, allocates nothing, and `walk(root).take(3)` visits three
-nodes.
+Shorter, propagates errors, no closure, no forcing consumer.
 
 ---
 
@@ -804,51 +821,54 @@ nodes.
 
 **Summary**
 
-- **A function containing `yield` is a generator**: calling it returns
-  an `Iterator` and the body does not run until something pulls.
-- `yield` hands over a value and **pauses the function mid-flight**;
-  the next pull resumes it with all locals and loop positions intact.
-- **`yield from iter`** delegates to a sub-iterator — which is what
-  makes recursive traversal work, and is why an in-order tree walk is
-  three lines instead of a twenty-line state machine.
-- Generators are **sugar for the `Iterator` protocol**, not a second
-  protocol, so they compose with every adapter and with `for … in`.
-- **Infinite generators are ordinary values.** Bound them with `take`
-  at the point of use.
-- The most common use is an `iter()` method, which makes a user type
-  `for`-able and adapter-able (Chapter 17).
-- Under the hood: the interpreter runs each generator on a **goroutine
-  plus a channel** (one per `yield from` level), with a GC cleanup hook
-  to unblock abandoned producers. The compiled tier lowers to a **state
-  machine**, as C# has done since 2005 — flagged in `DESIGN.md` as the
-  fiddly piece of the transpiler.
-- Generators are cheap here and hard in Rust because **there are no
-  lifetimes**: a yielded reference borrowing from suspended stack state
-  is the problem `Pin` exists for, and a GC does not have it.
-- **Channels are not the iteration protocol.** Hand-rolling a generator
-  from a thread and a channel synchronises per element and leaks the
-  thread on early exit.
-- Keep generators pure and side-effect free; their bodies run at
-  unpredictable times and may never finish.
+- An **iterator** yields elements on demand. `xs.iter()` does not walk
+  the list; it produces a cursor.
+- The protocol is **one method**: `fn next(mut self) -> T?`. `None`
+  means exhausted. No `hasNext` to desynchronise, no `(value, ok)`
+  tuple, no invalid states.
+- **External iteration** — the consumer drives — is what makes `zip`
+  and early exit natural. Go's internal `iter.Seq` makes both awkward.
+- **Adapters are lazy**: `map`, `filter`, `take`, `enumerate`, `zip`
+  build new iterators and run nothing. **Consumers** — `collect`,
+  `count`, `sum` — drain them. `xs.iter().map(f).take(2)` calls `f`
+  twice.
+- Laziness buys infinite sequences as ordinary values, cost
+  proportional to what you consume, and no intermediate collections.
+  Its accepted cost is that a `map` used for effects silently does
+  nothing.
+- **`Iterable` is separate from `Iterator`.** A `List` can be iterated
+  many times; an iterator is consumed once.
+- A user type with an **`iter()` method** works in `for … in` and with
+  every adapter.
+- **Generators are sugar for the same protocol**, not a second one, so
+  they compose with everything (Chapter 25).
+- **Channels are not the iteration protocol** — implementing an
+  iterator with a thread and a channel means synchronisation per
+  element and a leaked thread on early exit. Consuming an existing
+  stream (`for v in rx`) is the legitimate direction.
+- Use adapters for transformations and loops for effects. `?` does not
+  work inside a closure, which settles most cases.
+- ○: `skip`, `take_while`, `fold`, `flat_map`, `any`, `all`, `min`,
+  `max` and friends, arriving on demand.
 
 **Exercises**
 
-1. **Write the state machine by hand.** Implement in-order tree
-   traversal as a struct with a `next()` method, using an explicit
-   stack. Count the lines and the number of distinct states you had to
-   track. Then delete it and write the three-line generator. Keep both
-   files; the comparison is the argument for the feature.
+1. **Prove the laziness.** Write a `map` whose closure prints, chain it
+   with `take(2)` over a ten-element list, and count the prints. Then
+   move the `take` before the `map` and count again. Then remove the
+   `collect()` entirely and count once more. The three numbers are the
+   whole model.
 
-2. **Build an infinite generator with a real use.** Write a generator
-   producing exponential backoff delays (100ms, 200ms, 400ms, …, capped
-   at 30s, forever). Then use it in a retry loop bounded by `take(5)`.
-   Note that the cap and the bound are stated in two different places
-   and decide whether that is a feature or a smell.
+2. **Implement `zip` twice.** Write `zip` for two external iterators
+   (pull one from each, stop at the shorter). Then try to write it for
+   two Go-style internal iterators — `func(yield func(T) bool)` — using
+   only ordinary function calls. You will find you cannot without a
+   coroutine or a buffer, and that is the argument for external
+   iteration in one exercise.
 
-3. **Find the leak.** Write a generator that opens a resource before
-   its first `yield` and closes it after its last. Then consume only
-   the first element and abandon it. What happens to the resource?
-   Compare your answer with the interpreter's GC-cleanup-hook mechanism
-   and with what a `defer` inside the generator body would do. This is
-   the sharpest edge in the chapter, and it is why generators should
-   produce values rather than manage resources.
+3. **Find the pipeline that should be a loop.** In a codebase using
+   LINQ, Streams, or Rust iterators, find a chain whose final consumer
+   exists only to force evaluation (`.count()` discarded, `.forEach`,
+   `.collect::<Vec<_>>()` then ignored). Rewrite it as a loop and
+   compare. Then find one going the other way — a hand-written loop
+   building a list that a `filter`/`map`/`collect` would say better.

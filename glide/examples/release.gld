@@ -1,0 +1,143 @@
+// release — the chapter-32 case study: a shell script, rewritten.
+//
+// Stages a release directory for a version tag: checks the working
+// tree, records what was built, checksums it, and writes a manifest.
+// Nothing here is exotic; the point is that every failure mode bash
+// leaves to convention is a value the compiler knows about.
+//
+// Run: glide run examples/release.gld v1.2.3 [dir]
+import fs
+import os
+import process
+
+type ReleaseError =
+    NotSemver{ given: String }
+    | NotARepo{ dir: String }
+    | Dirty{ files: Int }
+    | ToolFailed{ tool: String, status: Int, why: String }
+
+// One conversation with one external program, in one place. `Err` is
+// "the tool could not be run"; a non-zero status is the tool answering.
+fn tool(name: String, args: List<String>) -> Result<String, ReleaseError> {
+    let out = match process.run(name, args) {
+        Ok(o)  => o
+        Err(e) => { return Err(.ToolFailed{ tool: name, status: -1, why: e.message() }) }
+    }
+    if out.ok() == false {
+        return Err(.ToolFailed{ tool: name, status: out.status(), why: out.stderr().trim() })
+    }
+    Ok(out.stdout().trim())
+}
+
+fn git(dir: String, args: List<String>) -> Result<String, ReleaseError> {
+    let mut full = ["-C", dir]
+    full.extend(args)
+    tool("git", full)
+}
+
+// v1.2.3 — three numeric parts after a leading v. No regex needed, and
+// the failure carries what was actually given.
+fn check_version(v: String) -> Result<(), ReleaseError> {
+    if v.starts_with("v") == false {
+        return Err(.NotSemver{ given: v })
+    }
+    let parts = v.trim_prefix("v").split(".")
+    if parts.len() != 3 {
+        return Err(.NotSemver{ given: v })
+    }
+    for p in parts {
+        let Some(_) = p.parse_int() else { return Err(.NotSemver{ given: v }) }
+    }
+    Ok(())
+}
+
+fn check_tree(dir: String) -> Result<String, ReleaseError> {
+    let head = match git(dir, ["rev-parse", "--short", "HEAD"]) {
+        Ok(h)  => h
+        Err(_) => { return Err(.NotARepo{ dir: dir }) }
+    }
+    let status = git(dir, ["status", "--porcelain"])?
+    if status != "" {
+        return Err(.Dirty{ files: status.lines().len() })
+    }
+    Ok(head)
+}
+
+fn checksum(path: String) -> Result<String, ReleaseError> {
+    let line = tool("shasum", ["-a", "256", path])?
+    Ok(line.split(" ")[0])
+}
+
+fn stage(dir: String, version: String, head: String) -> Result<String, ReleaseError> {
+    let out = fs.join([os.env("TMPDIR") ?? "/tmp", "release-{version}"])
+
+    // If anything below fails, the half-built directory goes away.
+    // A shell script needs a trap for this, and gets the signal cases
+    // wrong; errdefer runs on the error path only.
+    errdefer { _ = fs.remove_all(out) }
+
+    match fs.mkdir_all(out) {
+        Ok(_)  => {}
+        Err(e) => { return Err(.ToolFailed{ tool: "mkdir", status: -1, why: e.message() }) }
+    }
+
+    let notes = fs.join([out, "RELEASE.txt"])
+    let body = "version {version}\ncommit  {head}\nsource  {dir}\n"
+    match fs.write_string(notes, body) {
+        Ok(_)  => {}
+        Err(e) => { return Err(.ToolFailed{ tool: "write", status: -1, why: e.message() }) }
+    }
+
+    let sum = checksum(notes)?
+    match fs.append_string(notes, "sha256  {sum}\n") {
+        Ok(_)  => {}
+        Err(e) => { return Err(.ToolFailed{ tool: "append", status: -1, why: e.message() }) }
+    }
+    Ok(out)
+}
+
+fn explain(e: ReleaseError) -> String {
+    match e {
+        NotSemver{ given } => "{given} is not a version like v1.2.3"
+        NotARepo{ dir }    => "{dir} is not a git repository"
+        Dirty{ files }     => "{files} uncommitted file(s); commit or stash first"
+        ToolFailed{ tool, status, why } =>
+            if status < 0 { "{tool} could not be run: {why}" } else { "{tool} exited {status}: {why}" }
+    }
+}
+
+fn run(version: String, dir: String) -> Result<String, ReleaseError> {
+    check_version(version)?
+    // Every child started in here dies with the scope. A shell script
+    // that hangs, hangs forever.
+    scope(timeout: 30.s) {
+        let head = check_tree(dir)?
+        stage(dir, version, head)
+    } ?? Err(.ToolFailed{ tool: "git", status: -1, why: "timed out after 30s" })
+}
+
+fn main() {
+    let args = os.args()
+    let (version, dir) = match args {
+        [_, v]    => (v, ".")
+        [_, v, d] => (v, d)
+        _         => {
+            eprintln("usage: release <version> [dir]")
+            os.exit(2)
+        }
+    }
+
+    match run(version, dir) {
+        Ok(out) => {
+            println("staged {version} in {out}")
+            for name in fs.list_dir(out) ?? [] {
+                println("  {name}")
+            }
+            _ = fs.remove_all(out)
+        }
+        Err(e) => {
+            eprintln("release: {explain(e)}")
+            os.exit(1)
+        }
+    }
+}

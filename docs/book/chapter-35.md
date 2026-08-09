@@ -1,645 +1,840 @@
-# Chapter 35: The Implementation Path
+# Chapter 35: SQL and Databases
 
-Most language books do not have this chapter, because most languages
-are finished. Glide is not, and the *path* from a tree-walking
-interpreter to a self-hosted compiler is a design artifact in its own
-right — one with a genuinely clever shortcut in it.
+Glide's database design has three load-bearing positions, and all three
+are refusals:
 
-`DESIGN.md` frames it as **two mountains wearing one name**: the
-compiler is a hill with a shortcut; the runtime is the actual decade,
-deferred indefinitely by the shortcut.
+- **No ORM. Ever.** An ORM is a language dispute, not a battery.
+- **No query-builder DSL.** A worse SQL that compiles to SQL serves the
+  library, not you.
+- **No live-schema checking.** Validating against a running database at
+  compile time trades away hermeticity.
 
-This chapter is entirely about ○ work, except the parts describing what
-runs today.
+What is left is making raw SQL plus mapping ergonomic — and the pieces
+that do that come from decisions made in earlier chapters: `Option`
+kills `NULL`, comptime kills the placeholder bug, closures make
+transactions structural, and scopes make `QueryContext` unnecessary.
+
+The M2 shim (✓) is SQLite only, with dynamic rows. `derive Row` and
+typed queries are ○.
 
 ---
 
 ### 1. Basic Usage
 
-#### The four steps
+#### Opening
+
+```glide
+import sql
+
+fn main() -> Result<(), Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    …
+}
+```
+
+DSNs today: `"sqlite:path"` or `"sqlite::memory:"`. The driver is
+`modernc.org/sqlite` — **pure Go, no CGO**, so cross-compilation stays
+`GOOS=… go build` and no C toolchain enters the build.
+
+#### The surface
+
+| Call | Returns |
+|---|---|
+| `sql.open(dsn)` | `Result<Db, Error>` |
+| `db.exec(q [, params])` | `Result<Int, Error>` — rows affected |
+| `db.query(q [, params])` | `Result<List<Map>, Error>` |
+| `db.query_one(q [, params])` | `Result<Option<Map>, Error>` |
+| `db.close()` | `Result<(), Error>` |
+
+`db.exec`, `db.query`, and `db.query_one` are **cancellation points**.
+
+#### Named parameters, and only named parameters
+
+```glide
+let found = db.query_one(
+    "select id, title from notes where id = :id",
+    ["id": id],
+)?
+```
+
+`:name` is the **one canonical placeholder syntax**. Parameters are a
+`Map`. Drivers translate to whatever the wire protocol wants — the
+`?`-versus-`$1` roulette is interface negligence.
+
+**Missing and unused names are both errors, naming the parameter.**
+
+```glide
+db.exec("insert into notes (title) values (:title)", ["ttile": "x"])
+```
+
+errors rather than silently inserting nothing. That is the comptime
+check (○), enforced dynamically for now.
+
+#### Rows are maps today
+
+```glide
+let rows = db.query("select id, title from notes")?
+for row in rows {
+    let id = row["id"] ?? 0
+    let title = row["title"] ?? ""
+    println("{id}: {title}")
+}
+```
+
+`db.query` returns `List<Map>` — column name to value, in column order.
+`db.query_one` returns `Option<Map>`: `None` for no row, and **an
+`Err` for more than one row**.
+
+Typed rows arrive with `derive Row`.
+
+#### NULL is `Option`, in both directions
+
+A NULL column reads as `None`. Binding `None` writes NULL.
+
+```glide
+let row = db.query_one("select body from notes where id = :id", ["id": id])?
+match row {
+    Some(r) => {
+        let body = r["body"] ?? "(no body)"     // NULL becomes None
+        println(body)
+    }
+    None => println("no such note")
+}
+```
+
+**`sql.NullString` never exists.** It is the zero-value disease in a
+database costume, and Chapter 14's decision cures it here for free.
+
+#### `distinct` values bind by unwrapping
+
+```glide
+db.exec("insert into notes (id) values (:id)", ["id": NoteId(7)])
+```
+
+binds `7`. Codecs unwrap at the boundary (Chapter 15) — a codec's
+conversion is the explicit kind.
+
+`Instant` values store as RFC 3339.
+
+#### A complete program
+
+```glide-run
+import sql
+
+fn main() -> Result<(), Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+
+    _ = db.exec(`create table notes (
+        id integer primary key,
+        title text not null,
+        body text
+    )`)?
+
+    _ = db.exec("insert into notes (title, body) values (:t, :b)",
+                ["t": "first", "b": "hello"])?
+    _ = db.exec("insert into notes (title, body) values (:t, :b)",
+                ["t": "second", "b": None])?
+
+    let rows = db.query("select id, title, body from notes order by id")?
+    for row in rows {
+        let id = row["id"] ?? 0
+        let title = row["title"] ?? ""
+        let body = row["body"] ?? "(null)"
+        println("{id}  {title:8}  {body}")
+    }
+
+    let one = db.query_one("select title from notes where id = :id",
+                           ["id": 1])?
+    println("{one:?}")
+
+    let missing = db.query_one("select title from notes where id = :id",
+                               ["id": 99])?
+    println("{missing:?}")
+
+    Ok(())
+}
+```
 
 ```
-1. Go tree-walking interpreter          (M1-M3 complete)
-2. The checker, in Go                   ← here (M4)
-3. Compiler frontend rewritten in Glide, run on the interpreter
-4. Glide→Go transpiler, which compiles itself
-5. Someday: LLVM + own runtime
+1     first  hello
+2    second  (null)
+["title": "first"]
+None
 ```
 
-**Step 1 — the interpreter (done).** Written in Go, it proves
-semantics. `DESIGN.md` names the three riskiest: generators, structured
-concurrency, and comptime reflection. Two of the three now run.
-Standard library modules are Go host shims behind Glide-shaped
-interfaces.
+Note the second insert binds `None` for `body`, and the query reads it
+back as `None`, which `?? "(null)"` renders. Nothing anywhere mentions
+a nullable-string wrapper type.
 
-**Step 2 — the checker, in Go (M4, in progress).** Annotations stop
-being documentation. This step was not in the original plan — the
-checker was step 2 *in Glide* — and the next section explains the
-reversal.
+#### Raw strings for multi-line SQL
 
-**Step 3 — the frontend rewritten in Glide.** Lexer, parser, and
-checker, run on the interpreter. **Dogfooding at scale starts here**,
-against a design that step 2 has already proven.
+```glide
+let rows = db.query(`
+    select id, title
+    from notes
+    where org = :org
+    order by created desc
+`, ["org": org])?
+```
 
-**Step 4 — the Glide→Go transpiler**, which then compiles itself.
+Backticks: no escapes, no interpolation, multiline. And critically —
+**never interpolate a value into a query string**:
 
-**Step 5 — LLVM and a native runtime.** The real mountain, and the only
-step that takes Go out of the pipeline rather than out of the source
-tree.
+```glide
+// Bad — SQL injection, and it does not even work with `?? `
+let q = "select * from notes where title = '{title}'"
 
-#### One frontend, two backends
+// Good
+db.query("select * from notes where title = :title", ["title": title])
+```
 
-The single most important structural fact about Glide's implementation:
-**the lexer, parser, and checker are one implementation, shared by the
-interpreter and the compiler.** The two tiers differ in how they
-execute a checked program. They never differ in what they accept, or in
-what it means.
+#### The designed surface ○
 
-This is not an efficiency measure. It is what makes it safe to ship
-both tiers. "Runs interpreted, fails compiled" is the bug class that
-discredits every dual-tier language, and it is unreachable when exactly
-one thing decides. OCaml has run `ocamlc`, `ocamlopt`, and an
-interactive toplevel over one frontend since the early 90s; Rust's Miri
-interprets the same MIR its codegen backends consume, and rustc's own
-compile-time evaluator *is* that interpreter.
+**`derive Row`** — comptime column mapping:
 
-The consequence for you: **the interpreter is not scaffolding.**
-`glide run` is meant to be a statically-checked scripting language in a
-single static binary — a product, not a stepping stone. An earlier plan
-had it freezing at self-hosting so that "the evolving language keeps
-exactly one implementation"; the shared frontend delivers that property
-outright, and without the scripting tier slowly becoming an older
-language.
+```glide
+type Note = struct {
+    pub id: NoteId
+    pub title: String
+    pub body: String?
+} derive(Row)
 
-#### Where the implementation is today
+let note = db.query_one<Note>("select id, title, body from notes where id = :id",
+                              ["id": id])?
+```
 
-M1, M2, and M3 are complete, and each was defined by a program it had
-to run:
+**Transactions are a closure:**
 
-| Milestone | Target | Delivered |
-|---|---|---|
-| **M1** | `wordfreq` | the whole expression language, no user types |
-| **M2** | the `Tree` example | `type`, `match` with guards, `impl`, `mut self`, `if let`, generators, `test` blocks with property testing |
-| **M3** | the `notes` service | named-field variants, dot shorthand, `distinct`, named arguments, `defer`, structured concurrency, channels, `select`, time, http/sql/json shims |
+```glide
+db.tx(|tx| {
+    tx.exec("update accounts set bal = bal - :n where id = :id", …)?
+    tx.exec("update accounts set bal = bal + :n where id = :id", …)?
+    Ok(())
+})?
+```
 
-Defining a milestone by "run this program" rather than "implement this
-feature list" is why the surfaces are minimal and coherent — the
-dogfood rule (Chapter 30) applied to the implementation itself.
+Commit on `Ok`, rollback on `Err` or panic.
 
-#### What is deliberately absent after M3
-
-`Mutex<T>`, `derive`, typed JSON decode, typed query rows, method
-values, `or |e|` blocks (declined), time formatting/parsing/calendars,
-and HTTP error middleware. (Static generics and trait conformance were
-on this list through M3 and M4b; M4c checks both.)
-
-#### The two tiers
-
-The tiered-backend design is what makes several decisions in this book
-possible:
-
-| | Dev tier | Release tier |
-|---|---|---|
-| Integer overflow | **traps** | wraps |
-| Backtraces | captured | skipped |
-| Unused code | warning | **error** |
-| Debug info | complete (guaranteed) | best-effort |
-| Optimisation | speed of compilation | speed of code |
-
-`DESIGN.md` calls this "tiered backends keep paying rent". Each row is
-a case where the right answer for the edit loop and the right answer
-for production genuinely differ.
-
-**The hard rule:** those may differ. **Semantics may not.** Loop
-back-edge cancellation checks were considered and rejected precisely
-because dev-tier programs would be more cancellable than release-tier —
-and "semantics that differ by tier are poison" (Chapter 26).
+**Drivers are packages** against a small driver trait. Postgres and
+MySQL speak wire protocols, so they are pure Glide and cross-
+compilation is untouched.
 
 ---
 
 ### 2. Under the Hood
 
-#### Why the interpreter is a tree-walker
+#### The shim does dynamically what derive will do statically
 
-Because its first job was to prove **semantics**, cheaply.
+`glide/DESIGN-DECISIONS.md` is explicit: `db.query` returns rows as
+column→value maps, and `:name` placeholders are verified at call time.
+**None of this survives into the compiled tier.** `derive Row`
+generates the typed version, and the comptime check moves the
+placeholder verification to compile time.
 
-A bytecode VM would be faster and would take longer to write and be
-harder to change. A tree-walker over the AST is the shortest path from
-"we designed this" to "does it actually work" — and several decisions
-in `DESIGN.md` are marked *"forced by the interpreter; ratified"*,
-meaning the design changed because writing the evaluator revealed a
-problem:
+The shim proves the *surfaces*, not the mechanism.
 
-- Statement termination rules, including the leading-dot continuation.
-- `//`-only comments.
-- Struct literals banned in control-flow headers.
-- Bare blocks as expressions.
+#### Why `modernc.org/sqlite`
 
-That is the interpreter doing its job.
+The interpreter's **first and only third-party dependency**, and the
+choice is recorded: chosen over `mattn/go-sqlite3` because it is
+**pure Go**. No CGO means cross-compilation stays a `GOOS` environment
+variable and no C toolchain ever enters the build.
 
-#### Why it was dynamically checked, and why that is ending
+The cost accepted: a large transitive module tree — a
+machine-translated SQLite. The alternative of a fake in-memory store
+would have dogfooded nothing real.
 
-Through M1–M3, type annotations were parsed, kept as strings, and
-ignored. `DESIGN-DECISIONS.md` gave the reason in one sentence:
-*writing a static checker in Go now would be thrown-away work*, because
-the checker was step 2 and would be written in Glide.
+This mirrors the language-level position: `DESIGN.md` notes that
+**SQLite is C, and will be FFI's first paying customer** in the native
+era, with different cross-compile ergonomics — exactly like cgo-sqlite
+in Go.
 
-**That decision was reversed, and the reversal is worth studying** —
-both halves of the argument failed, in instructive ways.
+#### A known bug, today
 
-The *thrown-away* half assumed the interpreter retires at self-hosting.
-It does not; it ships. Work that lands in a shipping tier is not thrown
-away, so the premise simply evaporated. The lesson is not that the
-reasoning was sloppy — it was sound *given* the roadmap it was written
-against. It is that a decision inherits every assumption of the plan
-around it, and when the plan moves, the decision has to be re-derived
-rather than re-quoted.
+While writing this chapter, a genuine interpreter bug surfaced and is
+worth documenting so you recognise it.
 
-The *sequencing* half is the more interesting failure: it inverted its
-own dependency. The bootstrap justified writing the frontend in Glide
-on the grounds that compilers are the best-case workload for this
-feature set — ASTs are sum types, a checker is exhaustive matching, `?`
-threads the phases. All true. **And none of it was available.**
-Exhaustiveness was dynamic. Generics never reached the AST. `Option`
-could not nest. Trait conformance was asserted rather than verified.
-The plan called for writing the largest, most type-dense Glide program
-that will ever exist, in the one tier that checked none of the
-properties that made it the right program to write.
+**A failing `db.exec` or `db.query` panics with an internal
+`cancelUnwind` instead of returning `Err`.**
 
-What actually transfers into Glide was never the Go code. It is the
-*design* — the type representation, the bidirectional rules,
-expected-type propagation, the diagnostic wording — plus the
-conformance corpus. Those are the expensive part, they are far cheaper
-to get right in a language that checks your work, and having them makes
-the Glide frontend a transcription rather than a rediscovery.
+```glide
+import sql
 
-Accepted cost, stated plainly: the Go frontend gets written once and
-ported once.
+fn main() {
+    match sql.open("sqlite::memory:") {
+        Ok(db) => {
+            match db.exec("delete from nosuchtable") {
+                Ok(n)  => println("ok {n}")
+                Err(e) => println("err: {e}")
+            }
+        }
+        Err(e) => println("open failed: {e}")
+    }
+}
+```
 
-Until M4 lands, what keeps programs honest is that rules a checker
-would enforce statically are enforced **dynamically** instead: `mut`,
-the nested-shadow ban, `let … else` divergence, the tail-value rule,
-and match exhaustiveness. Programs still cannot cheat; they just find
-out later.
+```
+panic: (interp.cancelUnwind) …
+```
 
-#### The three implementation decisions worth knowing
+The cause is in `internal/interp/sqlmod.go`: the host context's
+`release()` is deferred *inside* the closure that runs the query, so by
+the time the code checks `cancelled()` — `ctx.Err() != nil` — the
+context has already been cancelled by `release()`. Every failure
+therefore looks like a cancellation.
 
-**One interpreter lock (a GIL), released around blocking operations.**
-Chapter 25 covered it. The point worth repeating: **the lock is the
-semantics, not just a guard.** Tasks interleave exactly at blocking
-operations, which is the ratified cancellation-point rule.
+Successful queries are unaffected, which is why the working examples in
+this chapter and in Chapter 34 run fine. Errors detected *before* the
+query reaches the driver are also unaffected — a bad placeholder is
+caught by `bindNamed` and returns properly:
 
-**Generators run on a goroutine plus a channel.** The cheapest correct
-lazy implementation for a tree-walker, because a suspended goroutine
-*is* a suspended frame with locals intact (Chapter 24).
+```glide
+db.exec("insert into notes (title) values (:title)", ["ttile": "x"])
+```
 
-**Cancellation is a Go panic, not a signal.** Panics already unwind
-uncatchably through every construct, and the panic path already ran
-`defer` and `errdefer` — which is exactly the ratified cancellation
-behaviour (Chapter 26). The mechanism came for free.
+```
+err: query names :title but params do not supply it
+```
 
-#### Why the transpiler is the clever part
+Until the context bug is fixed, **do not rely on catching errors that
+come back from the database itself** at this tier.
 
-This is the shortcut that defers the decade.
+#### Cancellation
 
-**Glide's runtime model was Go's from day one** — green threads,
-tracing GC, `defer`, channels, value structs. So Glide lowers onto Go
-source nearly one-to-one, and **every hellish part is prepaid**:
+`db.exec`, `db.query`, and `db.query_one` obtain a host context wired
+to the task's cancellation channel and the nearest enclosing deadline.
+A query inside a dying `scope(timeout:)` is aborted at the driver
+level.
 
-| Needed | Provided by Go |
-|---|---|
-| Garbage collector | Go's, battle-tested |
-| Green-thread scheduler | goroutines, work-stealing |
-| Cross-compilation | `GOOS`/`GOARCH` |
-| Static binaries | `CGO_ENABLED=0` |
-| Debuggability | readable output, `//line` directives, delve |
+That is what makes `QueryContext` unnecessary — see below.
 
-Writing a garbage collector and a green-thread scheduler is the
-multi-year part of a language implementation. Transpiling to Go skips
-both, permanently if you want.
+#### Placeholder verification
 
-It also gives an **auditable bootstrap chain from a mainstream
-toolchain**: no binary seed, no trusting-trust anxiety. And it resolves
-the tiered-backend plan for years — interpreter as dev tier, transpiled
-Go as shipping tier.
+`bindNamed` parses the query string for `:name` occurrences and matches
+them against the parameter map's keys. Both directions are checked:
+a placeholder with no parameter, and a parameter with no placeholder.
 
-#### The known wrinkle
-
-`DESIGN.md` lists what must be lowered and flags the hard one:
-
-| Glide construct | Lowering |
-|---|---|
-| Sum types | tagged structs — mechanical |
-| `match` | switches — mechanical |
-| Dev-tier overflow traps | explicit checks in emitted code |
-| **Generators** | **goroutine pairs or CPS — the fiddly one** |
-
-Generators are flagged **"prototype before depending on the
-transpiler"**. Goroutine pairs are what the interpreter does — correct
-and heavy. A CPS or state-machine transformation is correct and fast
-and is real work. C# proves it is solvable (Chapter 24).
-
-#### Debugging, staged with the path
-
-Each era gets a different answer, and each is cheap for its era:
-
-**Interpreter era: a DAP server in the interpreter.** A tree-walker is
-a debugger that has not been asked — breakpoints are a per-statement
-check, stepping is eval-loop flags, inspection is the environment
-already held. Weeks, not months, and every editor gets it free through
-the Debug Adapter Protocol.
-
-**Transpiler era: `//line` directives and preserved identifier
-names** — a *day-one design constraint, not a retrofit*. Go's line
-directives exist for exactly this, so delve then debugs Glide at
-`.gld`-line granularity, and delve's goroutine awareness covers Glide
-tasks because **they are goroutines**. Twenty years of debugger
-investment ridden for two transpiler disciplines. The honest seam:
-stepping inside desugared constructs like generator state machines —
-keep the lowering line-faithful.
-
-**Native era: full DWARF**, with the standard cut — complete debug info
-is a dev-tier guarantee, release is best-effort.
-
-Two more designed capabilities worth knowing:
-
-**The scope tree beats the goroutine list.** A debugger shows
-`main → serve → request → query` — structure mandated for other reasons
-(Chapter 25), surfaced. Delve's 40,000 flat anonymous goroutines is the
-anti-pattern.
-
-**Deterministic-seed replay is the concurrency debugging story.** A
-race caught in `glide test` is a seed; stepping through the replay
-reproduces the exact interleaving. That is the bug class where
-debuggers normally fail, covered by two recorded decisions touching
-(Chapter 22).
-
-#### Embedding
-
-The interpreter gets a small public Go API — it exists anyway, since
-bootstrap steps 1 and 2 require it. Construct a VM, run source, bind Go
-functions, convert values, cancel runaway scripts.
-
-Three rules:
-
-**Influence is one-way.** The compiled language is the design
-authority. No semantics bent because they are awkward to marshal to Go.
-"The moment embedding argues *for* a language change, it loses."
-
-**The interpreter tracks the language; it does not freeze.** An earlier
-plan had it freezing at self-hosting so the evolving language would
-keep exactly one implementation. The goal was right, the mechanism was
-not: the shared frontend already guarantees one implementation, and
-freezing would have bought that guarantee at the price of the scripting
-tier drifting into an older language. Hosts still pin a version, as
-they pin any Go module — that is dependency management, not a freeze.
-
-**Stdlib shims are injectable per host**, which buys capability-style
-sandboxing for free: untrusted scripts are simply never handed `fs` or
-`net`. `DESIGN.md` calls this "the one embedding requirement worth
-honouring while building the interpreter, because it is painful to
-retrofit."
+This is a **pure string operation on a literal** — no database, no
+network, no IO. Which is precisely why it can move to comptime.
 
 ---
 
 ### 3. Why This Design?
 
-#### Why the frontend still gets written in Glide — just not first
+#### Why no ORM, ever
 
-The original argument had two halves. One did not survive; the other is
-the whole point and is untouched.
+`DESIGN.md` states it as a recorded position: **an ORM is a language
+dispute, not a battery.**
 
-**The half that failed — "writing it in Go is thrown away".** Covered
-above: it assumed a retiring interpreter, and the interpreter ships.
+The argument: an ORM is an attempt to replace SQL — a declarative
+language that is very good at its job — with method calls in your host
+language, and the replacement is always partial. You get 80% coverage,
+then hit a query the ORM cannot express, then drop to raw SQL anyway,
+now with two mental models and an object graph whose loading behaviour
+you cannot see.
 
-**The half that stands: compilers are the best-case workload for this
-feature set.** `DESIGN.md` is explicit —
+The specific costs: N+1 queries that look like field access, lazy
+loading that fires a query from a getter, a migration DSL that diverges
+from what the database can express, and an entity lifecycle nobody
+fully understands.
 
-> ASTs are sum types, a checker is exhaustive matching, `?` threads the
-> phases; the ML family was designed for this. The compiler in Glide
-> will be nicer code than the interpreter that runs it.
+The alternative Glide takes: make raw SQL ergonomic. `derive Row` for
+mapping, named parameters for binding, comptime for checking. The SQL
+stays SQL.
 
-That is a testable claim and it is the strongest possible dogfooding.
-If sum types, exhaustive `match`, and `?` do not make writing a
-compiler pleasant, the language's central bet is wrong. If they do, the
-implementation is also the demonstration.
+#### Why no query-builder DSL either
 
-**Which is exactly why it moved to step 3.** The claim is only testable
-if the features are real when the test runs. Written before the
-checker, the experiment would have measured Glide's *syntax* while
-none of the safety was switched on — a rigged trial, and one whose
-failures would have been indistinguishable from the tier's failures.
-Written after, it measures the thing the claim is actually about.
+A query builder — `db.select("id").from("notes").where("org", org)` —
+is *a worse SQL that compiles to SQL*. It has fewer features, needs
+learning, produces worse error messages, and serves the library's need
+for type safety rather than yours.
 
-The ordering is the same lesson twice: a dogfooding exercise is only
-evidence if the food is real.
+The exception people cite is dynamic query construction (optional
+filters), and that is real — but it is a string-building problem with a
+comptime-checkable answer, not a reason for a whole parallel language.
 
-#### Why transpile to Go rather than going straight to LLVM
+#### Why named parameters only
 
-Because LLVM gets you code generation and **not** a runtime.
+Go's `database/sql` uses positional placeholders whose *syntax depends
+on the driver*: `?` for MySQL and SQLite, `$1` for Postgres, `:name`
+for Oracle. `DESIGN.md` calls that **interface negligence** — the whole
+point of a driver interface is that the caller should not care.
 
-A language with green threads and a tracing GC needs: a garbage
-collector, a scheduler with work stealing and preemption, growable
-stacks, channel primitives, and a `defer` mechanism. `DESIGN.md` notes
-that runtime code "runs underneath the language's guarantees" — Go's
-runtime is Go with a hundred pragmas, and a no-GC unsafe dialect plus
-compiler special-casing is what writing one requires.
+Positional parameters also produce a specific runtime failure that
+named ones cannot:
 
-That is the decade. Transpiling to Go rents all of it, permanently if
-desired, and produces readable and debuggable output as a bonus.
+```
+sql: expected 2 arguments, got 3
+```
 
-The costs are real: less control over layout and calling conventions, a
-Go toolchain in the build, and performance bounded by what Go's
-compiler will do with the emitted source. All acceptable for a shipping
-tier that aims at "faster than Go".
+which Go finds in production. With `:name`, the check is a pure parse
+of a literal string, so it moves to compile time.
 
-#### Why two backends at all
+And the transposition bug disappears: with `?, ?, ?` you can swap two
+arguments of the same type silently. With `:title, :body, :created`
+you cannot.
 
-The tiered design dissolves the classic "fast compiler or fast code"
-dilemma. `DESIGN.md` calls sub-second dev builds non-negotiable and
-"arguably Go's most underrated property".
+#### Why comptime placeholder checking is the unoccupied sweet spot
 
-You cannot have both from one backend. Two backends is two things to
-maintain, and it is what lets overflow, backtraces, hygiene, and debug
-info each have the right answer per tier.
+This is the sharpest argument in the chapter.
 
-And the constraint that makes it safe: **only costs may differ, never
-semantics.**
+**Schema checking needs a database.** Rust's `sqlx` validates queries
+against a running, migrated database at compile time. That is genuinely
+powerful and it makes your build depend on a database being up — the
+hermeticity Glide defends in three separate sections.
 
-#### Why "breaking changes are free" is an implementation strategy
+**Placeholder checking needs only the literal query string.** It is a
+pure comptime parse: no IO, no network, deterministic. So it is
+compatible with hermetic builds, and it catches the most common class
+of parameter bug.
 
-It is not just a licence to change your mind. It is what makes the
-whole staged path viable.
+That gap — checking what can be checked without IO — is the unoccupied
+sweet spot, and it is available only to a language with comptime.
 
-Because canonical formatting is a pure function from AST to bytes
-(Chapter 2), a mechanical rewrite produces a **zero-noise diff**. So
-`glide fix` can migrate every caller of a changed API, and a breaking
-change costs one command rather than a migration project.
+For schema awareness, `DESIGN.md` points at the `sqlc` approach:
+schema in the repository, explicit code generation, committed output.
+The schema becomes a **versioned artifact** rather than a compile-time
+network dependency.
 
-`DESIGN.md`: "canonical formatting is migration infrastructure."
+#### Why NULL dies like absent-JSON died
 
-The complement is **toolchain pinning from day one** — the manifest
-pins the version, and newer toolchains build *as* the pinned one or
-refuse. Breaking changes being free makes pinning more necessary, not
-less.
+`sql.NullString` is `struct { String string; Valid bool }` — a value
+plus a flag saying whether the value means anything. That is `Option`,
+hand-rolled, once per type, with no ergonomics.
 
-#### Why the interpreter survives
+It exists because Go has no `Option` and no way to say "this column may
+be absent". Glide has both:
 
-Not out of sentiment, and not as a frozen relic: a statically-checked
-scripting language that ships as one static binary is a product, and a
-thinly served one. The nearest neighbour is Deno with TypeScript, and
-it is not close on the "one binary, nothing to install" axis.
+| Column | Field type |
+|---|---|
+| `text not null` | `String` |
+| `text` (nullable) | `String?` |
 
-It survives *as the same language*, not an older snapshot of it,
-because the frontend is shared. That is the whole argument for the
-architecture: without it, the honest options were to freeze the
-interpreter or to accept two implementations drifting apart, and both
-are worse than sharing the one thing that decides what a program means.
+NULL into a non-Option field is a **decode error**. One doctrine
+(Chapter 14), third application — after JSON's missing fields
+(Chapter 33) and struct initialisation (Chapter 12).
 
-An earlier draft of this chapter argued the opposite — freeze at
-self-hosting, cite Lua 5.1. The Lua evidence is real but was read
-backwards: it shows *hosts pinning* a version and living happily there
-for a decade. Lua itself never stopped shipping.
+#### Why transactions are a closure
+
+Go's idiom:
+
+```go
+tx, err := db.Begin()
+if err != nil { return err }
+defer tx.Rollback()          // a no-op after a successful commit
+… work …
+return tx.Commit()
+```
+
+`defer tx.Rollback()` works because rollback-after-commit is a silent
+no-op. That is relying on a *coincidence* — and the moment you need
+conditional commit logic, you get the `committed := false` flag from
+Chapter 22.
+
+`db.tx(|tx| { … })` makes it structural: commit on `Ok`, rollback on
+`Err` or panic. There is no path where you forget, and `errdefer`
+(Chapter 22) is the primitive that makes it implementable.
+
+#### Why no `QueryContext` zoo
+
+Go retrofitted cancellation by **duplicating its entire database API**:
+`Query`/`QueryContext`, `Exec`/`ExecContext`, `Begin`/`BeginTx`,
+`Prepare`/`PrepareContext`. Every method has a twin, and the
+non-context one is a trap.
+
+Scopes make cancellation ambient (Chapter 27), so queries are
+cancellation points and there is **one method name each**.
+
+That is the ctx-replacement paying for itself a third time — after HTTP
+(Chapter 34) and background tasks (Chapter 26).
 
 ---
 
 ### 4. Competing Approaches
 
-**Go.** Bootstrapped from C, then self-hosted in Go 1.5 via an
-automated C-to-Go translation of the compiler. The translation
-approach — mechanical, auditable — is the same instinct as Glide's
-transpiler step.
+**Go.** `database/sql` with driver-specific positional placeholders,
+`sql.NullString` and friends, `rows.Scan(&u.ID, &u.Name)` which
+**silently misassigns on column reorder**, and the `Context` API
+duplication. `sqlx` adds struct scanning via runtime reflection —
+banned here anyway. Glide keeps the thin-interface-plus-drivers shape
+and fixes all four.
 
-**Rust.** Bootstrapped from OCaml, self-hosted early, LLVM backend
-throughout. Rust's compile times are the standing argument for
-"compile speed is a feature", and its recent Cranelift dev backend is
-the tiered design arriving a decade late.
+**Rust.** `sqlx` (live-schema checking at compile time — powerful,
+non-hermetic), `diesel` (a query-builder DSL with a type-level schema),
+and `rusqlite`. `sqlx`'s offline mode exists precisely because the
+database dependency was a problem, which is the evidence for Glide's
+position.
 
-**Zig.** Bootstrapped from C++, self-hosted with its own backends plus
-LLVM, and now shipping a fast custom debug backend alongside LLVM
-release builds — the same tiered structure Glide plans.
+**Python.** DB-API 2.0 with `%s` or `?` placeholders depending on
+driver — the same negligence — plus SQLAlchemy as both a core (query
+builder) and an ORM. SQLAlchemy Core is the strongest argument for
+query builders and is still a second language.
 
-**Nim.** Transpiles to C, which is the closest analogue to Glide's
-Go-transpiler step and demonstrates that it works long-term. Nim gets C
-portability; Glide gets Go's runtime, which is the bigger prize for a
-green-threaded GC language.
+**Java.** JDBC with `?` placeholders, plus Hibernate/JPA — the ORM
+whose lazy-loading and session-lifecycle problems are the canonical
+case against ORMs. Also jOOQ, a query builder generated from the
+schema, which is the closest thing to a query builder that works.
 
-**TypeScript.** Transpiles to JavaScript, permanently and by design,
-and is one of the most successful languages of the last decade. Strong
-evidence that "transpile to a mature host" is not a temporary
-embarrassment.
+**Elixir.** Ecto — explicitly *not* an ORM: changesets and queries,
+with no identity map and no lazy loading. Closest in spirit to Glide's
+position.
 
-**Kotlin.** Targets the JVM, renting the world's most tuned garbage
-collector — the same economics as Glide renting Go's runtime.
-
-**Elixir.** Targets the BEAM, renting Erlang's scheduler and
-supervision. The closest analogue to renting a *concurrency* runtime
-specifically.
+**C#.** Entity Framework (ORM) and Dapper (thin mapping over raw SQL).
+Dapper's popularity in the .NET world — where a first-party ORM
+ships — is evidence for the raw-SQL-plus-mapping approach.
 
 ---
 
 ### 5. Common Mistakes
 
-*(Reading the implementation, rather than using it.)*
+**Interpolating a value into a query.**
 
-**Benchmarking the tree-walker and concluding something about the
-language.** It is two orders of magnitude slower than compiled Go and
-it is not the shipping tier. Generators cost a goroutine each; there is
-no compute parallelism; every field access is a map lookup.
+```glide
+// Bad — SQL injection
+let q = "select * from notes where title = '{title}'"
+db.query(q)
 
-**Assuming every annotation is checked.** As of M4b most are, but the
-checker reports only what it is certain of: generic bounds, trait
-conformance and match exhaustiveness pass in silence until M4c. A
-program that checks clean is not yet a program that is fully verified.
+// Good
+db.query("select * from notes where title = :title", ["title": title])
+```
 
-**Assuming the M2 warts are semantics.** `Option` unboxing (so
-`Option<Option<T>>` is unrepresentable, Chapter 14), builtin methods
-not enforcing receiver-mut (Chapter 16), defaults filling through
-function values (Chapter 7), decoded JSON keys being sorted
-(Chapter 31) — all tier artifacts, all recorded as such.
+Interpolation is for building *messages*, never queries. Note that the
+type system does not stop you here — this is the one place in the book
+where the discipline is entirely yours.
 
-**Assuming ○ features are speculative.** They are recorded designs with
-stated rationale, not wishlist items. The distinction the book keeps
-making — ✓ runs, ○ is designed — is about *implementation status*, not
-confidence.
+**Forgetting a parameter, or misspelling one.** Both are errors naming
+the parameter, which is the feature. But note the current bug above:
+error *paths* through `db.exec` may panic rather than returning `Err`
+at this tier.
 
-**Expecting the interpreter to become the compiler.** It will not. It
-stays the interpreted tier — same language, same frontend, same
-accepted programs, different execution strategy. What it will *not*
-give you is a binary that runs on a machine with nothing installed, or
-compiled-tier speed.
+**Expecting typed rows.** `db.query` returns maps today. Read with
+`??`, and convert to a struct at the boundary (Chapter 33's pattern
+applies exactly).
+
+**Expecting `query_one` to return the first of several rows.** More
+than one row is an `Err`, deliberately — if the query can match
+multiple rows, `query_one` is the wrong call.
+
+**Reaching for `sql.NullString`.** There is none. Nullable column,
+`Option` field.
+
+**Using a regular string for multi-line SQL with braces.** Rare in SQL,
+but JSON functions and some dialects use them. Backticks are safer, and
+they are the idiom for multi-line queries anyway.
+
+**Forgetting `defer { _ = db.close() }`.** And note the `_ =`: the
+discard must be visible (Chapter 22).
+
+**Assuming a transaction API exists.** `db.tx(|tx| …)` is ○. Today,
+`begin`/`commit` are not exposed.
+
+**Relying on catching a SQL error.** The `cancelUnwind` bug means a
+failing query panics at this tier. Successful paths are fine.
 
 ---
 
 ### 6. Performance Considerations
 
-**The interpreter is a semantics prover.** Roughly two orders of
-magnitude slower than compiled Go on compute. Its costs are structural:
-an environment map allocation per call and per block, hash lookups for
-field access, a goroutine per generator, and one interpreter lock.
+**Named-parameter binding parses the query string per call** in the
+shim. With comptime (○) the parse happens once, at build time, and the
+runtime cost is zero.
 
-**The transpiler tier inherits Go's performance**, minus whatever the
-lowering costs. Sum types become tagged structs; `match` becomes
-switches; both are what you would write by hand. Generators are the
-open question — goroutine pairs would be slow, a state machine would
-not.
+**`db.query` materialises all rows into a `List<Map>`.** For a large
+result set that is the whole thing in memory, plus a map per row with a
+string key per column. Streaming and typed rows (○) fix both — a
+`derive Row` decoder writes directly into a struct with no intermediate
+map.
 
-**The dev backend targets sub-second builds** and does not optimise.
-The release backend optimises and does not need to be fast.
+**Each row map allocates one entry per column** plus the keys slice for
+insertion order (Chapter 11). Typed rows eliminate this entirely.
 
-**Target envelope**, stated in `DESIGN.md`: faster than Go, usually
-competitive with Rust, never beating hand-tuned C. The last ~20% of
-performance is a recorded sacrifice — the price of no borrow checker.
+**Queries are cancellation points**, which costs a context per call in
+the interpreter.
 
-**Comptime caching is sound** because comptime is deterministic
-(Chapter 34), which is a real dev-build lever.
+**`modernc.org/sqlite` is a machine translation of SQLite to Go.** It
+is slower than the C original — roughly a factor of two on many
+workloads — and it buys CGO-free cross-compilation. That trade was made
+deliberately for the interpreter; the native era revisits it.
+
+**Connection pooling** is the driver's business. The designed interface
+follows `database/sql`'s shape here.
 
 ---
 
 ### 7. Best Practices
 
-**Write for the compiled tier, test on the interpreter.** Do not
-restructure code to avoid blocks, closures, or generators based on
-tree-walker timings. Do use the interpreter to check that semantics are
-what you expected — that is what it is for.
+**Open in `main`, close with `defer`, pass the handle down.**
 
-**Write annotations now.** A codebase full of unbounded `<T>` and
-untyped parameters will be miserable to bring under the checker.
+```glide
+fn main() -> Result<(), Error> {
+    let db = sql.open(dsn)?
+    defer { _ = db.close() }
 
-**Treat the M2 warts as temporary and avoid depending on them.** Do not
-send `None` through a channel; do not rely on `xs.push` working through
-a `let`; do not rely on defaults through function values.
+    let mut r = http.router()
+    r.get(`/notes/{id}`, |req| get_note(db, req))
+    …
+}
+```
 
-**Pin the toolchain.** Breaking changes are free, which means your
-build must say which version it expects.
+Chapter 30's pattern. No global, no `init()`, and a test can pass an
+in-memory database.
 
-**Report the ugly corners.** The interpreter exists to find them, and
-several decisions in `DESIGN.md` are marked "forced by the interpreter"
-because someone hit a problem while implementing. That process is still
-open — the `or |e|` residue test (Chapter 19) is an explicit
-invitation.
+**Use raw strings for anything longer than one line.**
 
-**Read `DESIGN.md` second and `LINEAGE.md` third.** This book teaches;
-`DESIGN.md` records every decision and its cost; `LINEAGE.md` gives the
-history — who invented a feature, who adopted it, who tried living
-without it.
+```glide
+let rows = db.query(`
+    select n.id, n.title, count(c.id) as comments
+    from notes n
+    left join comments c on c.note_id = n.id
+    where n.org = :org
+    group by n.id
+    order by n.created desc
+    limit :limit
+`, ["org": org, "limit": 50])?
+```
+
+The SQL reads as SQL. That is the payoff of not having a query builder.
+
+**Name parameters after the column, not the variable.** `:org`, not
+`:o` — the placeholder appears in the query text, so it should read as
+part of the query.
+
+**Convert rows to types at the boundary.**
+
+```glide
+// Good — the map lives for three lines
+fn load_note(db: Db, id: Int) -> Result<Note?, Error> {
+    let found = db.query_one(
+        "select id, title, body from notes where id = :id",
+        ["id": id],
+    )?
+    match found {
+        None      => Ok(None)
+        Some(row) => Ok(Some(Note{
+            id:    row["id"] ?? 0,
+            title: row["title"] ?? "",
+            body:  row["body"],          // stays Option — the column is nullable
+        }))
+    }
+}
+```
+
+Downstream code gets a `Note`. When `derive Row` lands, the middle of
+this function becomes one line and the *shape* is unchanged.
+
+**Let the column's nullability decide the field type.** `text not null`
+→ `String`; `text` → `String?`. Keep the schema and the type in
+agreement, and NULL handling disappears.
+
+**Never build a query with interpolation.** Not even for a column name
+you "control". If you need dynamic columns, build the query from a
+closed set:
+
+```glide
+let column = match sort_by {
+    Created => "created"
+    Title   => "title"
+    _       => "id"
+}
+let q = "select * from notes order by " + column      // from a sum type
+```
+
+The sum type is what makes this safe — the set of possible strings is
+closed and visible.
+
+**Prefer `query_one` when you expect one row.** It makes
+"more than one" an error rather than a silently-ignored surprise.
 
 ---
 
 ### 8. Examples
 
-**The bootstrap chain, drawn out:**
+**The whole surface, in one runnable program:**
 
-```
-Go toolchain (mainstream, auditable, no binary seed)
-   │
-   ├─ builds ─→  Glide interpreter + checker (Go)    ← steps 1 ✓, 2 (M4)
-   │                 │
-   │                 └─ runs ─→ Glide frontend (Glide)          ← step 3 ○
-   │                                │
-   │                                └─ emits ─→ Go source
-   │                                               │
-   └───────────── builds ──────────────────────────┘
-                                                   │
-                                                   ▼
-                                        Glide compiler binary   ← step 4 ○
-                                                   │
-                                        compiles itself; its frontend
-                                        is the same one the interpreter
-                                        runs, so the tiers cannot drift
-```
+```glide-run
+import sql
 
-No binary seed anywhere, and every link is a mainstream toolchain
-building readable source. That is the trusting-trust answer.
+fn main() -> Result<(), Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
 
-**The seed never goes away, and that is normal.** Once the frontend is
-Glide, building Glide needs a Glide — Go pins Go 1.4, Rust builds with
-the previous release, Zig ships a `zig1.wasm` blob. Glide's version is
-unusually cheap, because step 4 emits *Go source*: commit that
-generated Go and any Go toolchain rebuilds the whole chain. So "no Go"
-means none in the source of truth and none at runtime. It does not mean
-none on the build machine, which is the relationship most languages
-have with a C compiler. Removing that last link is step 5, and step 5
-is a runtime project, not a compiler one.
+    _ = db.exec(`create table notes (
+        id integer primary key,
+        title text not null,
+        body text
+    )`)?
 
-**Why a compiler is the ideal dogfood, in miniature:**
+    _ = db.exec("insert into notes (title, body) values (:t, :b)",
+                ["t": "first", "b": "hello"])?
+    _ = db.exec("insert into notes (title, body) values (:t, :b)",
+                ["t": "second", "b": None])?
 
-```glide
-// An AST is a sum type.
-type Expr =
-    Num(Int)
-    | Add(Expr, Expr)
-    | Mul(Expr, Expr)
-    | Var(String)
-
-type TypeError = Unbound{ name: String }
-
-// A checker is exhaustive matching.
-fn check(e: Expr, env: Map<String, Bool>) -> Result<(), TypeError> {
-    match e {
-        Num(_)    => Ok(())
-        Add(a, b) => {
-            check(a, env)?          // `?` threads the phases
-            check(b, env)?
-            Ok(())
-        }
-        Mul(a, b) => {
-            check(a, env)?
-            check(b, env)?
-            Ok(())
-        }
-        Var(name) => {
-            if env[name] ?? false { Ok(()) } else { Err(.Unbound{ name: name }) }
-        }
+    let rows = db.query("select id, title, body from notes order by id")?
+    for row in rows {
+        let id = row["id"] ?? 0
+        let title = row["title"] ?? ""
+        let body = row["body"] ?? "(null)"
+        println("{id}  {title:8}  {body}")
     }
+
+    let one = db.query_one("select title from notes where id = :id",
+                           ["id": 1])?
+    println("{one:?}")
+
+    let missing = db.query_one("select title from notes where id = :id",
+                               ["id": 99])?
+    println("{missing:?}")
+
+    Ok(())
+}
+```
+
+```
+1     first  hello
+2    second  (null)
+["title": "first"]
+None
+```
+
+Three things worth noting. The second insert binds `None` and the read
+returns `None` — NULL is `Option` in both directions, with no wrapper
+type anywhere. `query_one` on a missing id returns `None` rather than
+an error, because "no row" is an ordinary outcome (Chapter 14's rule).
+And `defer { _ = db.close() }` sits on the line after the open.
+
+**Rows into types:**
+
+```glide-run
+import sql
+
+type Note = struct {
+    pub id: Int
+    pub title: String
+    pub body: String?
 }
 
-fn main() {
-    let env = ["x": true]
-    let good = Expr.Add(.Num(1), .Var("x"))
-    let bad  = Expr.Mul(.Var("y"), .Num(2))
-    println("{check(good, env):?}")
-    println("{check(bad, env):?}")
+fn load_all(db: Db) -> Result<List<Note>, Error> {
+    let rows = db.query("select id, title, body from notes order by id")?
+    let mut out = []
+    for row in rows {
+        out.push(Note{
+            id:    row["id"] ?? 0,
+            title: row["title"] ?? "",
+            body:  row["body"],
+        })
+    }
+    Ok(out)
+}
+
+fn main() -> Result<(), Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    _ = db.exec(`create table notes (
+        id integer primary key, title text not null, body text)`)?
+    _ = db.exec("insert into notes (title, body) values (:t, :b)",
+                ["t": "first", "b": "hello"])?
+    _ = db.exec("insert into notes (title, body) values (:t, :b)",
+                ["t": "second", "b": None])?
+
+    for n in load_all(db)? {
+        println("{n:?}")
+    }
+    Ok(())
 }
 ```
 
 ```
-Ok(())
-Err(Unbound{ name: "y" })
+Note{ id: 1, title: "first", body: "hello" }
+Note{ id: 2, title: "second", body: None }
 ```
 
-Twenty lines, and it demonstrates the claim: the AST is a sum type, the
-checker is a `match` the compiler verifies is exhaustive, and `?`
-threads the error path without a single `if err != nil`. Add a variant
-to `Expr` and this function stops compiling, with the compiler naming
-the gap.
+`body` is `String?` and carries `None` straight through — no
+`?? ""` flattening the distinction between "no body" and "empty body".
+When `derive Row` lands, `load_all`'s loop becomes
+`db.query<Note>(…)`.
 
-That is the workload the ML family was designed for, and it is why
-`DESIGN.md` predicts the Glide-written frontend will be nicer code than
-the Go interpreter running it.
+**Side by side with Go, on the four fixed problems:**
 
-**The tier table, as a program would see it:**
+```go
+// Go
+rows, err := db.QueryContext(ctx,                     // 4: API duplication
+    "select id, title, body from notes where org = $1", org)  // 3: $1 vs ?
+if err != nil { return nil, err }
+defer rows.Close()
+
+var notes []Note
+for rows.Next() {
+    var n Note
+    var body sql.NullString                            // 2: NULL wrapper
+    if err := rows.Scan(&n.ID, &n.Title, &body); err != nil {  // 1: positional
+        return nil, err
+    }
+    if body.Valid { n.Body = &body.String }
+    notes = append(notes, n)
+}
+return notes, rows.Err()
+```
+
+The four problems, numbered:
+
+1. **`rows.Scan` is positional.** Reorder the columns in the SELECT and
+   it silently misassigns — `title` into `body`, both strings, no
+   error.
+2. **`sql.NullString`** plus the `.Valid` dance plus a pointer field to
+   carry the optionality onward.
+3. **`$1` versus `?`** depending on driver.
+4. **`QueryContext`** — the duplicated API.
 
 ```glide
-fn main() {
-    let big = 9223372036854775807
-    println(big + 1)
+// Glide, today
+let rows = db.query("select id, title, body from notes where org = :org",
+                    ["org": org])?
+let mut notes = []
+for row in rows {
+    notes.push(Note{
+        id:    row["id"] ?? 0,
+        title: row["title"] ?? "",
+        body:  row["body"],
+    })
+}
+Ok(notes)
+```
+
+```glide
+// Glide, with derive Row (○)
+db.query<Note>("select id, title, body from notes where org = :org",
+               ["org": org])
+```
+
+Column mapping is by **name**, so reordering the SELECT is harmless.
+NULL is `Option`. Placeholders are `:name` on every driver. And there
+is one `query`, because cancellation comes from the scope.
+
+**Bad versus good: the injected query**
+
+```glide
+// Bad — and the type system will not save you here
+fn search(db: Db, term: String) -> Result<List<Map>, Error> {
+    db.query("select * from notes where title like '%{term}%'")
 }
 ```
 
-```
-# dev tier (the interpreter, today)
-error: line 3: Int overflow: 9223372036854775807 + 1 (use wrapping_add for modular arithmetic)
+`term` of `' or 1=1 --` returns every row. This is the one place in the
+book where nothing structural prevents the mistake — interpolation is
+always available, and it is the wrong tool.
+
+```glide
+// Good
+fn search(db: Db, term: String) -> Result<List<Map>, Error> {
+    db.query("select * from notes where title like :pattern",
+             ["pattern": "%{term}%"])
+}
 ```
 
-```
-# release tier (○)
--9223372036854775808
-```
-
-Same program, different tier, different behaviour — deliberately, and
-only for *cost* behaviours. A program's *meaning* is identical across
-tiers, which is why loop back-edge cancellation checks were rejected.
+The interpolation is now building a *parameter value*, not a query. The
+driver escapes it.
 
 ---
 
@@ -647,83 +842,62 @@ tiers, which is why loop back-edge cancellation checks were rejected.
 
 **Summary**
 
-- **Two mountains wearing one name.** The compiler is a hill with a
-  shortcut; the runtime is the actual decade, deferred indefinitely by
-  the shortcut.
-- **Five steps:** (1) Go tree-walking interpreter ✓, (2) the checker, in
-  Go (M4, current), (3) the frontend rewritten in Glide and run on the
-  interpreter, (4) a Glide→Go transpiler that compiles itself, (5)
-  someday, LLVM plus a native runtime.
-- **One frontend, two backends.** Lexer, parser and checker are a single
-  shared implementation; the tiers differ in how they execute a checked
-  program, never in what they accept. "Runs interpreted, fails compiled"
-  becomes unreachable by construction. Precedent: OCaml since the early
-  90s, Rust's Miri, Roslyn.
-- Milestones M1–M3 were defined by **a program that must run** —
-  `wordfreq`, `Tree`, the `notes` service — the dogfood rule applied to
-  the implementation. M4 is the first defined by a *property* instead:
-  annotations must mean something.
-- The interpreter is a **tree-walker** because its first job was to
-  prove semantics cheaply. Several `DESIGN.md` decisions are marked
-  *"forced by the interpreter; ratified"*.
-- It **was** dynamically checked on the argument that a Go checker would
-  be thrown-away work. Reversed: the interpreter ships rather than
-  retiring, so the work is not thrown away — and the original plan would
-  have written a checker in the one tier that checks nothing. What
-  transfers to Glide is the design and the conformance corpus, not the
-  Go code.
-- **The transpiler is the clever part.** Glide's runtime model was
-  Go's from day one, so it lowers nearly 1:1 and prepays the hellish
-  parts: GC, scheduler, cross-compilation, static binaries,
-  debuggability. It also gives an auditable bootstrap chain with no
-  binary seed.
-- **The known wrinkle: generators.** Sum types → tagged structs and
-  `match` → switches are mechanical; generators need goroutine pairs
-  (heavy) or CPS (real work), and are flagged "prototype before
-  depending on the transpiler".
-- **Compilers are the best-case dogfood**: ASTs are sum types, a
-  checker is exhaustive matching, `?` threads the phases. The prediction
-  is that the Glide frontend will be nicer code than the Go interpreter
-  running it — a testable claim about the language's central bet, and
-  the reason the rewrite stays on the roadmap. It moved *after* the
-  checker because the claim is only testable once the features it names
-  are actually switched on.
-- **Two tiers** let overflow, backtraces, hygiene, and debug info each
-  have the right answer. **Costs may differ; semantics may not** —
-  which is why loop back-edge cancellation checks were rejected.
-- **Debugging is staged**: a DAP server in the interpreter (a
-  tree-walker is a debugger that has not been asked), `//line`
-  directives plus preserved names in the transpiler era so delve works
-  at `.gld` granularity, full DWARF natively. Plus the scope tree
-  instead of a flat goroutine list, and deterministic-seed replay for
-  races.
-- **The interpreter survives as a shipping tier**, tracking the language
-  rather than freezing — a statically-checked scripting language in one
-  static binary, and the embedding library, with injectable stdlib shims
-  giving capability-style sandboxing. The earlier freeze plan was
-  dropped once the shared frontend delivered its goal outright.
-- **Breaking changes are free** *because* canonical formatting makes
-  `glide fix` produce zero-noise diffs. Toolchain pinning is the
-  complement.
+- Three refusals: **no ORM ever** (a language dispute, not a battery),
+  **no query-builder DSL** (a worse SQL that compiles to SQL), and
+  **no live-schema checking** (it makes builds depend on a running
+  database).
+- What is left is raw SQL made ergonomic, and the pieces come from
+  earlier chapters: `Option` kills NULL wrappers, comptime kills the
+  placeholder bug, closures make transactions structural, scopes make
+  the `Context` API duplication unnecessary.
+- **Named parameters only** — `:name`, one canonical syntax, drivers
+  translate. Missing *and* unused names are both errors naming the
+  parameter. The `?`-versus-`$1` roulette is interface negligence.
+- **Comptime placeholder verification is the unoccupied sweet spot**:
+  schema checking needs a database, but *placeholder* checking needs
+  only the literal string — a pure parse, no IO, hermetic.
+- **NULL is `Option`, in both directions.** `sql.NullString` never
+  exists; a nullable column is a `T?` field, and NULL into a non-Option
+  field is a decode error.
+- **Column mapping is by name** (○ `derive Row`), so reordering a
+  SELECT is harmless. Go's positional `rows.Scan` silently misassigns.
+- **`distinct` values bind by unwrapping**; `Instant` stores as RFC
+  3339.
+- **Transactions are a closure** (○): `db.tx(|tx| { … })`, commit on
+  `Ok`, rollback on `Err` or panic — with `errdefer` as the primitive
+  underneath.
+- **No `QueryContext` zoo.** Queries are cancellation points, so there
+  is one method name each.
+- Today: SQLite only, via **pure-Go `modernc.org/sqlite`** — the
+  interpreter's only third-party dependency, chosen so that
+  cross-compilation stays a `GOOS` variable. Rows are maps; typed rows
+  are ○.
+- **Known bug at this tier:** a failing `db.exec`/`db.query` panics
+  with an internal `cancelUnwind` instead of returning `Err`, because
+  the host context is released before the cancellation check.
+  Successful queries are unaffected.
+- **Never interpolate into a query.** This is the one place where the
+  discipline is entirely yours.
 
 **Exercises**
 
-1. **Test the central claim.** Write a small interpreter or type
-   checker in Glide — an expression language with variables and let
-   bindings is enough. Then write the same thing in Go. Count the lines
-   spent on error handling and on dispatching over node kinds. The
-   claim is that the Glide version is nicer; check it.
+1. **Break `rows.Scan`.** In a Go codebase, find a `rows.Scan` with
+   three or more columns of the same type. Reorder two columns in the
+   SELECT and confirm it compiles, runs, and produces wrong data. Then
+   note that name-based mapping makes the same edit a no-op — that
+   difference is why positional scanning is on the fixed list.
 
-2. **Find a "forced by the interpreter" decision.** Read `DESIGN.md`
-   for the phrase. Pick one and work out what the implementer must have
-   hit. Then decide whether the resulting rule is a good language
-   design or merely an implementation convenience that got ratified —
-   the leading-dot continuation rule is the most interesting case.
+2. **Find the placeholder bug.** Write a query with four `:name`
+   placeholders and pass three parameters. Confirm the error names the
+   missing one. Then imagine the same mistake with `?` placeholders,
+   where the error is `expected 4 arguments, got 3` with no indication
+   of *which*. Estimate how often you have seen the second version in
+   production.
 
-3. **Design the generator lowering.** Take the three-line tree-walk
-   generator from Chapter 24 and write out what a Go state machine
-   implementing it would look like: what fields the state struct holds,
-   how many states there are, and how `yield from` recursion is
-   flattened. Then estimate whether goroutine pairs would be acceptable
-   as a first transpiler cut. This is a real open question on the
-   project's de-risk list, and your answer is worth as much as anyone's.
+3. **Design the schema-checking boundary.** `DESIGN.md` rejects
+   `sqlx`-style live validation and points at `sqlc`-style committed
+   codegen. Sketch the workflow: where does the schema live, what
+   command runs, what gets committed, and what happens when the
+   database and the committed schema diverge? Then decide which failure
+   you would rather have — a build that needs a database, or a
+   committed artifact that can go stale.

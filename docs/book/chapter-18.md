@@ -14,11 +14,18 @@ option.
 Glide's generics are **monomorphised**, **inferred at call sites**, and
 constrained by **inline trait bounds**. There is no turbofish.
 
-This is the chapter with the largest gap between design and
-implementation. Generic *syntax* parses and generic code runs, but
-nothing is checked and nothing is specialised — everything is dynamic
-today. Read the ✓ examples as "this runs"; read the type-safety claims
-as ○.
+Bounds are **checked**, in both directions, as of M4c: inside the body a
+`T: Ord` can do exactly what `Ord` declares, and at the call an
+argument must be a type that declared `impl Ord`. What remains ○ is
+*specialisation* — the interpreter runs generics type-erased, which it
+can afford to do precisely because the checker already enforced every
+rule. Chapter 19 covers the checker; Chapter 37 covers
+monomorphisation.
+
+One gap to know about, and it is silent: a bound is **not** enforced
+when the type parameter appears only inside a container, so
+`fn top<T: Ord>(xs: List<T>)` accepts a `List<Blob>` where `Blob` has
+no `Ord`. Passing a bare `T` is checked; passing a `List<T>` is not.
 
 ---
 
@@ -44,8 +51,8 @@ be ordered".
 The bound is not decoration. Inside the body you may use only what
 `Ord` provides — that is what makes `x > best` legal. Without the
 bound, `T` could be anything, including types with no ordering, and the
-comparison would be rejected at the *declaration* (○) rather than at
-some distant call site.
+comparison is rejected at the *declaration* rather than at some distant
+call site.
 
 Calling requires no type arguments:
 
@@ -267,15 +274,40 @@ And the ambiguity barely arises in practice: declarations are never
 ambiguous (`<` follows the declared name), and with local inference,
 explicit type arguments in expressions are rare.
 
-#### Bounds are checked at the declaration ○
+#### Bounds are checked at the declaration ✓
 
 This is the important difference from C++ templates and Zig's comptime.
 
 With **declaration-site checking**, a generic function's body is
-verified once against its bounds. If you use an operation the bound
-does not provide, the error is at the declaration, pointing at your
-code. Callers get a simple "your `T` does not implement `Ord`" at the
-call site.
+verified once against its bounds. Use an operation the bound does not
+provide and the error is at the declaration, pointing at your code:
+
+```glide
+fn biggest<T: Ord>(a: T, b: T) -> T {
+    if a.len() > 0 { a } else { b }
+}
+```
+
+```
+app.gld:2:13: T has no method "len": it is bounded by Ord, which does not declare one
+ 2 |     if a.len() > 0 { a } else { b }
+   |             ^
+```
+
+Callers get the mirror image, at the call site:
+
+```
+app.gld:8:20: Blob does not implement Ord, required by T
+ 8 |     let x = biggest(Blob{ n: 1 }, Blob{ n: 2 })
+   |                    ^
+```
+
+**A bound is the complete method set.** On a `T: Ord`, `t.cmp(u)`
+resolves through the bound and anything else is an error naming the
+bound. An **unbounded** `<T>` stays fully opaque — the checker
+genuinely knows nothing about it, so it says nothing. That asymmetry is
+the point: a bound is what turns a type parameter from a hole into a
+surface.
 
 With **use-site checking** (C++ templates before concepts, Zig
 comptime), the body is re-checked per instantiation, so an error
@@ -608,7 +640,7 @@ thing a type system tracks for free and a comment does not.
 
 **A bounded generic function:**
 
-```glide
+```glide-run
 fn largest<T: Ord>(xs: List<T>) -> T? {
     if xs.len() == 0 { return None }
     let mut best = xs[0]
@@ -765,8 +797,11 @@ choose in the signature. Go would give you only the second, silently.
 - Generics, traits, and sum types answer three different questions:
   same code for any type; what can I do with this type; which of these
   is it.
-- ○ status is broad here: syntax parses and code runs, but nothing is
-  checked or specialised yet. Write the bounds anyway.
+- **Bounds are checked** ✓ in both directions, and **a bound is the
+  complete method set**. An unbounded `<T>` is opaque and the checker
+  says nothing about it — deliberately. ○: monomorphisation, const
+  generics, use-site type arguments, and enforcement of a bound whose
+  type parameter appears only inside a container.
 
 **Exercises**
 

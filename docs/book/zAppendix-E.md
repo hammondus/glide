@@ -44,13 +44,20 @@ obsolete. The source for most of this book's "Under the Hood" sections,
 and worth reading for the war stories (the GC-truncated generator
 stream is a good one).
 
-**`docs/book/01-introduction.md`** — a single-chapter whirlwind tour of
-the whole language, written before this book. An hour's read if you
-want the shape before the detail.
+**`GLIDE-BY-EXAMPLE.md`** — the whole language in runnable snippets, an
+hour's read. Every fenced block is executed by `go test`, so it cannot
+drift from the interpreter.
+
+**`glide/testdata/conformance/`** — around fifty whole programs that
+state the frontend's contract: a file with no `// error:` comments must
+be accepted, and each comment asserts exactly one diagnostic on that
+line. Read as documentation of the rules; run as the test every future
+implementation of the frontend must pass.
 
 **`glide/examples/`** — `wordfreq.gld`, `tree.gld`, `pipeline.gld`,
-`notes.gld`, `sieve.gld`. All run. `pipeline.gld` is the best single
-demonstration of the concurrency surface.
+`notes.gld`, `sieve.gld`, `links.gld`, `repostat.gld`, `release.gld`.
+All run. `pipeline.gld` is the best single demonstration of the
+concurrency surface; `release.gld` is Chapter 32's case study.
 
 ---
 
@@ -109,7 +116,7 @@ Ordered by how much was taken.
   algebraic data types.
 - **Standard ML** and **OCaml** — pattern matching and exhaustiveness,
   and the observation that compilers are the ideal workload for this
-  feature set (Chapter 35).
+  feature set (Chapter 37).
 
 ### Others
 
@@ -209,7 +216,7 @@ sources are unusually good.
   knob at a time, every argument it existed to end.
 - **Reflections on Trusting Trust** — Ken Thompson (1984). Background
   for why the bootstrap chain from a mainstream toolchain with no
-  binary seed matters (Chapter 35).
+  binary seed matters (Chapter 37).
 
 ---
 

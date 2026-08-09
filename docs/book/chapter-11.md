@@ -54,11 +54,51 @@ The full method surface today:
 |---|---|---|
 | `len()` | `Int` | |
 | `push(v)` | `()` | append; needs `mut` |
+| `pop()` | `T?` | removes and returns the last; needs `mut`. `None` on empty |
+| `insert(i, v)` | `()` | shifts right; needs `mut`. `i == len()` appends; past that traps |
+| `remove(i)` | `T` | shifts left, returns what was there; needs `mut`; out of range traps |
+| `extend(other)` | `()` | appends every element; needs `mut`. `xs.extend(xs)` doubles rather than looping |
+| `first()` / `last()` | `T?` | `None` on an empty list |
+| `contains(v)` | `Bool` | structural `==` |
+| `index_of(v)` | `Int?` | first match; shares one scan with `contains`, so the two cannot disagree |
 | `sorted()` | `List<T>` | copy, ascending (Int/Float/String) |
+| `reversed()` | `List<T>` | a **copy**, like `sorted()` |
+| `slice(lo, hi)` | `List<T>` | half-open `[lo, hi)`, and a **copy**; out of range or `lo > hi` traps |
 | `sort_by(cmp)` | `()` | in place, **stable**; needs `mut`; three-way comparator |
 | `repeat(k)` | `List<T>` | **shallow** — see the trap below |
 | `join(sep)` | `String` | elements must all be Strings |
 | `iter()` | `Iterator<T>` | |
+
+Two naming rules run through that table.
+
+**A past participle returns a new list; a verb mutates.** `sorted`,
+`reversed` and `slice` copy. `push`, `pop`, `insert`, `remove`,
+`extend` and `sort_by` change the list in place and require a `mut`
+path. You can tell which is which without consulting the table.
+
+**There are no negative indices.** `xs[-1]` meaning "last" is a
+convenience that turns an off-by-one into a silent read of the wrong
+end. `last()` says it plainly, and returns an `Option` because an empty
+list has no last element.
+
+`slice` returns a copy rather than a view, and that is deliberate:
+nothing in Glide aliases a list, and a shared-storage view would make
+`mut` a lie about a binding you cannot see.
+
+```glide-run
+fn main() {
+    let mut xs = [3, 1, 2]
+    xs.push(4)
+    println(xs.index_of(1))         // Some(1)
+    println(xs.contains(9))         // false
+    println(xs.sorted())            // [1, 2, 3, 4]
+    println(xs.reversed())          // [4, 2, 1, 3]
+    println(xs.slice(1, 3))         // [1, 2]
+    println(xs.pop())               // Some(4)
+    println(xs.first())             // Some(3)
+    println(xs)                     // [3, 1, 2]
+}
+```
 
 #### Spread in list literals
 
@@ -136,6 +176,46 @@ for (k, v) in m {
 }
 println("")                      // a:1 b:2
 ```
+
+The map method surface:
+
+| Method | Returns | Notes |
+|---|---|---|
+| `len()` | `Int` | |
+| `entries()` | `List<(K, V)>` | insertion order |
+| `keys()` | `List<K>` | insertion order |
+| `values()` | `List<V>` | insertion order, parallel to `keys()` |
+| `contains_key(k)` | `Bool` | spelled `_key` because `contains` on a Map is ambiguous about which half it means |
+| `remove(k)` | `V?` | removes and returns; `None` if absent; needs `mut`. Drops the key from the insertion order — re-inserting later appends at the end |
+
+```glide-run
+fn main() {
+    let mut m = ["a": 1, "b": 2, "c": 3]
+    println(m.keys())               // ["a", "b", "c"]
+    println(m.values())             // [1, 2, 3]
+    println(m.contains_key("b"))    // true
+    println(m.remove("b"))          // Some(2)
+    println(m.entries())            // [("a", 1), ("c", 3)]
+    m["b"] = 9
+    println(m.keys())               // ["a", "c", "b"]  — re-inserted at the end
+}
+```
+
+#### Two maps are equal when their pairs are
+
+```glide
+println(["a": 1, "b": 2] == ["b": 2, "a": 1])     // true
+println([1, 2] == [2, 1])                         // false
+```
+
+**A `Map` ignores insertion order for `==`.** Order is a specified
+*iteration* property, not part of a map's identity, so two maps with
+the same pairs are equal however they were built. That is Python's
+rule, and it is the one that matches what people mean when they compare
+two maps.
+
+A `List` stays order-sensitive, because a list *is* a sequence — its
+order is the data, not a presentation detail.
 
 #### Map indexing returns an Option
 
@@ -245,7 +325,8 @@ everywhere-persistent constant factor is not paid silently.
 
 The interpreter's map is a Go map plus a keys slice, which is how
 insertion order is preserved. That costs one slice's worth of memory
-and makes deletion O(n) (deletion is ○ anyway).
+and makes deletion O(n) — `remove` has to close the gap in the order
+slice.
 
 The insertion-order guarantee is marked "provisional language
 semantics" in `glide/DESIGN-DECISIONS.md` — ratify or revisit when
@@ -642,7 +723,7 @@ semantics.
 
 **A frequency counter, built up in stages:**
 
-```glide
+```glide-run
 fn main() {
     let words = ["the", "quick", "the", "lazy", "the", "dog", "quick"]
 
@@ -812,6 +893,12 @@ inside.**
   inner list. Build fresh values with `(0..n).iter().map(|_| []).collect()`.
 - `sort_by` mutates in place and is **stable**; `sorted()` returns a
   copy. The comparator is three-way (`a.cmp(b)`), not a boolean less-than.
+- **Past participle copies, verb mutates**: `sorted`, `reversed`,
+  `slice` return new lists; `push`, `pop`, `insert`, `remove`, `extend`,
+  `sort_by` need a `mut` path. **No negative indices** — `last()` says
+  "the end" without an off-by-one.
+- **`==` on a Map ignores insertion order**; on a `List` it does not. A
+  map's identity is its pairs; a list's identity includes its order.
 - Spread (`[0, ..xs, 99]`) splices any iterable and is honestly a copy.
 - Tuples are real values — storable, listable, pattern-matchable —
   unlike Go's multiple returns. **Doctrine: tuples are for transport.**

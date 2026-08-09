@@ -13,8 +13,9 @@ that might be absent is a `T?`, and the compiler will not let you use a
 The point is not the extra question mark. It is that **presence becomes
 visible in signatures.**
 
-Everything here is ✓, with one significant interpreter caveat — the
-unboxing wart — flagged in Under the Hood.
+Everything here is ✓, including the boxing that makes
+`Option<Option<T>>` real. That was the last silent wrong answer in M4
+and Under the Hood explains what it closed.
 
 ---
 
@@ -65,7 +66,7 @@ counts[word] = (counts[word] ?? 0) + 1     // parentheses required
 Without them, `counts[word] ?? (0 + 1)`.
 
 `??` also works on a `Result`, unwrapping `Ok` and taking the default
-on `Err` — deliberately discarding the error (Chapter 19).
+on `Err` — deliberately discarding the error (Chapter 20).
 
 #### Way 2: `if let` — unwrap into a scope
 
@@ -192,7 +193,7 @@ tell "no email" from "empty string" from "nobody filled this in".
 let name = find_user(id)?.name      // not adopted
 ```
 
-The `?` operator propagates a `Result`'s `Err` (Chapter 19). It is
+The `?` operator propagates a `Result`'s `Err` (Chapter 20). It is
 **not** overloaded onto `Option`. Use `??`, `if let`, or `let … else`.
 
 ---
@@ -227,18 +228,34 @@ That closed three *silent wrong answers*: a present-but-`None` map
 entry read as absent, a `None` sent over a channel ended the stream,
 and `Option<Option<T>>` collapsed a level.
 
-Three consequences today:
+Three consequences, all of them the ones you want:
 
-- `Some(p)` patterns match any non-`None` value.
-- **`Option<Option<T>>` is unrepresentable.** `Some(None)` collapses
-  to `None`.
-- A channel receive returns `Option<T>` with `None` meaning
-  closed-and-drained, so a *sent* `None` reads as end-of-stream
-  (Chapter 27).
+```glide-run
+fn main() {
+    let m = ["present": None, "other": Some(1)]
+    println(m["present"])           // Some(None)  — present, holding nothing
+    println(m["absent"])            // None        — genuinely absent
+    println(Some(None) == None)     // false
+    println(Some(1) == Some(1))     // true        — == reaches inside the box
+}
+```
 
-The checker era must box. Do not build anything on the current
-behaviour, and if you find yourself needing a three-state value, model
-it explicitly:
+- **`Option<Option<T>>` is representable**, and `Some(None)` differs
+  from `None`. Spell it long-form — `Option<Int?>` — because `T??`
+  cannot lex.
+- **A present-but-`None` map entry reads as present.** Under unboxing
+  it read as absent, which is a wrong answer with no diagnostic.
+- **A `None` sent over a channel is an ordinary element**, not
+  end-of-stream (Chapter 28).
+
+The implicit `T -> T?` promotion is unchanged — `fn f(x: Int?)` still
+accepts `f(1)` — because the checker knows exactly where the coercion
+happens and the evaluator boxes there. That is the pattern Chapter 19
+describes as the checker being *load-bearing*: this behaviour cannot
+exist without it, which is part of why there is no way to skip it.
+
+If you genuinely need a three-state value with distinct names, a sum
+type still reads better than a nested Option:
 
 ```glide
 type Field<T> = Missing | Null | Present(T)
@@ -344,7 +361,7 @@ returning `Option`. Glide declines it.
 
 The reason is that `?` in Glide has a specific meaning — *propagate the
 error to my caller* — and it carries error-type conversion machinery
-with it (Chapter 19). Making the same glyph mean "propagate absence"
+with it (Chapter 20). Making the same glyph mean "propagate absence"
 gives one operator two behaviours resolved by the operand's type, which
 is exactly the kind of context-dependent meaning the language avoids
 elsewhere (see: Go's `:=`).
@@ -623,7 +640,7 @@ failure.** The test: does the absent case carry information?
 
 **The three constructs, side by side on one problem:**
 
-```glide
+```glide-run
 type User = struct {
     pub id: Int
     pub name: String
@@ -704,7 +721,7 @@ indentation at all despite handling two possible absences.
 
 **Flattening a nested lookup chain:**
 
-```glide
+```glide-run
 type Config = struct { pub sections: Map<String, Map<String, String>> }
 
 // Bad — the pyramid
@@ -761,7 +778,7 @@ fn main() {
 The sentinel version compiles, and the bug is a runtime panic at the
 *use* site, far from the missing check.
 
-```glide
+```glide-run
 // Good
 fn index_of(xs: List<String>, target: String) -> Int? {
     for (i, x) in xs.iter().enumerate() {
