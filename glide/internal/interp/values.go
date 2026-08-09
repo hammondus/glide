@@ -80,6 +80,17 @@ type (
 
 	IterV  struct{ Next func() (Value, bool) }
 	RangeV struct{ Lo, Hi int64 }
+
+	// ScopeV is the handle bound by `scope s { … }`; TaskV is what
+	// spawn returns. Both are meaningful only while their scope runs.
+	ScopeV struct{ st *scopeState }
+	TaskV  struct {
+		done      chan struct{} // closed after result/pan are set
+		result    Value
+		pan       any  // child panic; the scope re-panics it at exit
+		cancelled bool // child unwound by cancellation; result never existed
+		joined    bool // GIL-protected; unjoined Err fails the scope
+	}
 )
 
 func newMap() *MapV { return &MapV{m: map[Value]Value{}} }
@@ -144,6 +155,10 @@ func typeName(v Value) string {
 		return "Iterator"
 	case RangeV:
 		return "Range"
+	case *ScopeV:
+		return "Scope"
+	case *TaskV:
+		return "Task"
 	}
 	return fmt.Sprintf("%T", v)
 }
@@ -236,6 +251,10 @@ func render(v Value, quoted bool) string {
 		return "<iterator>"
 	case RangeV:
 		return fmt.Sprintf("%d..%d", x.Lo, x.Hi)
+	case *ScopeV:
+		return "<scope>"
+	case *TaskV:
+		return "<task>"
 	}
 	return fmt.Sprintf("%v", v)
 }

@@ -58,6 +58,8 @@ Reserved words; none can be used as an identifier.
 | `errdefer` | cleanup only on the error path: a `return` carrying an `Err` (what `?` propagates), or a panic — not a plain return, not loop control | ✓ |
 | `trait` | trait declaration: bodied methods are defaults, inherited by any type declaring `impl Trait for Type` unless overridden; body-less methods are required signatures (unverified until the checker); all trait methods take `self`. Two traits supplying the same unoverridden default is an error at the call, naming both | ✓ |
 | `const` | module-level `const name = expr` (lowercase — it's a binding): evaluated once at load, declaration order, immutable | ✓ (M2 shim: initializers are restricted to pure expressions — no fn/module calls; full comptime evaluation arrives with the compiler ○) |
+| `scope` | structured-concurrency scope, an expression: `scope [(config)] [handle] { body }`. `s.spawn(f) -> Task`, `t.join()` returns what the closure returned; exit joins all children on every path, early exit cancels first; unjoined `Err` fails the scope at normal exit (first spawned wins, `?`-conversion applies); child panic cancels siblings and re-panics at exit; cancellation is uncatchable, runs `defer`+`errdefer`, delivered at blocking ops (`join`, generator handoffs; channel ops and `sleep` when they land) | ✓ (`timeout:`/`deadline:` config parses but needs the time types ○) |
+| `select` | wait on multiple channel ops | ○ (parses to a clear error; arrives with channels) |
 
 Contextual keywords — only special at top level, followed by a string
 literal; otherwise ordinary identifiers (`let test = …` is legal):
@@ -73,8 +75,6 @@ Reserved for later eras (using one today is a parse error):
 |---|---|---|
 | `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |
 | `unsafe` | `unsafe fn` / `unsafe { }` | ○ |
-| `scope` | structured-concurrency scope | ○ |
-| `select` | wait on multiple channel ops | ○ |
 | `embed` | build-time file embedding | ○ |
 | `derive` | comptime derive (Json, Debug, Enum, …) | ○ |
 
@@ -288,8 +288,15 @@ patterns in function signatures, ref/binding modes.
   the dev tier, so `+` `-` `*` `/` (MinInt/-1) and unary `-` on
   MinInt trap with a line-numbered error ✓; release-tier wrapping
   and the explicit `wrapping_*` ops arrive with the compiler ○.
-- Green threads, channels, structured concurrency scopes: ○ (M3).
-  Ratified shape for `scope`/`spawn` (design only, nothing runs yet):
+- Structured concurrency: `scope`/`spawn`/`join` and cancellation run
+  in the interpreter ✓ (see the keyword table). Channels, `select`,
+  and the time types (so `scope(timeout:)`) are ○ — landing next.
+  M2 implementation note: tasks interleave exactly at blocking
+  operations (one interpreter lock, released while blocked), which
+  coincides with the ratified cancellation-point rule; release
+  backends add true parallelism without changing observable
+  semantics.
+  Ratified shape for `scope`/`spawn`:
   `scope [(config)] [handle] { body }` — config keys `timeout:
   Duration` / `deadline: Instant` via named-args syntax; handle
   needed only to spawn.

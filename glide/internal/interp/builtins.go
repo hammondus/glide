@@ -363,6 +363,21 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 			}
 			return l
 		}
+	case *ScopeV:
+		switch name {
+		case "spawn":
+			return in.spawnTask(r, one("spawn", args, line), line)
+		case "deadline":
+			panic(rtErr{line, "deadline() arrives with the time types (in progress)"})
+		}
+	case *TaskV:
+		switch name {
+		case "join":
+			if len(args) != 0 {
+				panic(rtErr{line, "join takes no arguments"})
+			}
+			return in.joinTask(r, line)
+		}
 	case *ResultV:
 		switch name {
 		case "context":

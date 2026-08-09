@@ -246,14 +246,14 @@ type RuneRangePat struct {
 	Incl   bool // `..=`
 }
 
-func (*IdentPat) pat() {}
-func (*WildPat) pat()  {}
-func (*TuplePat) pat() {}
-func (*ListPat) pat()  {}
-func (*CtorPat) pat()  {}
-func (*StructPat) pat() {}
-func (*IntPat) pat()    {}
-func (*StrPat) pat()   {}
+func (*IdentPat) pat()     {}
+func (*WildPat) pat()      {}
+func (*TuplePat) pat()     {}
+func (*ListPat) pat()      {}
+func (*CtorPat) pat()      {}
+func (*StructPat) pat()    {}
+func (*IntPat) pat()       {}
+func (*StrPat) pat()       {}
 func (*BoolPat) pat()      {}
 func (*RangePat) pat()     {}
 func (*RunePat) pat()      {}
@@ -285,6 +285,18 @@ type StrLit struct {
 type BlockExpr struct {
 	Body *Block
 	Line int
+}
+
+// ScopeExpr is `scope [(config)] [handle] { body }` — a structured-
+// concurrency scope. Handle is "" when the body doesn't spawn;
+// Timeout/Deadline are nil when absent (a timeout scope evaluates to
+// Result<T, Timeout>).
+type ScopeExpr struct {
+	Handle   string
+	Timeout  Expr
+	Deadline Expr
+	Body     *Block
+	Line     int
 }
 
 type IdentExpr struct {
@@ -356,7 +368,7 @@ type Try struct {
 
 type Closure struct {
 	Params    []string
-	BodyExpr  Expr   // one of BodyExpr / BodyBlock is set
+	BodyExpr  Expr // one of BodyExpr / BodyBlock is set
 	BodyBlock *Block
 }
 
@@ -423,6 +435,7 @@ func (*BoolLit) expr()    {}
 func (*UnitLit) expr()    {}
 func (*StrLit) expr()     {}
 func (*BlockExpr) expr()  {}
+func (*ScopeExpr) expr()  {}
 func (*IdentExpr) expr()  {}
 func (*TupleLit) expr()   {}
 func (*ListLit) expr()    {}

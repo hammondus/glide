@@ -52,19 +52,19 @@ Designed growth (○): the committed core set — `http`, `tls`,
 `Mutex<T>` — per `STDLIB-GOALS.md`. None callable yet; `http`/`sql`/
 `json` host shims arrive with M3.
 
-## Concurrency (all ○ — M3, design ratified)
+## Concurrency (M3)
 
-| Surface | Signature | Notes |
-|---|---|---|
-| `channel()` | `() -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous |
-| `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant |
-| `tx.send(v)` | `(T) -> ()` | blocks per capacity; **panics** on closed channel (sender coordination bug) |
-| `tx.close()` | `() -> ()` | idempotent; only the sender half has it |
-| `rx.recv()` | `() -> Option<T>` | blocks; `None` = closed and drained |
-| `for v in rx` | — | consumes until closed (receiver satisfies the iteration protocol) |
-| `s.spawn(f)` | `(fn() -> T) -> Task<T>` | scope handles only |
-| `t.join()` | `() -> T` | blocks; returns exactly what the closure returned |
-| `s.deadline()` | `() -> Option<Instant>` | nearest enclosing timeout, inherited |
+| Surface | Signature | Notes | Status |
+|---|---|---|---|
+| `s.spawn(f)` | `(fn() -> T) -> Task<T>` | scope handles only; error if the scope has ended | ✓ |
+| `t.join()` | `() -> T` | blocks (cancellation point); returns exactly what the closure returned | ✓ |
+| `channel()` | `() -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous | ○ |
+| `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ○ |
+| `tx.send(v)` | `(T) -> ()` | blocks per capacity; **panics** on closed channel (sender coordination bug) | ○ |
+| `tx.close()` | `() -> ()` | idempotent; only the sender half has it | ○ |
+| `rx.recv()` | `() -> Option<T>` | blocks; `None` = closed and drained | ○ |
+| `for v in rx` | — | consumes until closed (receiver satisfies the iteration protocol) | ○ |
+| `s.deadline()` | `() -> Option<Instant>` | nearest enclosing timeout, inherited | ○ |
 
 Both halves clone (mpmc). Blocking operations here are cancellation
 points. Send transfers ownership — enforced in the checker era,

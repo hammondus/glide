@@ -47,6 +47,8 @@ const (
 	KwErrdefer
 	KwTrait
 	KwConst
+	KwScope
+	KwSelect
 
 	LParen
 	RParen
@@ -104,6 +106,7 @@ var kindNames = map[Kind]string{
 	KwMatch: "'match'", KwYield: "'yield'", KwPub: "'pub'",
 	KwBreak: "'break'", KwContinue: "'continue'",
 	KwDefer: "'defer'", KwErrdefer: "'errdefer'", KwTrait: "'trait'", KwConst: "'const'",
+	KwScope: "'scope'", KwSelect: "'select'",
 }
 
 func (k Kind) String() string {
@@ -120,6 +123,7 @@ var keywords = map[string]Kind{
 	"impl": KwImpl, "match": KwMatch, "yield": KwYield, "pub": KwPub,
 	"break": KwBreak, "continue": KwContinue,
 	"defer": KwDefer, "errdefer": KwErrdefer, "trait": KwTrait, "const": KwConst,
+	"scope": KwScope, "select": KwSelect,
 }
 
 // StrPart is one segment of an interpolated string literal: either

@@ -86,6 +86,8 @@ func exprYields(e ast.Expr) bool {
 		return ex.ElseBlock != nil && blockYields(ex.ElseBlock)
 	case *ast.BlockExpr:
 		return blockYields(ex.Body)
+	case *ast.ScopeExpr:
+		return blockYields(ex.Body)
 	case *ast.Match:
 		for i := range ex.Arms {
 			if exprYields(ex.Arms[i].Body) {
@@ -104,6 +106,12 @@ func exprYields(e ast.Expr) bool {
 
 // runGenerator starts the body in a goroutine; env must already hold
 // self/params. Returns the consumer-facing iterator.
+//
+// GIL discipline: the producer interprets under the runtime lock like
+// any task, and both ends of the handoff release it while blocked —
+// so a generator inside a spawned task cannot wedge the interpreter,
+// and the handoff is a cancellation point on both sides (the
+// producer inherits its creator's cancellation context).
 func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
 	ch := make(chan Value)
 	stop := make(chan struct{})
@@ -111,22 +119,40 @@ func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
 	halt := func() { stopOnce.Do(func() { close(stop) }) }
 
 	var crash any // rtErr etc. from the generator body, re-thrown at Next
+	cancel := in.cur.cancel
 
 	yield := &BuiltinV{Name: "yield", Fn: func(_ *Interp, args []Value, yline int) Value {
-		select {
-		case ch <- args[0]:
-			return UnitV{}
-		case <-stop:
+		var out struct {
+			stopped   bool
+			cancelled bool
+		}
+		in.unblock(func() {
+			select {
+			case ch <- args[0]:
+			case <-stop:
+				out.stopped = true
+			case <-cancel:
+				out.cancelled = true
+			}
+		})
+		if out.cancelled {
+			panic(cancelUnwind{})
+		}
+		if out.stopped {
 			panic(genStop{})
 		}
+		return UnitV{}
 	}}
 	env.vars[yieldKey] = &binding{v: yield}
 
 	go func() {
+		in.gil.Lock()
+		in.cur = &taskCtx{cancel: cancel}
+		defer in.gil.Unlock()
 		defer close(ch)
 		defer func() {
 			switch r := recover().(type) {
-			case nil, genStop:
+			case nil, genStop, cancelUnwind:
 			default:
 				crash = r // surfaced by Next; close(ch) orders the write
 			}
@@ -141,7 +167,19 @@ func (in *Interp) runGenerator(body *ast.Block, env *Env, line int) *IterV {
 		// dies mid-loop the cleanup below halts the producer and the
 		// stream silently truncates at a GC-chosen point.
 		defer runtime.KeepAlive(it)
-		v, ok := <-ch
+		myCancel := in.cur.cancel
+		var v Value
+		var ok, cancelled bool
+		in.unblock(func() {
+			select {
+			case v, ok = <-ch:
+			case <-myCancel:
+				cancelled = true
+			}
+		})
+		if cancelled {
+			panic(cancelUnwind{})
+		}
 		if !ok {
 			if crash != nil {
 				panic(crash)

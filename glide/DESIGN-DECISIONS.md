@@ -100,11 +100,39 @@ deliberately cut because the real compiler makes them obsolete.
   construct opened; strings are single-line, so a bare line number
   cannot distinguish which of several quotes on the line is at fault.
 
-## Deliberately absent (after M2)
+- **One interpreter lock (GIL); blocking operations release it.**
+  Spawned tasks run on goroutines, but exactly one interprets at a
+  time: the evaluator's own structures (env maps, MapV, genCache)
+  stay race-free without per-structure locking, and — the real point
+  — tasks interleave *exactly at blocking operations*, which is the
+  ratified cancellation-point rule. The lock is the semantics, not
+  just a guard. Release backends get true parallelism; programs
+  can't tell except in throughput. Cost: two compute-bound tasks
+  serialize in the interpreter (semantics permit any scheduling).
+  Generator handoffs release the lock on both ends, so a generator
+  inside a task can't wedge the interpreter; each goroutine's
+  cancellation context (`in.cur`) is lock-protected state, saved and
+  restored around every release.
+- **Cancellation is a Go panic (`cancelUnwind`), not a `sig`.**
+  Panics already unwind through every construct uncatchably, and
+  `evalBlockDeferred`'s panic path already runs `defer` AND
+  `errdefer` on the way out — which is exactly the ratified
+  cancellation behavior. A `sig` variant would have needed a "cannot
+  be consumed by match/loops/user code" rule bolted onto every
+  consumer. Only scope machinery (and the task/generator wrappers)
+  recovers it.
+- **Scope exit protocol**: body result captured (value, signal, or
+  panic) → early exit cancels → drain-join children until the task
+  list is stable (children may spawn siblings while we wait) → then
+  precedence: body's own bug > child bug > outer cancellation >
+  body's signal > first unjoined child `Err` (via the same
+  conversion path `?` uses) > body value.
 
-Named-field variants and dot-shorthand, `distinct` types, static
-generics (parsed, ignored), trait *checking* (impl blocks register
-methods; conformance is asserted, not verified), concurrency,
-`defer`/`errdefer`, `or |e|` blocks, named arguments, parameter
-defaults, `break`/`continue`, method values as closures (`x.method`
-unapplied), `else if let`, struct patterns in `match`.
+## Deliberately absent (after M3 phase 1)
+
+`distinct` types, static generics (parsed, ignored), trait
+*checking* (impl blocks register methods; conformance is asserted,
+not verified), channels and `select` (designed, next), the time
+types and `scope(timeout:)` (designed, next), `derive`, method
+values as closures (`x.method` unapplied), `or |e|` blocks
+(declined — see DESIGN.md).

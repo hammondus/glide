@@ -1316,6 +1316,10 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		return p.parseIf()
 	case lexer.KwMatch:
 		return p.parseMatch()
+	case lexer.KwScope:
+		return p.parseScope()
+	case lexer.KwSelect:
+		return nil, p.errf("select is designed but not yet implemented (it arrives with channels)")
 	case lexer.Pipe, lexer.OrOr:
 		return p.parseClosure()
 	case lexer.LParen:
@@ -1364,6 +1368,62 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		return &ast.BlockExpr{Body: body, Line: t.Line}, nil
 	}
 	return nil, p.errf("expected an expression, found %s", t.Kind)
+}
+
+// parseScope: `scope [(key: expr, …)] [handle] { body }`. Config keys
+// are timeout and deadline; the handle is needed only to spawn. The
+// body is parsed in the enclosing loop context — break/continue/
+// return leave the scope legally (the exit path cancels children).
+func (p *parser) parseScope() (ast.Expr, error) {
+	line := p.next().Line // scope
+	sc := &ast.ScopeExpr{Line: line}
+	if p.accept(lexer.LParen) {
+		for p.cur().Kind != lexer.RParen {
+			t, err := p.expect(lexer.Ident, "scope config")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.Colon, "scope config"); err != nil {
+				return nil, err
+			}
+			e, err := structsOK(p, p.parseExpr)
+			if err != nil {
+				return nil, err
+			}
+			switch t.Text {
+			case "timeout":
+				if sc.Timeout != nil {
+					return nil, p.errf("scope config %q given twice", t.Text)
+				}
+				sc.Timeout = e
+			case "deadline":
+				if sc.Deadline != nil {
+					return nil, p.errf("scope config %q given twice", t.Text)
+				}
+				sc.Deadline = e
+			default:
+				return nil, p.errf("unknown scope config %q (timeout and deadline exist)", t.Text)
+			}
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+		if _, err := p.expect(lexer.RParen, "scope config"); err != nil {
+			return nil, err
+		}
+	}
+	if p.cur().Kind == lexer.Ident {
+		if isCapitalized(p.cur().Text) {
+			return nil, p.errf("a scope handle is a binding (lowercase), found %q", p.cur().Text)
+		}
+		sc.Handle = p.next().Text
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	sc.Body = body
+	return sc, nil
 }
 
 func (p *parser) parseListOrMap() (ast.Expr, error) {

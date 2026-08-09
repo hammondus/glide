@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"glide/internal/ast"
 )
@@ -34,6 +35,12 @@ type Interp struct {
 	traits     map[string]*ast.TraitDecl
 	typeTraits map[string][]string // type -> traits it declares impls for
 	constEval  bool                // inside a const initializer: pure exprs only
+
+	// The runtime lock: exactly one goroutine interprets at a time;
+	// blocking operations release it (concurrency.go). cur is the
+	// interpreting goroutine's cancellation context, GIL-protected.
+	gil sync.Mutex
+	cur *taskCtx
 }
 
 type variantInfo struct {
@@ -200,6 +207,8 @@ func (in *Interp) Run(f *ast.File) (err error) {
 	if len(mainFn.Params) != 0 {
 		return fmt.Errorf("line %d: main takes no parameters (use os.args())", mainFn.Line)
 	}
+	in.enterRoot()
+	defer in.exitRoot()
 	ret := in.callFunc(mainFn, nil)
 	if r, isRes := ret.(*ResultV); isRes && !r.Ok {
 		return fmt.Errorf("%s", display(r.V))
@@ -1034,6 +1043,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		return in.evalBinary(ex, env)
 	case *ast.BlockExpr:
 		return in.evalBlock(ex.Body, newEnv(env, false))
+	case *ast.ScopeExpr:
+		return in.evalScope(ex, env)
 	case *ast.If:
 		return in.evalIf(ex, env)
 	case *ast.Closure:

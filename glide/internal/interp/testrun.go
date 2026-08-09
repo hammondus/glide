@@ -88,6 +88,8 @@ func (in *Interp) runCase(t *ast.TestDecl, args []Value) (err error) {
 			panic(p)
 		}
 	}()
+	in.enterRoot()
+	defer in.exitRoot()
 	env := newEnv(in.global, true)
 	for i, p := range t.Params {
 		env.declare(p.Name, args[i], false, t.Line)
