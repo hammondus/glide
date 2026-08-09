@@ -24,7 +24,7 @@ const (
 	Int
 	Float
 	String
-	Rune // 'a' — code point in Token.Int
+	Rune // 'a' — code point in Token.Num
 
 	KwFn
 	KwLet
@@ -143,8 +143,14 @@ type Token struct {
 	source.Span // byte range in the file this token was lexed from
 	Kind        Kind
 	Text        string
-	Int         int64
-	Float       float64
+	// Num is an integer literal's *magnitude*, or a rune's code
+	// point. Magnitude, not value: a leading `-` is a separate token
+	// and becomes a unary expression, so the lexer never sees a sign.
+	// That is what makes both ends of the range writable — i64's
+	// minimum (magnitude 2^63, which no int64 can hold) and u64's
+	// maximum — and it is why this is unsigned.
+	Num   uint64
+	Float float64
 	Parts       []StrPart // String tokens only
 	Line        int
 }
@@ -251,7 +257,9 @@ func (lx *lexer) run() error {
 				return err
 			}
 		case isDigit(c):
-			lx.lexNumber()
+			if err := lx.lexNumber(); err != nil {
+				return err
+			}
 		case isIdentStart(c):
 			lx.lexIdent()
 		default:
@@ -283,7 +291,7 @@ func (lx *lexer) lexIdent() {
 	lx.emit(Ident, text)
 }
 
-func (lx *lexer) lexNumber() {
+func (lx *lexer) lexNumber() error {
 	start := lx.i
 	for lx.i < len(lx.src) && (isDigit(lx.src[lx.i]) || lx.src[lx.i] == '_') {
 		lx.i++
@@ -299,12 +307,27 @@ func (lx *lexer) lexNumber() {
 	}
 	text := strings.ReplaceAll(lx.src[start:lx.i], "_", "")
 	if isFloat {
-		f, _ := strconv.ParseFloat(text, 64)
+		f, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return lx.errf("%s is not a valid float literal", text)
+		}
 		lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Float, Text: text, Float: f, Line: lx.line})
-	} else {
-		n, _ := strconv.ParseInt(text, 10, 64)
-		lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Int, Text: text, Int: n, Line: lx.line})
+		return nil
 	}
+	// The error was discarded here until M4b, and ParseInt clamps on
+	// overflow rather than failing loudly: every literal above
+	// 2^63-1 silently became 9223372036854775807 and the program ran.
+	// Parsing the magnitude as a uint64 makes u64's whole range
+	// writable; the checker decides whether it fits where it landed.
+	n, err := strconv.ParseUint(text, 10, 64)
+	if err != nil {
+		return source.Diagnostic{
+			Span: lx.span(lx.start),
+			Msg: fmt.Sprintf("integer literal %s is out of range (the largest any Glide integer type holds is u64's 18446744073709551615)", text),
+		}
+	}
+	lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Int, Text: text, Num: n, Line: lx.line})
+	return nil
 }
 
 // unicodeEscape decodes `\u{HEX}` starting at src[at] (the
@@ -377,7 +400,7 @@ func (lx *lexer) lexRune() error {
 		return lx.errf("a rune literal holds exactly one rune ('a'); for text use a string")
 	}
 	lx.i++
-	lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Rune, Int: int64(r), Text: string(r), Line: lx.line})
+	lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Rune, Num: uint64(r), Text: string(r), Line: lx.line})
 	return nil
 }
 

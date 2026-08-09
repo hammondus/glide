@@ -26,6 +26,7 @@ import (
 	"glide/internal/check"
 	"glide/internal/program"
 	"glide/internal/source"
+	"glide/internal/types"
 )
 
 type Interp struct {
@@ -942,7 +943,14 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 	switch ex := e.(type) {
 	case *ast.IntLit:
-		return IntV(ex.V), nil
+		// A literal is a magnitude; the checker says what type it
+		// landed in. Two types change the representation: Float,
+		// because an integer literal in a float context is a float
+		// (`let f: Float = 5` then `f / 2` is 2.5, not 2), and u64,
+		// the one integer type whose values an i64 cannot all hold.
+		// The narrower sized types are still IntV — the runtime gap
+		// recorded in DESIGN-DECISIONS.md.
+		return intLit(ex, in.landed(ex)), nil
 	case *ast.FloatLit:
 		return FloatV(ex.V), nil
 	case *ast.BoolLit:
@@ -1028,6 +1036,14 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 		return RangeV{Lo: int64(l), Hi: end}, nil
 	case *ast.Unary:
+		// `-<literal>` is one constant in the source, not a negation
+		// applied to a value, so it is folded here rather than
+		// evaluated. That is the only way to write i64's minimum: the
+		// magnitude 2^63 has no positive Int to be negated *from*, and
+		// evaluating it stepwise would trap on the way past.
+		if lit, isLit := ex.X.(*ast.IntLit); isLit && ex.Op == "-" {
+			return negate(intLit(lit, in.landed(ex))), nil
+		}
 		v, sg := in.eval(ex.X, env)
 		if sg != nil {
 			return UnitV{}, sg
@@ -1163,6 +1179,42 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		return in.evalCall(ex, env)
 	}
 	panic(rtErr{source.Span{}, fmt.Sprintf("unhandled expression %T", e)})
+}
+
+// landed reports the type the checker settled an expression into, or
+// nil when it did not record one (an untyped constant that nothing
+// constrained, or a node the checker did not model).
+func (in *Interp) landed(e ast.Expr) types.Type {
+	if in.info == nil {
+		return nil
+	}
+	return in.info.Types[e]
+}
+
+// intLit builds the value of an integer literal at the type it landed
+// in. The default — nothing recorded, or a type with no separate
+// representation — is Int.
+func intLit(lit *ast.IntLit, t types.Type) Value {
+	switch t {
+	case types.U64:
+		return UintV(lit.V)
+	case types.Float, types.F32:
+		return FloatV(lit.V)
+	}
+	return IntV(int64(lit.V))
+}
+
+// negate flips a folded literal. The Int case is written as an
+// unsigned two's-complement negation because i64's minimum has no
+// positive counterpart to subtract from.
+func negate(v Value) Value {
+	switch n := v.(type) {
+	case IntV:
+		return IntV(-int64(n))
+	case FloatV:
+		return -n
+	}
+	return v
 }
 
 func (in *Interp) evalIdent(ex *ast.IdentExpr, env *Env) (Value, *sig) {
@@ -1629,6 +1681,51 @@ func binop(op string, l, r Value, at source.Span) Value {
 				return BoolV(li > ri)
 			case ">=":
 				return BoolV(li >= ri)
+			}
+		}
+	}
+	// u64: unsigned arithmetic, trapping on overflow the way Int does.
+	// There is deliberately no UintV/IntV case — mixing a u64 with an
+	// Int is a compile error, so reaching this code with one would
+	// mean the checker let it through.
+	if lu, ok := l.(UintV); ok {
+		if ru, ok := r.(UintV); ok {
+			switch op {
+			case "+":
+				c := lu + ru
+				if c < lu {
+					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d + %d (dev builds trap; release wraps)", lu, ru)})
+				}
+				return c
+			case "-":
+				if ru > lu {
+					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d - %d (dev builds trap; release wraps)", lu, ru)})
+				}
+				return lu - ru
+			case "*":
+				c := lu * ru
+				if lu != 0 && c/lu != ru {
+					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d * %d (dev builds trap; release wraps)", lu, ru)})
+				}
+				return c
+			case "/":
+				if ru == 0 {
+					panic(rtErr{at, "division by zero"})
+				}
+				return lu / ru
+			case "%":
+				if ru == 0 {
+					panic(rtErr{at, "division by zero"})
+				}
+				return lu % ru
+			case "<":
+				return BoolV(lu < ru)
+			case "<=":
+				return BoolV(lu <= ru)
+			case ">":
+				return BoolV(lu > ru)
+			case ">=":
+				return BoolV(lu >= ru)
 			}
 		}
 	}

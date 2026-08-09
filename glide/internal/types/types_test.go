@@ -100,23 +100,32 @@ func TestJoin(t *testing.T) {
 	}
 }
 
+// Constants are a magnitude plus a sign, which is the only shape in
+// which both ends of the range are expressible: i64's minimum is 2^63
+// and u64's maximum is 2^64-1, and no int64 holds either.
 func TestFitsIn(t *testing.T) {
 	for _, tc := range []struct {
-		n    int64
+		mag  uint64
+		neg  bool
 		b    *types.Basic
 		want bool
 	}{
-		{300, types.U8, false},
-		{255, types.U8, true},
-		{-1, types.U8, false},
-		{127, types.I8, true},
-		{128, types.I8, false},
-		{-128, types.I8, true},
-		{1 << 40, types.Int, true},
-		{1 << 40, types.I32, false},
+		{300, false, types.U8, false},
+		{255, false, types.U8, true},
+		{1, true, types.U8, false},
+		{0, true, types.U8, true}, // -0 is 0
+		{127, false, types.I8, true},
+		{128, false, types.I8, false},
+		{128, true, types.I8, true}, // the negative side reaches one further
+		{1 << 40, false, types.Int, true},
+		{1 << 40, false, types.I32, false},
+		{1 << 63, true, types.Int, true},     // i64 minimum, unwritable before M4b
+		{1 << 63, false, types.Int, false},   // one past i64 maximum
+		{^uint64(0), false, types.U64, true}, // u64 maximum
+		{^uint64(0), false, types.Int, false},
 	} {
-		if got := types.FitsIn(tc.n, tc.b); got != tc.want {
-			t.Errorf("FitsIn(%d, %s) = %v, want %v", tc.n, tc.b, got, tc.want)
+		if got := types.FitsIn(tc.mag, tc.neg, tc.b); got != tc.want {
+			t.Errorf("FitsIn(%d, neg=%v, %s) = %v, want %v", tc.mag, tc.neg, tc.b, got, tc.want)
 		}
 	}
 }

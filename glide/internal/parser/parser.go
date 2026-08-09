@@ -1126,9 +1126,9 @@ func (p *parser) parsePatternCore() (ast.Pattern, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &ast.RuneRangePat{Lo: rune(t.Int), Hi: rune(hi.Int), Incl: incl}, nil
+			return &ast.RuneRangePat{Lo: rune(t.Num), Hi: rune(hi.Num), Incl: incl}, nil
 		}
-		return &ast.RunePat{V: rune(t.Int)}, nil
+		return &ast.RunePat{V: rune(t.Num)}, nil
 	case lexer.String:
 		t := p.next()
 		var s strings.Builder
@@ -1230,10 +1230,20 @@ func (p *parser) patInt() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Patterns match a *value*, so the magnitude has to fit an Int
+	// here. `-9223372036854775808` is the one case where the negated
+	// magnitude fits and the bare one does not, which is why this
+	// tests the two signs separately rather than converting first.
 	if neg {
-		return -t.Int, nil
+		if t.Num > 1<<63 {
+			return 0, p.errAt(t.Span, "%s is out of range for an Int pattern", t.Text)
+		}
+		return -int64(t.Num), nil
 	}
-	return t.Int, nil
+	if t.Num > 1<<63-1 {
+		return 0, p.errAt(t.Span, "%s is out of range for an Int pattern", t.Text)
+	}
+	return int64(t.Num), nil
 }
 
 // patternBinds reports whether a pattern introduces any binding —
@@ -1407,7 +1417,7 @@ func (p *parser) parsePostfix() (ast.Expr, error) {
 			case lexer.Ident:
 				e = &ast.Field{X: e, Name: p.next().Text, Span: at}
 			case lexer.Int:
-				e = &ast.TupleIndex{X: e, N: int(p.next().Int), Span: at}
+				e = &ast.TupleIndex{X: e, N: int(p.next().Num), Span: at}
 			default:
 				return nil, p.errf("expected a name or tuple index after '.', found %s", p.cur().Kind)
 			}
@@ -1435,13 +1445,13 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 	switch t.Kind {
 	case lexer.Int:
 		p.next()
-		return &ast.IntLit{V: t.Int, Span: t.Span}, nil
+		return &ast.IntLit{V: t.Num, Span: t.Span}, nil
 	case lexer.Float:
 		p.next()
 		return &ast.FloatLit{V: t.Float, Span: t.Span}, nil
 	case lexer.Rune:
 		p.next()
-		return &ast.RuneLit{V: rune(t.Int), Span: t.Span}, nil
+		return &ast.RuneLit{V: rune(t.Num), Span: t.Span}, nil
 	case lexer.KwTrue:
 		p.next()
 		return &ast.BoolLit{V: true, Span: t.Span}, nil

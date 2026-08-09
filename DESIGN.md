@@ -335,7 +335,12 @@ Mechanics:
 - **Literals are arbitrary-precision until they land in a type** (Go's
   untyped constants / Zig's `comptime_int`; falls out of comptime).
   `1 << 100` is fine in constant math; `let x: u8 = 300` is a compile
-  error, not a wrap.
+  error, not a wrap. *As of M4b*: a literal is carried as a magnitude
+  with the sign as a separate token, so both `-9223372036854775808`
+  and `18446744073709551615` are writable and the type each lands in
+  decides what it becomes — `let f: Float = 5` is a float, and `f / 2`
+  is 2.5 rather than integer division. Constant *expressions* wider
+  than 64 bits still wait for comptime.
 - **`Rune` is its own type, not an `i32` alias** (Go's aliasing is
   sloppy). Ordered, rangeable (`'a'..'z'`), but never passes where a
   count belongs. `string.runes()` yields U+FFFD for invalid sequences.

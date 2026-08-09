@@ -13,6 +13,12 @@ that its message contains `<text>`. Any unexpected diagnostic, any
 missing one, and any diagnostic on a line without a comment is a
 failure.
 
+A rejection counts whichever stage produces it — the lexer (an
+integer literal too large for any type), the declaration table (a
+duplicate name), or the checker. The corpus states the contract the
+same way for all three, because to a programmer they are one thing:
+the program did not compile, and here is why.
+
 Rules for adding cases:
 
 - One theme per file, named after it. A file that fails should say

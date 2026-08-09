@@ -134,7 +134,7 @@ Type annotations are written but unchecked in M2.
 | `Result<T, E>` | `Ok(v)` / `Err(e)` | ✓ |
 | `Range` | value of `lo..hi` | ✓ |
 | `fn(A) -> B` | one function type for named fns, closures, method values | ✓ for named fns and closures (a closure passed to `filter`/`sort_by`/`map` is checked against the parameter's signature); method values unapplied (`x.method`) ○ |
-| `i8…i64`, `u8…u64`, `f32` | sized numerics | ✓ as *types* (declared, checked, literal range enforced: `let x: u8 = 300` is a compile error; no implicit conversions) — the runtime still stores every integer as i64, so a sized type does not yet wrap or trap at its own width ○ |
+| `i8…i64`, `u8…u64`, `f32` | sized numerics | ✓ as *types* (declared, checked, literal range enforced exactly at both ends: `let x: u8 = 300` and `let x: u64 = -1` are compile errors, `let x: u64 = 18446744073709551615` and `let x: Int = -9223372036854775808` are not; no implicit conversions). `u64` has its own runtime representation because an i64 cannot hold its range; `i8`–`i32` and `u8`–`u32` still live in an i64, so they do not yet wrap or trap at their own width ○ |
 | `i128`, `u128` | 128-bit integers | ○ — ratified, deferred past M4 (Go has no native 128-bit integer; see `glide/DESIGN-DECISIONS.md`) |
 | `Rune` | own type; `==`/ordering with other Runes only; Display prints the character, Debug quotes it | ✓ |
 | `distinct` | `type NoteId = distinct Int` — nominal wrapper: explicit construction `NoteId(7)` (wrong base type errors), **no inherited operators** (`NoteId(1) + 1` errors — an id is not a quantity), `==` within the same distinct type only, pattern `NoteId(n)` destructures, `.value()` unwraps, `impl NoteId { … }` works like any user type. Codecs (json/sql) unwrap at the boundary | ✓ (dynamic; the checker makes it static) |
@@ -346,8 +346,15 @@ patterns in function signatures, ref/binding modes.
   guarantee (aliasing is possible — no borrow checker, recorded).
 - Integer overflow: trap in dev, wrap in release. The interpreter is
   the dev tier, so `+` `-` `*` `/` (MinInt/-1) and unary `-` on
-  MinInt trap with a line-numbered error ✓; release-tier wrapping
-  and the explicit `wrapping_*` ops arrive with the compiler ○.
+  MinInt trap with a positioned error ✓, for `Int` and `u64` alike;
+  release-tier wrapping and the explicit `wrapping_*` ops arrive with
+  the compiler ○.
+- Integer literals are magnitudes: the sign is a separate token, so
+  both ends of every type's range are writable, and the type a
+  literal lands in decides what it becomes — `let f: Float = 5` is a
+  float ✓. A literal larger than `u64`'s maximum is rejected by the
+  lexer, since no type could hold it. Constant *expressions* wider
+  than 64 bits (`1 << 100`) wait for comptime ○.
 - Structured concurrency: `scope`/`spawn`/`join`, cancellation,
   channels, `select`, the time types, and `scope(timeout:)` all run
   in the interpreter ✓ (see the keyword table and stdlib

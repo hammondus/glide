@@ -1,6 +1,8 @@
 package check
 
 import (
+	"strconv"
+
 	"glide/internal/ast"
 	"glide/internal/source"
 	"glide/internal/types"
@@ -28,6 +30,7 @@ func (c *checker) checkExpr(e ast.Expr, want types.Type) types.Type {
 	got := c.typeOf(e, want)
 	if types.AssignableTo(got, want) {
 		c.rangeCheck(e, want)
+		c.settle(e, got, want)
 		return got
 	}
 	if types.IsOpaque(got) || types.IsOpaque(want) {
@@ -44,7 +47,7 @@ func (c *checker) checkExpr(e ast.Expr, want types.Type) types.Type {
 // in — DESIGN.md: `let x: u8 = 300` is a compile error, not a wrap.
 // The diagnostic points at the literal, which is where the fix is.
 func (c *checker) rangeCheck(e ast.Expr, want types.Type) {
-	n, ok := constInt(e)
+	mag, neg, ok := constInt(e)
 	if !ok {
 		return
 	}
@@ -55,26 +58,55 @@ func (c *checker) rangeCheck(e ast.Expr, want types.Type) {
 		}
 		return
 	}
-	if !types.FitsIn(n, b) {
-		c.errf(span(e), "%d does not fit in %s", n, b)
+	if !types.FitsIn(mag, neg, b) {
+		c.errf(span(e), "%s does not fit in %s", signed(mag, neg), b)
 	}
 }
 
-// constInt reads an integer constant, seeing through a unary minus —
-// `-129` is a negation of the literal 129 in the tree, and the range
-// check has to see the value the programmer wrote.
-func constInt(e ast.Expr) (int64, bool) {
+// constInt reads an integer constant as a magnitude and a sign,
+// seeing through a unary minus — `-129` is a negation of the literal
+// 129 in the tree, and the range check has to see what was written.
+func constInt(e ast.Expr) (mag uint64, neg bool, ok bool) {
 	switch x := e.(type) {
 	case *ast.IntLit:
-		return x.V, true
+		return x.V, false, true
 	case *ast.Unary:
 		if x.Op == "-" {
-			if n, ok := constInt(x.X); ok {
-				return -n, true
+			if m, n, found := constInt(x.X); found {
+				return m, !n, true
 			}
 		}
 	}
-	return 0, false
+	return 0, false, false
+}
+
+// signed renders a magnitude/sign pair for a diagnostic. It exists
+// because the one value that matters most here — i64's minimum — has
+// no int64 to be formatted from.
+func signed(mag uint64, neg bool) string {
+	s := strconv.FormatUint(mag, 10)
+	if neg {
+		return "-" + s
+	}
+	return s
+}
+
+// settle records the type an untyped constant landed in. The node's
+// own type is "untyped integer", which is true and useless to a
+// backend: it has to know that the 5 in `let f: Float = 5` is a
+// Float and the 5 in `let n: u64 = 5` is a u64. Recording it here —
+// rather than rewriting the node — keeps the AST purely syntactic.
+//
+// Both of those were wrong before M4b, silently: `let f: Float = 5`
+// built an integer, so `f / 2` did integer division and answered 2.
+func (c *checker) settle(e ast.Expr, got, want types.Type) {
+	gb, ok := got.(*types.Basic)
+	if !ok || !gb.IsUntyped() {
+		return
+	}
+	if wb, ok := want.(*types.Basic); ok && !wb.IsUntyped() {
+		c.info.Types[e] = wb
+	}
 }
 
 func (c *checker) typeOf(e ast.Expr, want types.Type) types.Type {
@@ -339,6 +371,16 @@ func (c *checker) binary(x *ast.Binary) types.Type {
 	}
 	l := c.infer(x.L)
 	r := c.infer(x.R)
+	// An untyped operand adopts the other side's type: in `a - 1`
+	// where a is a u64, the 1 is a u64 too. Without this the literal
+	// stays "untyped integer" in Info and the evaluator builds it at
+	// the default width, which is a type the other operand refuses.
+	if j, ok := types.Default(types.Join(l, r)).(*types.Basic); ok {
+		c.settle(x.L, l, j)
+		c.rangeCheck(x.L, j)
+		c.settle(x.R, r, j)
+		c.rangeCheck(x.R, j)
+	}
 	return c.binaryResult(x.Op, l, r, x.Span)
 }
 

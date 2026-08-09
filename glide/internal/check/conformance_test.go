@@ -43,21 +43,28 @@ func runCorpusFile(t *testing.T, path string) {
 	src := string(raw)
 	want := expectedErrors(src)
 
+	// A rejection is a rejection whichever stage produces it: a
+	// literal too large for any type is a lex error, an unknown
+	// declaration is a load error, a type mismatch is a check error,
+	// and the corpus states the contract the same way for all three.
+	var stageErr error
 	f, err := parser.ParseFile(path, src)
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		stageErr = err
+	} else {
+		tab, loadErr := program.Load(f, check.Host())
+		if loadErr != nil {
+			stageErr = loadErr
+		} else {
+			_, stageErr = check.File(f, tab)
+		}
 	}
-	tab, err := program.Load(f, check.Host())
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	_, checkErr := check.File(f, tab)
 
 	got := map[int][]string{}
 	var se *source.Error
-	if checkErr != nil {
-		if !errors.As(checkErr, &se) {
-			t.Fatalf("checker returned a positionless error: %v", checkErr)
+	if stageErr != nil {
+		if !errors.As(stageErr, &se) {
+			t.Fatalf("returned a positionless error: %v", stageErr)
 		}
 		for _, d := range se.Diags {
 			line, _ := se.File.LineCol(d.Pos)

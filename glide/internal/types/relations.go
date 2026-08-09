@@ -198,33 +198,37 @@ func Default(t Type) Type {
 	return t
 }
 
-// FitsIn reports whether an integer constant fits in b. Returns true
-// for anything that is not a sized integer, so callers can ask
-// unconditionally.
+// FitsIn reports whether an integer constant fits in b. The constant
+// arrives as a magnitude plus a sign, because that is the only
+// representation in which both ends of the range are expressible:
+// i64's minimum is 2^63, which no int64 holds, and u64's maximum is
+// 2^64-1, which no int64 holds either. Returns true for anything that
+// is not a sized integer, so callers can ask unconditionally.
 //
-// Known gap: constants are int64 all the way from the lexer, so a
-// u64 literal above 2^63-1 is rejected before the checker ever sees
-// it. Real arbitrary-precision constants (DESIGN.md: "literals are
-// arbitrary-precision until they land in a type") arrive with
-// comptime; until then this is the whole of the range check.
-func FitsIn(n int64, b *Basic) bool {
+// Remaining gap: magnitudes are uint64, so a constant *expression*
+// that exceeds 64 bits mid-way (`1 << 100`, which DESIGN.md says is
+// fine in constant math) still cannot be evaluated. That needs real
+// arbitrary-precision constants and arrives with comptime; the range
+// check itself is now exact for every type the language has.
+func FitsIn(mag uint64, neg bool, b *Basic) bool {
 	if !b.IsInteger() || b.IsUntyped() {
 		return true
 	}
 	if b.IsUnsigned() {
-		if n < 0 {
+		if neg && mag != 0 {
 			return false
 		}
 		if b.bits == 64 {
 			return true
 		}
-		return uint64(n) < uint64(1)<<b.bits
+		return mag < uint64(1)<<b.bits
 	}
-	if b.bits == 64 {
-		return true
+	// Signed: the negative side reaches one further than the positive.
+	lim := uint64(1) << (b.bits - 1)
+	if neg {
+		return mag <= lim
 	}
-	lim := int64(1) << (b.bits - 1)
-	return n >= -lim && n < lim
+	return mag < lim
 }
 
 // Join is the type of a construct with two result arms — the branches

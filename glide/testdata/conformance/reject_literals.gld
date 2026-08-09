@@ -1,0 +1,6 @@
+fn main() {
+    // Past u64: no Glide integer type holds it, so the lexer stops
+    // here. This is the one range error reported before the checker
+    // runs, because there is no value to carry forward.
+    println(18446744073709551616)   // error: is out of range
+}

@@ -405,9 +405,13 @@ func (*RuneRangePat) pat() {}
 
 type Expr interface{ expr() }
 
+// IntLit is an integer literal's *magnitude*. `-1` is a Unary over
+// IntLit(1), so a literal is never negative — which is what makes
+// i64's minimum and u64's maximum both writable. The type it lands in
+// is the checker's answer, recorded in check.Info.
 type IntLit struct {
 	source.Span
-	V int64
+	V uint64
 }
 type FloatLit struct {
 	source.Span

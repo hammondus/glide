@@ -56,13 +56,13 @@ func TestRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if toks[0].Kind != Int || toks[0].Int != 0 {
+	if toks[0].Kind != Int || toks[0].Num != 0 {
 		t.Fatalf("token 0: %+v", toks[0])
 	}
 	if toks[1].Kind != DotDot {
 		t.Fatalf("token 1: %+v", toks[1])
 	}
-	if toks[2].Kind != Int || toks[2].Int != 10000 {
+	if toks[2].Kind != Int || toks[2].Num != 10000 {
 		t.Fatalf("separators not stripped: %+v", toks[2])
 	}
 }

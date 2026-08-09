@@ -6,6 +6,10 @@ fn main() {
     let b: i8 = -129        // error: does not fit in i8
     let c: u8 = 255
     let d: Int = 7
+    let e: u64 = -1         // error: -1 does not fit in u64
+    let g: Int = 9223372036854775808   // error: 9223372036854775808 does not fit in Int
+    println(e)
+    println(g)
     println(wants_i32(d))   // error: expected i32, found Int
     println(a + c)
     println(b)

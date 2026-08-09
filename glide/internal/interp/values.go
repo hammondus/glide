@@ -16,6 +16,16 @@ type Value any
 
 type (
 	IntV   int64
+
+	// UintV is a u64 value, and only a u64: it exists because u64 is
+	// the one integer type whose range an int64 cannot hold. The
+	// narrower sized types (i8-i32, u8-u32) still live in an IntV,
+	// which is why they do not yet wrap at their own width — the
+	// stated gap in DESIGN-DECISIONS.md. A u64 never mixes with an
+	// Int: DESIGN.md forbids implicit numeric conversion, the checker
+	// enforces it, and binop has no case for the pair.
+	UintV uint64
+
 	FloatV float64
 	StrV   string
 	BoolV  bool
@@ -118,7 +128,7 @@ func newMap() *MapV { return &MapV{m: map[Value]Value{}} }
 
 func hashable(k Value, at source.Span) Value {
 	switch k.(type) {
-	case IntV, StrV, BoolV, RuneV:
+	case IntV, UintV, StrV, BoolV, RuneV:
 		return k
 	}
 	panic(rtErr{at, fmt.Sprintf("%s cannot be a map key", typeName(k))})
@@ -140,6 +150,8 @@ func typeName(v Value) string {
 	switch x := v.(type) {
 	case IntV:
 		return "Int"
+	case UintV:
+		return "u64"
 	case FloatV:
 		return "Float"
 	case StrV:
@@ -210,6 +222,8 @@ func render(v Value, quoted bool) string {
 	switch x := v.(type) {
 	case IntV:
 		return fmt.Sprintf("%d", int64(x))
+	case UintV:
+		return fmt.Sprintf("%d", uint64(x))
 	case FloatV:
 		return fmt.Sprintf("%g", float64(x))
 	case StrV:
@@ -320,7 +334,7 @@ func render(v Value, quoted bool) string {
 // comparable (runtime error at the call site's at).
 func eq(a, b Value, at source.Span) bool {
 	switch x := a.(type) {
-	case IntV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV, DurationV:
+	case IntV, UintV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV, DurationV:
 		return a == b
 	case InstantV:
 		y, ok := b.(InstantV)

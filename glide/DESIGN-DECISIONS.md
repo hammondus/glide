@@ -351,6 +351,42 @@ or it is a bug.
   anything. Call-site inference proper (`Tree.new()` learning `Int`
   from a later `t.insert(1)`) is M4c.
 
+- **Integer literals are magnitudes, and the type they land in
+  decides what they become.** `lexer.Token.Num` is a `uint64` holding
+  a literal's magnitude; a leading `-` is a separate token, so the
+  lexer never sees a sign. That is the only representation in which
+  both ends of the range are expressible — i64's minimum is 2^63,
+  which no int64 holds, and u64's maximum is 2^64-1, which no int64
+  holds either. `check.Info` records the type each untyped constant
+  settled into, and the evaluator builds the value from it.
+
+  This closed three silent-wrong-answer bugs that predate M4:
+  1. `strconv.ParseInt`'s error was **discarded**, and ParseInt clamps.
+     Every literal above 2^63-1 silently became 9223372036854775807 and
+     the program ran — including `let a: u64 = 18446744073709551615`,
+     which the checker already accepted as a type.
+  2. `-9223372036854775808` printed `-9223372036854775807`. i64's
+     minimum was unwritable, because the magnitude was clamped before
+     the negation could reach it. `-<literal>` is now folded as one
+     constant rather than evaluated as a negation of a value.
+  3. `let f: Float = 5` built an *integer*, so `f / 2` did integer
+     division and answered `2`. An untyped constant now settles into
+     the type it landed in, including through a binary operator: in
+     `f / 2` the 2 adopts Float, and in `big - 1` the 1 adopts u64.
+
+  `UintV uint64` is the runtime's only new value type, and exists
+  solely for u64 — the one integer type whose range an i64 cannot
+  hold. i8–i32 and u8–u32 all fit an IntV, which is why they still do
+  not wrap at their own width. A u64 never mixes with an Int: DESIGN.md
+  forbids implicit numeric conversion, the checker enforces it, and
+  `binop` has no case for the pair.
+
+  Remaining gap: magnitudes are uint64, so a constant *expression* that
+  exceeds 64 bits part-way (`1 << 100`, which DESIGN.md says is fine in
+  constant math) still cannot be evaluated. That wants real
+  arbitrary-precision constants and arrives with comptime. The range
+  *check* is now exact for every type the language has.
+
 - **The checker closed two holes the dynamic tier had papered over.**
   Both are language changes, both make an existing annotation mean
   what `DESIGN.md` already said it meant, and both changed a test that

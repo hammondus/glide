@@ -1,0 +1,31 @@
+// Integer literals are magnitudes, and the type they land in decides
+// what they become. Every line here was wrong before M4b: literals
+// were parsed with ParseInt and the error discarded, so anything past
+// 2^63-1 silently clamped, i64's minimum was unwritable, and an
+// integer literal in a Float context stayed an integer.
+fn main() {
+    // Both ends of the range, which no int64 can hold together.
+    let big: u64 = 18446744073709551615
+    let small: Int = -9223372036854775808
+    println(big)
+    println(small)
+
+    // An untyped operand adopts the other side's type.
+    println(big - 1)
+    println(small + 1)
+
+    // A literal in a Float context is a Float — this answered 2
+    // before, because the 5 was built as an integer and `/` was
+    // integer division.
+    let f: Float = 5
+    println(f / 2)
+    println(1 + 1.5)
+
+    // The narrow sized types, at their exact edges.
+    let a: u8 = 255
+    let b: i8 = -128
+    let c: i32 = 2147483647
+    println(a)
+    println(b)
+    println(c)
+}
