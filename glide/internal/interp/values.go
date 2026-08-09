@@ -100,9 +100,24 @@ type (
 		Ok bool
 		V  Value // inner value, or *ErrV
 	}
+	// Error is BOXED, on the same argument that boxed Option: every
+	// value in an `Error` slot is an *ErrV, never the raw thing it was
+	// built from. Erased until now, which cost three things — the type
+	// could carry no methods (`e.message()` dispatched on the dynamic
+	// String and failed), a concrete variant could be matched straight
+	// back out of an `Error`, and a program-made error printed
+	// `Err("msg")` where a host error printed `Err(msg)`.
+	//
+	// Held is the concrete error this boxes — the String, the user
+	// variant, whatever `Err(…)` was handed. It is what `find` walks
+	// the chain looking for, and it is the reason boxing does not
+	// *lose* the typed error it wraps: erasure moves from the
+	// representation to the API, where an escape hatch can be offered
+	// deliberately.
 	ErrV struct {
 		Msg   string
 		Cause Value // *ErrV or nil
+		Held  Value // the concrete error, or nil when there was none
 	}
 
 	ClosureV struct {
@@ -418,7 +433,11 @@ func eq(a, b Value, at source.Span) bool {
 	case *ErrV:
 		// Errors compare by message *and* cause, the whole chain:
 		// `context` builds one, and ignoring it would make two errors
-		// with different provenance compare equal.
+		// with different provenance compare equal. The boxed value is
+		// deliberately *not* compared — it is a view of the same
+		// failure the message already renders, and two errors whose
+		// messages and chains agree while their payloads do not is a
+		// state the boxing cannot produce.
 		y, ok := b.(*ErrV)
 		if !ok || x.Msg != y.Msg || (x.Cause == nil) != (y.Cause == nil) {
 			return false

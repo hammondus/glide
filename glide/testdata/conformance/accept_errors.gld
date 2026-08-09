@@ -1,0 +1,62 @@
+// `Error` is the dynamic error type application code returns.
+// **Anything is assignable to it** — that is what makes `Err("msg")`
+// need no ceremony and `?` propagate any callee's error into it with
+// no `from` to write — and it is **boxed**, so the value in an Error
+// slot is always an Error and never the raw thing it was built from.
+//
+// Erasure at the type level, not at the value level: the convenience
+// is kept, and the type still gets methods, a printable form that
+// matches a host error's, and a chain you can walk.
+type PortErr = NotANumber(String) | OutOfRange(Int)
+
+// A library types its failure modes, so callers match exhaustively
+// and adding a case breaks them at compile time.
+fn strict(s: String) -> Result<Int, PortErr> {
+    let Some(n) = s.parse_int() else { return Err(.NotANumber(s)) }
+    if n <= 0 || n >= 65536 { return Err(.OutOfRange(n)) }
+    Ok(n)
+}
+
+// An application boundary erases to Error. The `?` boxes: no `from`
+// exists for Error and none ever will.
+fn app(s: String) -> Result<Int, Error> {
+    Ok(strict(s).context("reading $PORT")?)
+}
+
+// Every one of these is a coercion site the checker has to record.
+fn shapes() -> Error {
+    let bound: Error = "a bare String coerces"
+    let from_call: Error = describe(bound)
+    let _: Result<Int, Error> = Err("in a Result")
+    let _: List<Error> = ["in a list"]
+    let _: Error? = "in an Option"
+    from_call
+}
+
+fn describe(e: Error) -> Error { e.context("described") }
+
+fn main() {
+    println("{app("8080")}")
+    println("{app("99999")}")
+
+    match app("http") {
+        Ok(n) => println("port {n}")
+        Err(e) => {
+            // The four methods. `message` is this link only; the whole
+            // chain is what interpolation renders.
+            let msg: String = e.message()
+            let up: Error? = e.cause()
+            let more: Error = e.context("outer")
+            println("{msg} | {up} | {more}")
+
+            // find is the typed escape hatch, and it walks the chain
+            // rather than only the top link.
+            match e.find(PortErr) {
+                Some(NotANumber(s)) => println("recovered: not a number {s}")
+                Some(OutOfRange(n)) => println("recovered: out of range {n}")
+                None                => println("some other failure")
+            }
+        }
+    }
+    println("{shapes()}")
+}

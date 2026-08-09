@@ -252,6 +252,20 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call, want types.Type) types.Type
 	if app, ok := recv.(*types.App); ok && app.C == types.Scope && f.Name == "spawn" {
 		return c.spawnCall(x)
 	}
+
+	// `e.find(ConfigError)` — the typed escape hatch out of a dynamic
+	// Error. Special-cased because its result type *is* its argument,
+	// which no signature in the tables can say.
+	//
+	// The type is passed as a value rather than as `find<T>()`:
+	// `e.find<T>()` cannot be parsed — it reads as a field access
+	// followed by `<`, the turbofish problem — and Glide already has
+	// types in value position (`Tree.new()`), so this needs no new
+	// syntax at all. DESIGN.md's original `find<ConfigError>()`
+	// spelling is superseded.
+	if app, ok := recv.(*types.App); ok && app.C == types.Error && f.Name == "find" {
+		return c.findCall(x)
+	}
 	sig, modelled := c.methodOf(recv, f.Name)
 	if sig == nil {
 		c.inferArgs(x)
@@ -295,6 +309,35 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call, want types.Type) types.Type
 // `mut` binding, because the parent going on to mutate it is the
 // data-race archetype — and unlike most races this one is statically
 // visible, since mut-ness is known and spawn is a known boundary.
+// findCall types `e.find(SomeType)`. The argument must be a type used
+// in value position — a *types.Meta — and the result is an Option of
+// it, because the chain may not hold one.
+//
+// Restricted to *named* types deliberately. `e.find(Int)` would ask
+// whether some link in the chain is an Int, which is a question about
+// a representation rather than about an error, and answering it would
+// invite `find(String)` as a way to read a message that `message()`
+// already gives properly.
+func (c *checker) findCall(x *ast.Call) types.Type {
+	if len(x.Args) != 1 {
+		c.inferArgs(x)
+		c.errf(x.Span, "find takes one type, as in e.find(MyError)")
+		return types.Unknown
+	}
+	arg := c.infer(x.Args[0])
+	m, isType := arg.(*types.Meta)
+	if !isType {
+		c.errf(span(x.Args[0]), "find takes a type, as in e.find(MyError) — found %s", types.Default(arg))
+		return types.Unknown
+	}
+	n, isNamed := m.T.(*types.Named)
+	if !isNamed {
+		c.errf(span(x.Args[0]), "find looks for a declared error type; %s is built in", m.T)
+		return types.Unknown
+	}
+	return types.Opt(n)
+}
+
 func (c *checker) spawnCall(x *ast.Call) types.Type {
 	saved := c.spawned
 	c.spawned = map[string]source.Span{}

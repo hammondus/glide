@@ -650,6 +650,10 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			}
 			return StrV(r.body)
 		}
+	case *ErrV:
+		if v, handled := in.errorMethod(r, name, args, at); handled {
+			return v
+		}
 	case *OutputV:
 		if v, handled := r.method(name, args, at); handled {
 			return v

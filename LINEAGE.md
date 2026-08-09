@@ -1577,6 +1577,46 @@ incident generator). The out-list is discipline too: no GUI, no ORM,
 no ML, ever; protocol clients with living peripheries (SMTP) live on
 the `x/` porch where they can churn at the world's speed.
 
+## The dynamic error type: erased where, exactly
+
+- **2009** — Go ships `error` as an interface, so the dynamic error
+  type is a *box* from day one: an `error` value holds a concrete error
+  and you get at it with a type assertion. The cost is on the other
+  side — there is no `Result`, so failure modes cannot be enumerated
+  and `errors.Is`/`As` (2019) are pattern matching rebuilt out of
+  pointer comparisons and reflection.
+- **2015–2023** — Rust ships `Result` and *no* default error type, and
+  the ecosystem spends eight years finding one: `error-chain` (2016) →
+  `failure` (2017) → `anyhow` + `thiserror` (2019, and still the
+  answer). `anyhow::Error` is a box holding any `std::error::Error`
+  plus a context chain, with `downcast_ref::<T>()` to get back out.
+  `Box<dyn Error>` in std is the same bargain, spelled worse.
+- **The common shape**, arrived at independently: the dynamic error is
+  *permissive about what goes in* and *a real value once it is in*.
+  Nobody ships one that is a bare untyped hole, because a hole cannot
+  carry `source()`/`context()`/`downcast`, which is most of what an
+  application error type is for.
+- **Turbofish, 2015** — Rust needs `::<>` because `f<T>(x)` is
+  ambiguous with comparison in an expression grammar. C# and Java
+  resolve it with lookahead hacks; Go 1.18 chose `f[T]` outright to
+  avoid the problem. The cost is visible in every `collect::<Vec<_>>()`
+  anyone has ever written.
+
+**Glide takes** the split explicitly: `Error` is erased at the **type**
+level — anything is assignable to it, so `Err("config is empty")` and
+`?`-propagation need no ceremony and no `from` — and boxed at the
+**value** level, so it is a real value with `message()`, `cause()`,
+`context()` and the chain-walking `find`. Shipping it erased at *both*
+levels first is how the difference got learned: the type could carry no
+methods at all, because `e.message()` dispatched on whatever String
+happened to be in the slot.
+
+`find` takes the type **as a value** — `e.find(ConfigError)` — rather
+than `find<ConfigError>()`. Glide has no turbofish and this is not the
+feature to invent one for; types already appear in value position
+(`Tree.new()`), so the argument form needs no new syntax and checks
+through the same `Meta` machinery.
+
 ## Equality: structural, universal, and order-blind for maps
 
 - **1991–2018** — Python's dict goes from unordered, to

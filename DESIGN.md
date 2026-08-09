@@ -866,14 +866,53 @@ pointer comparisons. Ship both halves in the stdlib, day one:
   could hold something that was not one of its variants at all. The
   free-conversion half is exactly why `Error` is the right signature
   for application code: it needs no `from` and never will.
+- **`Error` is erased at the type level and boxed at the value level**
+  (ratified 2026-08-09, after shipping it erased at both and finding
+  what that cost). *Anything is assignable to `Error`* — that is the
+  convenience, and it is what makes `Err("config is empty")` and free
+  `?`-propagation work. But the value in an `Error` slot is always an
+  `Error`, never the raw thing it was built from.
+
+  Erased at both levels, the type could carry **no methods**:
+  `let e: Error = "x"` then `e.message()` dispatched on the dynamic
+  `String` and failed, so `message()` and the `cause()` below could
+  not be added without the answer depending on how the error was made.
+  A concrete variant could also be matched straight back out of an
+  `Error`, which was erasure leaking rather than a feature; and a
+  program-made error printed `Err("msg")` where a host error printed
+  `Err(msg)`. Boxing keeps the convenience and pays none of that.
+  Same argument as boxing `Option`, and the same shape of fix: the
+  checker records each coercion site, the evaluator boxes there.
+
+  The boxing is **idempotent**, unlike Option's. A site recorded where
+  the value was an `Error` already is harmless, which is what lets the
+  coercion be recorded even where the source type is `Unknown` — and
+  the alternative, a double-boxed error whose message is the rendering
+  of another error, reads almost right and is very hard to spot.
 - **Context is a method**: `open(path).context("loading config")?`.
-  The `Error` trait carries `cause() -> Error?`; printing renders the
-  chain. (Go's `%w` gets these semantics right with the worst possible
-  syntax — wrapping controlled by a format verb.)
-- **Chain-walking downcast**: `err.find<ConfigError>()` walks the cause
-  chain for a typed error. Needing it deep in application code is a smell
-  that a boundary should have been typed — but the escape hatch is cheap
-  and Go's `Is` proves it gets used.
+  `Error` carries `message() -> String` (this link only — the chain is
+  what interpolation renders), `cause() -> Error?`, and `context(msg)`;
+  printing renders the chain. (Go's `%w` gets these semantics right
+  with the worst possible syntax — wrapping controlled by a format
+  verb.)
+- **Chain-walking downcast**: `err.find(ConfigError)` walks the cause
+  chain for a typed error, returning `ConfigError?`. Needing it deep in
+  application code is a smell that a boundary should have been typed —
+  but the escape hatch is cheap and Go's `Is` proves it gets used.
+
+  Spelled with the type **as a value**, not as `find<ConfigError>()`.
+  The generic spelling cannot be parsed: `e.find<T>()` reads as a field
+  access followed by `<`, the turbofish problem, and inventing
+  turbofish for one method costs more than the argument does. Glide
+  already has types in value position (`Tree.new()`), the checker types
+  it through `types.Meta`, and it restricts to *declared* types on
+  purpose — `find(String)` would be a way to read a message that
+  `message()` already gives properly.
+
+  Because Error is boxed, a variant pattern can no longer match one
+  directly. That is a **reported** error naming `find`, not a silently
+  dead arm: turning a live match arm into a dead one without saying so
+  is precisely the kind of change that must never land quietly.
 - **Handle-in-place: no dedicated construct.** GRAMMAR.md's sketch
   proposed `or |e| { … }` (Zig's `catch` in closure pipes); declined
   in favour of its parts. Wrap-and-propagate is `?`-conversion (the
@@ -2390,43 +2429,6 @@ scripting tail wagging the compiled dog. Decided:
   at this richness.
 
 ## Open questions (decide before/while building)
-
-- **Should `Error` be boxed?** (raised 2026-08-09, deferred by the
-  dogfood rule.) `Error` is *erased* today: it accepts any value and an
-  `Error` slot holds whatever it was given. That is what makes
-  `Err("config is empty")` and free `?`-propagation work, and it is
-  documented as deliberate. It has two consequences that were not:
-
-  1. **`Error` can carry no methods.** `let e: Error = "x"` then
-     `e.message()` dispatches on the *dynamic* type and reports
-     `String has no method "message"`. So `message()`, and the
-     `cause() -> Error?` accessor DESIGN.md's Errors section already
-     names, cannot be added without the answer depending on how the
-     error was made. That is a trap, not a gap.
-  2. **Erasure leaks.** `match f() { Err(NotFound(id)) => … }` matches a
-     concrete variant straight out of an `Error` slot. It works, and it
-     is not designed to — the designed route is `find<ConfigError>()`,
-     which does not exist yet.
-  3. **Two errors print differently.** `println(r)` on a program-made
-     error shows `Err("port out of range")` — quoted, because the slot
-     holds a String and `render` quotes strings inside containers —
-     while a host error shows `Err(open /x: no such file)`. Unwrapping
-     with `match` and interpolating hides it, which is what real code
-     does, so this is a wart rather than a bug. It is still the
-     erasure showing through.
-
-  Boxing fixes both and is the same lesson M4c learned boxing `Option`,
-  but it removes (2) and so has to land together with `find`. Note
-  `err.find<ConfigError>()` **does not parse** — `e.find<T>()` reads as
-  a field access followed by `<`, the turbofish problem. The way out is
-  probably `e.find(ConfigError)`, passing the type as a value: Glide
-  already has types-as-values (`Tree.new()`), it checks through
-  `types.Meta`, and it avoids inventing generic-call syntax for one
-  method.
-
-  Deferred because `Err("msg")` covers the everyday case today, and
-  the forcing evidence is a real program that wants a cause chain or a
-  typed boundary — not a hypothetical one.
 
 - **The or-block residue test** (`or |e| { … }` deferred): the
   construct was declined in favour of its parts — `?`-conversion

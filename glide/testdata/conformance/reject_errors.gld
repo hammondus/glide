@@ -1,0 +1,30 @@
+// Error is boxed, and the two consequences that would otherwise bite
+// silently are reported by name: a variant pattern can no longer match
+// straight out of an Error, and `find` takes a declared type.
+type PortErr = NotANumber(String) | OutOfRange(Int)
+
+fn app() -> Result<Int, Error> { Err(PortErr.OutOfRange(9)) }
+
+fn main() {
+    // This used to work, because Error was erased at the value level
+    // too. Boxing would otherwise turn a live arm into a silently dead
+    // one, which is exactly the kind of change that must not land
+    // quietly.
+    match app() {
+        Ok(n) => println("{n}")
+        Err(OutOfRange(n)) => println("{n}")  // error: cannot be matched against an Error
+        Err(e) => println("{e}")
+    }
+
+    match app() {
+        Ok(n) => println("{n}")
+        Err(e) => {
+            println(e.find())              // error: find takes one type, as in e.find(MyError)
+            println(e.find(PortErr, 1))    // error: find takes one type, as in e.find(MyError)
+            println(e.find("PortErr"))     // error: find takes a type, as in e.find(MyError) — found String
+            println(e.find(Int))           // error: find looks for a declared error type; Int is built in
+            println(e.message(1))          // error: takes 0 argument(s), got 1
+            println(e.wat())               // error: Error has no method "wat"
+        }
+    }
+}

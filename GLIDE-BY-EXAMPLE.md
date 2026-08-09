@@ -660,29 +660,29 @@ fn main() {
     println(parse_port("http"))
 }
 // Ok(8080)
-// Err("port out of range: 99999")
-// Err("not a number: http")
+// Err(port out of range: 99999)
+// Err(not a number: http)
 ```
 
-Note the quotes. `Error` is *erased* — the slot holds whatever it was
-given, here a String — so printing the whole `Result` shows it as the
-String it is, while a host error prints bare. Unwrap it and the
-difference goes away, because interpolation is what you actually use:
+`Error` is **boxed**: whatever you hand `Err` in an `Error` position
+becomes a real Error, so a program-made one and a host one are the
+same kind of thing and print the same way. That is what lets `Error`
+carry methods.
 ```rust
-fn main() {
-    match parse_port("http") {
-        Ok(n)  => println("port {n}")
-        Err(e) => println("failed: {e}")
-    }
-}
-
 fn parse_port(s: String) -> Result<Int, Error> {
     match s.parse_int() {
         Some(n) => Ok(n)
         None    => Err("not a number: {s}")
     }
 }
-// failed: not a number: http
+
+fn main() {
+    match parse_port("http") {
+        Ok(n)  => println("port {n}")
+        Err(e) => println("{e.message()} / cause {e.cause()}")
+    }
+}
+// not a number: http / cause None
 ```
 
 `context` adds a breadcrumb to an `Err` and passes an `Ok` through, so
@@ -705,16 +705,24 @@ fn parse_port(s: String) -> Result<Int, Error> {
 }
 
 fn main() -> Result<(), Error> {
-    println(load("/nonexistent/config"))
+    match load("/nonexistent/config") {
+        Ok(port) => println("port {port}")
+        Err(e)   => {
+            println("{e}")
+            println("top:   {e.message()}")
+            println("cause: {e.cause()}")
+        }
+    }
     Ok(())
 }
-// Err(reading /nonexistent/config: open /nonexistent/config: no such file or directory)
+// reading /nonexistent/config: open /nonexistent/config: no such file or directory
+// top:   reading /nonexistent/config
+// cause: Some(open /nonexistent/config: no such file or directory)
 ```
 
 A library defines its failure modes as a sum type instead, so callers
 can match them exhaustively and adding a case breaks them at compile
-time. `?` still converts one into an `Error` at any application
-boundary.
+time. `?` still boxes one into an `Error` at any application boundary.
 ```rust
 type PortErr = NotANumber(String) | OutOfRange(Int)
 
@@ -733,3 +741,41 @@ fn main() {
 }
 // out of range: 99999
 ```
+
+Once a typed error is inside an `Error` it is *inside* it — the box is
+the point, so a variant pattern will not match one, and the checker
+says so rather than letting the arm go quietly dead. `find` is the way
+back out, and it walks the whole cause chain.
+```rust
+type PortErr = NotANumber(String) | OutOfRange(Int)
+
+fn strict(s: String) -> Result<Int, PortErr> {
+    let Some(n) = s.parse_int() else { return Err(.NotANumber(s)) }
+    if n <= 0 || n >= 65536 { return Err(.OutOfRange(n)) }
+    Ok(n)
+}
+
+fn app(s: String) -> Result<Int, Error> {
+    Ok(strict(s).context("reading $PORT")?)
+}
+
+fn main() {
+    match app("99999") {
+        Ok(n)  => println("port {n}")
+        Err(e) => {
+            println("{e}")
+            match e.find(PortErr) {
+                Some(OutOfRange(n)) => println("recovered: out of range {n}")
+                Some(NotANumber(s)) => println("recovered: not a number {s}")
+                None                => println("some other failure")
+            }
+        }
+    }
+}
+// reading $PORT: OutOfRange(99999)
+// recovered: out of range 99999
+```
+
+Needing `find` deep in application code is a smell that a boundary
+should have been typed — but it is cheap, and Go's `errors.As` proves
+it gets used.

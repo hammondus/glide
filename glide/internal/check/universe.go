@@ -201,6 +201,16 @@ var ctorMethods = map[types.Ctor]map[string]*types.Func{
 		"contains_key": meth(types.Bool, p("k", tvK)),
 		"remove":       methMut(types.Opt(tvV), p("k", tvK)),
 	},
+	types.Error: {
+		"message": meth(types.String),
+		"cause":   meth(types.Opt(tErr)),
+		"context": meth(tErr, p("msg", types.String)),
+		// `find` is handled specially in dotCall: its result type is
+		// the *argument*, so it cannot be written here. The entry
+		// exists so the method is known to be on Error at all — an
+		// absent one would be reported as "Error has no method".
+		"find": meth(types.Unknown, p("t", types.Unknown)),
+	},
 	types.Output: {
 		"status": meth(types.Int),
 		"stdout": meth(types.String),

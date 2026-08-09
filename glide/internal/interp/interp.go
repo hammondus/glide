@@ -956,7 +956,7 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 	if sg != nil {
 		return v, sg
 	}
-	return in.wrapIf(e, v), nil
+	return in.errIf(e, in.wrapIf(e, v)), nil
 }
 
 func (in *Interp) evalRaw(e ast.Expr, env *Env) (Value, *sig) {
@@ -1120,6 +1120,16 @@ func (in *Interp) evalRaw(e ast.Expr, env *Env) (Value, *sig) {
 		// already an E, E.from converts it — Rust's From, in the
 		// trait-less associated-fn form until the checker era.
 		if target := env.fnRetErr(); target != "" && typeName(r.V) != target {
+			// Propagating into the dynamic Error boxes rather than
+			// converting: Error needs no `from` and never will
+			// (DESIGN.md), but it *is* boxed, so the value has to
+			// become an Error here. This is the one coercion site the
+			// checker's IntoError table cannot cover — the expression
+			// is the callee's, and its expectation is the enclosing
+			// function's return type, not this call's.
+			if target == "Error" {
+				return UnitV{}, &sig{val: &ResultV{Ok: false, V: intoError(r.V)}}
+			}
 			if m := in.prog.Methods[target]["from"]; m != nil && m.Self == ast.NoSelf {
 				conv := in.callFuncNamed(m, nil, []Value{r.V}, nil, ex.Span)
 				return UnitV{}, &sig{val: &ResultV{Ok: false, V: conv}}

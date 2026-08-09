@@ -38,6 +38,19 @@ type Info struct {
 	// where: the expression's own type says `Int`, and nothing else
 	// distinguishes it from an `Int` going into an `Int`.
 	Wrap map[ast.Expr]bool
+
+	// IntoError marks the expressions where a value is coerced into
+	// the dynamic Error type. Error is boxed for the same reason
+	// Option is, and needs the same record: `Err("config is empty")`
+	// in a `Result<_, Error>` function has to build an Error around
+	// the String, and the expression's own type says `String`.
+	//
+	// Unlike Wrap this is a *hint* rather than an instruction — the
+	// evaluator's boxing is idempotent, so a site recorded where the
+	// value turns out to be an Error already is harmless. That lets it
+	// be recorded whenever the target is Error, including where the
+	// source type is Unknown and certainty is impossible.
+	IntoError map[ast.Expr]bool
 }
 
 // local is one binding in a lexical scope.
@@ -114,6 +127,7 @@ func File(f *ast.File, tab *program.Table) (*Info, error) {
 			Shorthand: map[*ast.DotName]*types.Variant{},
 			Funcs:     map[*ast.FuncDecl]*types.Func{},
 			Wrap:      map[ast.Expr]bool{},
+			IntoError: map[ast.Expr]bool{},
 		},
 		named:   map[string]*types.Named{},
 		fns:     map[string]*types.Func{},

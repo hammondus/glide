@@ -1882,8 +1882,12 @@ fn main() {
 		t.Fatalf("unconvertible propagation must not compile; got %v", err)
 	}
 
-	// Declaring the erased error type is the other way out, and it
-	// needs no `from` at all.
+	// Declaring the dynamic error type is the other way out, and it
+	// needs no `from` at all. What arrives is a real Error, not the
+	// String that was propagated: `?` into an `Error` boxes, which is
+	// the one coercion site the checker's IntoError table cannot see
+	// (the expression belongs to the callee, and the expectation is
+	// the *enclosing* function's return type).
 	out, err = runProg(t, `
 fn inner() -> Result<Int, String> { Err("raw") }
 fn outer() -> Result<Int, Error> {
@@ -1891,11 +1895,11 @@ fn outer() -> Result<Int, Error> {
 }
 fn main() {
     println(match outer() {
-        Err(e) => "got {e:?}"
+        Err(e) => "got {e.message()} / {e.cause()}"
         _      => "?"
     })
 }`)
-	if err != nil || out != "got \"raw\"\n" {
+	if err != nil || out != "got raw / None\n" {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 }

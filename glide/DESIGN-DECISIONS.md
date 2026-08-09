@@ -1034,6 +1034,70 @@ One more untyped-literal leak fixed alongside: `1 == "one"` reported
 appears nowhere in the language. Same defaulting fix as the "no
 method" diagnostic.
 
+### Boxing Error
+
+`Error` was erased at the *type* level and at the *value* level. The
+first is the design — anything is assignable to `Error`, which is what
+makes `Err("config is empty")` and free `?`-propagation work. The
+second was an accident of it, and cost three things:
+
+1. **The type could carry no methods.** `let e: Error = "x"` then
+   `e.message()` dispatched on the dynamic `String` and reported
+   `String has no method "message"`. So `message()` and the `cause()`
+   the Errors design already named could not be added at all without
+   the answer depending on how the error was made.
+2. **Erasure leaked.** `match f() { Err(NotFound(id)) => … }` matched a
+   concrete variant straight out of an `Error` slot.
+3. **Two errors printed differently.** `Err("msg")` for a program-made
+   one (quoted — the slot held a String) against `Err(msg)` for a host
+   one.
+
+Boxing fixes all three. The machinery is Option's, reused: the checker
+records each coercion site in `Info.IntoError`, and the evaluator boxes
+at `eval`'s one chokepoint. Two differences from the Option case, both
+deliberate:
+
+- **The boxing is idempotent.** `intoError` passes an existing `*ErrV`
+  through untouched, so `IntoError` is a *hint* rather than an
+  instruction and can be recorded even where the source type is
+  `Unknown`. `Wrap` cannot afford that — double-wrapping an Option is a
+  different value — but a double-boxed error is worse than merely
+  wrong: its message is the rendering of another error, which reads
+  almost right and is very hard to spot. Idempotence removes the whole
+  failure mode rather than relying on the checker never over-recording.
+- **One coercion site the checker cannot see.** `?` propagating into a
+  `Result<_, Error>` boxes at the propagation point in the evaluator,
+  because the expression belongs to the *callee* and the expectation is
+  the enclosing function's return type. It sits beside the existing
+  `E.from` lookup, and takes precedence: `Error` needs no `from` and
+  never will.
+
+**`find` takes the type as a value.** `e.find(ConfigError)`, not
+DESIGN.md's original `find<ConfigError>()` — which does not parse, and
+would not without turbofish, because `e.find<T>()` reads as a field
+access followed by `<`. Glide already has types in value position
+(`Tree.new()`), so the argument form needs no new syntax and checks
+through `types.Meta`. Restricted to *declared* types: `find(String)`
+would be a way to read a message that `message()` already gives
+properly, and `find(Int)` asks about a representation rather than
+about an error.
+
+**The breaking change is reported, not silent.** `Err(NotFound(id))`
+against an `Error` used to work and now cannot. A boxed value simply
+would not match, turning a live arm into a dead one with no
+diagnostic — so `bindCtor` reports it by name and points at
+`e.find(MyErr)`. That guardrail is most of the reason this change is
+safe to make at all.
+
+`ErrV` gained a `Held` field for the concrete error. It is what `find`
+walks for, and it is why boxing does not *lose* the typed error: the
+erasure moves from the representation to the API, where the escape
+hatch is offered deliberately instead of falling out by accident.
+Equality deliberately ignores `Held` — it is a view of the same failure
+the message already renders, and two errors whose messages and chains
+agree while their payloads differ is a state the boxing cannot
+produce.
+
 **Found by using it.** Two things surfaced within ten minutes of
 writing the first real script, which is the entire argument for
 writing one:

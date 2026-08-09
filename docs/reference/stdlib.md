@@ -444,6 +444,37 @@ yields `(k, v)` tuples in insertion order ✓.
 
 Consume with `?` (propagate) or `match Ok(v) / Err(e)`.
 
+### Error
+
+The dynamic error type application code returns. **Anything is
+assignable to it**, so `Err("config is empty")` needs no ceremony and
+`?` propagates any callee's error into it with no `from` to write —
+but the value in an `Error` slot is always an `Error`, never the raw
+thing it was built from. Erased at the *type* level, boxed at the
+*value* level.
+
+| Method | Signature | Notes |
+|---|---|---|
+| `message()` | `-> String` | **this link only.** The whole chain is what interpolation renders (`"{e}"`), and a `message()` that returned the chain would leave no way to get just this one |
+| `cause()` | `-> Error?` | the next link, `None` at the end |
+| `context(msg)` | `(String) -> Error` | a new Error wrapping this one. The `Result` form above is the same thing where you usually want it |
+| `find(SomeType)` | `(type) -> SomeType?` | walks the **whole** cause chain for a concrete error of that type |
+
+`find` takes the type **as a value** — `e.find(ConfigError)`, not
+`find<ConfigError>()`. Glide has no turbofish and this is not the
+feature to invent one for: `e.find<T>()` cannot be parsed (it reads as
+a field access followed by `<`), while types already appear in value
+position (`Tree.new()`). Only *declared* types are accepted:
+`find(String)` would be a way to read a message that `message()`
+already gives properly.
+
+Because `Error` is boxed, a **variant pattern cannot match one** —
+`Err(NotFound(id))` against a `Result<_, Error>` is a compile error
+naming `find`, not a silently dead arm. Needing `find` deep in
+application code is a smell that a boundary should have been typed;
+type your library's failure modes as a sum type and let `?` box them
+at the application edge.
+
 ### Iterator
 
 | Method | Signature | Notes |

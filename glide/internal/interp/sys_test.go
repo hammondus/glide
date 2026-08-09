@@ -480,3 +480,82 @@ func TestArithmeticTraps(t *testing.T) {
 		}
 	}
 }
+
+// Error is boxed: whatever lands in an Error slot becomes an Error,
+// so the type can carry methods, a program-made error prints like a
+// host one, and the concrete error is reachable through `find` rather
+// than by matching it straight out of the box.
+func TestErrorIsBoxed(t *testing.T) {
+	out, err := runProg(t, `
+type PortErr = NotANumber(String) | OutOfRange(Int)
+
+fn strict(s: String) -> Result<Int, PortErr> {
+    let Some(n) = s.parse_int() else { return Err(.NotANumber(s)) }
+    if n <= 0 || n >= 65536 { return Err(.OutOfRange(n)) }
+    Ok(n)
+}
+
+fn app(s: String) -> Result<Int, Error> { Ok(strict(s).context("reading $PORT")?) }
+
+fn main() {
+    // A String coerced into an Error prints bare, exactly as a host
+    // error does — the quoting difference erasure used to produce is
+    // gone, because there is no bare String in the slot any more.
+    let plain: Result<Int, Error> = Err("no port given")
+    println("{plain}")
+
+    match plain {
+        Ok(_) => println("impossible")
+        Err(e) => println("{e.message()} | {e.cause()}")
+    }
+
+    // ? into an Error boxes at the propagation point.
+    println("{app("8080")} {app("99999")}")
+
+    match app("http") {
+        Ok(_) => println("impossible")
+        Err(e) => {
+            println("{e}")
+            println("{e.message()} | {e.cause()}")
+            println("{e.find(PortErr)}")
+        }
+    }
+
+    // find walks the whole chain, not just the top link.
+    match app("0").context("layer two").context("layer three") {
+        Ok(_) => println("impossible")
+        Err(e) => println("{e.message()} -> {e.find(PortErr)}")
+    }
+
+    // A chain with nothing typed in it finds nothing.
+    match plain.context("outer") {
+        Ok(_) => println("impossible")
+        Err(e) => println("{e} -> {e.find(PortErr)}")
+    }
+
+    // Boxing is idempotent: an Error coerced into an Error slot again
+    // is not double-wrapped, so its message stays its own rather than
+    // becoming the rendering of another error.
+    let once: Error = "just once"
+    let twice: Error = once
+    println("{twice.message()} | {twice.cause()}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"Err(no port given)",
+		"no port given | None",
+		"Ok(8080) Err(reading $PORT: OutOfRange(99999))",
+		`reading $PORT: NotANumber("http")`,
+		`reading $PORT | Some(NotANumber("http"))`,
+		`Some(NotANumber("http"))`,
+		"layer three -> Some(OutOfRange(0))",
+		"outer: no port given -> None",
+		"just once | None",
+		"",
+	}, "\n")
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}

@@ -32,6 +32,7 @@ func (c *checker) checkExpr(e ast.Expr, want types.Type) types.Type {
 		// insert_node(…)` at a `Node<T>?` field unwrapped in tree.gld.
 		got := c.typeOf(e, want)
 		c.noteWrap(e, got, want)
+		c.noteIntoError(e, got, want)
 		return got
 	}
 	got := c.typeOf(e, want)
@@ -39,6 +40,7 @@ func (c *checker) checkExpr(e ast.Expr, want types.Type) types.Type {
 		c.rangeCheck(e, want)
 		c.settle(e, got, want)
 		c.noteWrap(e, got, want)
+		c.noteIntoError(e, got, want)
 		return got
 	}
 	if types.IsOpaque(got) || types.IsOpaque(want) {
@@ -126,6 +128,29 @@ func (c *checker) noteWrap(e ast.Expr, got, want types.Type) {
 		return // a diverging expression produces no value to wrap
 	}
 	c.info.Wrap[e] = true
+}
+
+// noteIntoError records a coercion into the dynamic Error type. Error
+// is boxed, so `Err("config is empty")` in a `Result<_, Error>`
+// function has to build an Error around the String, and — as with the
+// Option wrap — the expression's own type gives no sign of it.
+//
+// Recorded even when `got` is Unknown, which is the difference from
+// noteWrap: the evaluator's boxing is idempotent, so the cost of a
+// false positive is nothing, while the cost of a miss is an Error slot
+// holding a bare value and every method on it failing.
+func (c *checker) noteIntoError(e ast.Expr, got, want types.Type) {
+	w, ok := want.(*types.App)
+	if !ok || w.C != types.Error {
+		return
+	}
+	if g, isApp := got.(*types.App); isApp && g.C == types.Error {
+		return
+	}
+	if types.IsNever(got) {
+		return // a diverging expression produces no value to box
+	}
+	c.info.IntoError[e] = true
 }
 
 func (c *checker) settle(e ast.Expr, got, want types.Type) {

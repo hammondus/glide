@@ -322,6 +322,18 @@ func (c *checker) bindCtor(x *ast.CtorPat, t types.Type) {
 		}
 	}
 	vi, known := c.tab.Variants[x.Name]
+	// Matching a variant against a dynamic Error can never succeed:
+	// Error is boxed, so the value under it is an Error and not the
+	// concrete thing it wraps. This used to work — erasure meant the
+	// raw variant sat in the slot — and boxing it would otherwise turn
+	// a live arm into a silently dead one, which is the whole reason
+	// this diagnostic exists rather than the change landing quietly.
+	if app, ok := t.(*types.App); ok && app.C == types.Error && known {
+		c.errf(x.Span, "%s cannot be matched against an Error: it is the dynamic error type, "+
+			"so the concrete error is inside it — recover it with e.find(%s)", x.Name, vi.Type)
+		c.bindArgs(x, nil)
+		return
+	}
 	if !known {
 		c.errf(x.Span, "%s is not a constructor (a capitalised name in a pattern names a variant; lowercase binds)", x.Name)
 		c.bindArgs(x, nil)
