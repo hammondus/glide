@@ -58,12 +58,12 @@ Designed growth (○): the committed core set — `http`, `tls`,
 |---|---|---|---|
 | `s.spawn(f)` | `(fn() -> T) -> Task<T>` | scope handles only; error if the scope has ended | ✓ |
 | `t.join()` | `() -> T` | blocks (cancellation point); returns exactly what the closure returned | ✓ |
-| `channel()` | `() -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous | ○ |
-| `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ○ |
-| `tx.send(v)` | `(T) -> ()` | blocks per capacity; **panics** on closed channel (sender coordination bug) | ○ |
-| `tx.close()` | `() -> ()` | idempotent; only the sender half has it | ○ |
-| `rx.recv()` | `() -> Option<T>` | blocks; `None` = closed and drained | ○ |
-| `for v in rx` | — | consumes until closed (receiver satisfies the iteration protocol) | ○ |
+| `channel()` | `() -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous | ✓ |
+| `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ✓ |
+| `tx.send(v)` | `(T) -> ()` | blocks per capacity (cancellation point); **panics** on closed channel (sender coordination bug) | ✓ |
+| `tx.close()` | `() -> ()` | idempotent; only the sender half has it | ✓ |
+| `rx.recv()` | `() -> Option<T>` | blocks (cancellation point); `None` = closed and drained. M2 wart: Option is unboxed, so a *sent* `None` reads as end-of-stream | ✓ |
+| `for v in rx` | — | consumes until closed (receiver satisfies the iteration protocol) | ✓ |
 | `s.deadline()` | `() -> Option<Instant>` | nearest enclosing timeout, inherited | ○ |
 
 Both halves clone (mpmc). Blocking operations here are cancellation

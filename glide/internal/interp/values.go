@@ -84,7 +84,13 @@ type (
 	// ScopeV is the handle bound by `scope s { … }`; TaskV is what
 	// spawn returns. Both are meaningful only while their scope runs.
 	ScopeV struct{ st *scopeState }
-	TaskV  struct {
+
+	// Channel halves: channel() returns the pair, and the split is
+	// structural — no whole-channel value exists. Copies share state
+	// (mpmc); only the sender half can close.
+	SenderV   struct{ st *chanState }
+	ReceiverV struct{ st *chanState }
+	TaskV     struct {
 		done      chan struct{} // closed after result/pan are set
 		result    Value
 		pan       any  // child panic; the scope re-panics it at exit
@@ -159,6 +165,10 @@ func typeName(v Value) string {
 		return "Scope"
 	case *TaskV:
 		return "Task"
+	case *SenderV:
+		return "Sender"
+	case *ReceiverV:
+		return "Receiver"
 	}
 	return fmt.Sprintf("%T", v)
 }
@@ -255,6 +265,10 @@ func render(v Value, quoted bool) string {
 		return "<scope>"
 	case *TaskV:
 		return "<task>"
+	case *SenderV:
+		return "<sender>"
+	case *ReceiverV:
+		return "<receiver>"
 	}
 	return fmt.Sprintf("%v", v)
 }

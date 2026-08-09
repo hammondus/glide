@@ -79,8 +79,8 @@ Reserved for later eras (using one today is a parse error):
 | `derive` | comptime derive (Json, Debug, Enum, …) | ○ |
 
 Also unbindable: the free builtin names (`print`, `println`,
-`eprint`, `eprintln`, `expect`, `Ok`, `Err`, `Some`) are reserved —
-declaring them is an error ✓ — and `None` is a literal.
+`eprint`, `eprintln`, `expect`, `channel`, `Ok`, `Err`, `Some`) are
+reserved — declaring them is an error ✓ — and `None` is a literal.
 
 ## Literals
 
@@ -288,9 +288,10 @@ patterns in function signatures, ref/binding modes.
   the dev tier, so `+` `-` `*` `/` (MinInt/-1) and unary `-` on
   MinInt trap with a line-numbered error ✓; release-tier wrapping
   and the explicit `wrapping_*` ops arrive with the compiler ○.
-- Structured concurrency: `scope`/`spawn`/`join` and cancellation run
-  in the interpreter ✓ (see the keyword table). Channels, `select`,
-  and the time types (so `scope(timeout:)`) are ○ — landing next.
+- Structured concurrency: `scope`/`spawn`/`join`, cancellation, and
+  channels run in the interpreter ✓ (see the keyword table and
+  stdlib Concurrency). `select` and the time types (so
+  `scope(timeout:)`) are ○ — landing next.
   M2 implementation note: tasks interleave exactly at blocking
   operations (one interpreter lock, released while blocked), which
   coincides with the ratified cancellation-point rule; release

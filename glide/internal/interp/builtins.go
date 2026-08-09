@@ -39,6 +39,25 @@ var builtins = map[string]*BuiltinV{
 	"Some": {Name: "Some", Fn: func(in *Interp, args []Value, line int) Value {
 		return one("Some", args, line)
 	}},
+	// channel() -> (tx, rx): rendezvous by default, channel(cap: n)
+	// buffered. No unbounded variant (recorded). The named form is
+	// translated to positional in evalCall.
+	"channel": {Name: "channel", Fn: func(in *Interp, args []Value, line int) Value {
+		capN := 0
+		switch len(args) {
+		case 0:
+		case 1:
+			n, ok := args[0].(IntV)
+			if !ok || n < 0 {
+				panic(rtErr{line, "channel cap must be a non-negative Int"})
+			}
+			capN = int(n)
+		default:
+			panic(rtErr{line, "channel takes no arguments or (cap: n)"})
+		}
+		tx, rx := newChannel(capN)
+		return TupleV{tx, rx}
+	}},
 }
 
 func one(name string, args []Value, line int) Value {
@@ -363,6 +382,30 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 			}
 			return l
 		}
+	case *SenderV:
+		switch name {
+		case "send":
+			in.chanSend(r, one("send", args, line), line)
+			return UnitV{}
+		case "close":
+			if len(args) != 0 {
+				panic(rtErr{line, "close takes no arguments"})
+			}
+			// Idempotent by design: with cloned senders and no
+			// deterministic drop, close must be safe from racing defers.
+			r.st.closeOnce.Do(func() { close(r.st.ch) })
+			return UnitV{}
+		}
+	case *ReceiverV:
+		switch name {
+		case "recv":
+			if len(args) != 0 {
+				panic(rtErr{line, "recv takes no arguments"})
+			}
+			return in.chanRecv(r)
+		case "close":
+			panic(rtErr{line, "only the sender half closes a channel"})
+		}
 	case *ScopeV:
 		switch name {
 		case "spawn":
@@ -571,6 +614,16 @@ func (in *Interp) iterate(v Value, line int) func() (Value, bool) {
 			k := it.keys[i]
 			i++
 			return TupleV{k, it.m[k]}, true
+		}
+	case *ReceiverV:
+		// `for v in rx` consumes until closed-and-drained — blocking
+		// recv per element, each a cancellation point.
+		return func() (Value, bool) {
+			v := in.chanRecv(it)
+			if _, isNone := v.(NoneV); isNone {
+				return nil, false
+			}
+			return v, true
 		}
 	}
 	panic(rtErr{line, fmt.Sprintf("%s is not iterable", typeName(v))})

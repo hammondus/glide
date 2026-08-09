@@ -1739,6 +1739,14 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 	if id, ok := ex.Fn.(*ast.IdentExpr); ok && id.Name == "expect" && env.lookup("expect") == nil {
 		return in.evalExpect(ex, env)
 	}
+	// channel(cap: n) — the one builtin with a named parameter; the
+	// name is validated here and the call proceeds positionally.
+	if id, ok := ex.Fn.(*ast.IdentExpr); ok && id.Name == "channel" && ex.Names != nil {
+		if len(ex.Names) != 1 || ex.Names[0] != "cap" {
+			panic(rtErr{ex.Line, "channel takes no arguments or (cap: n)"})
+		}
+		ex = &ast.Call{Fn: ex.Fn, Args: ex.Args, Line: ex.Line}
+	}
 	// Method / module calls: f.X.name(args)
 	if f, ok := ex.Fn.(*ast.Field); ok {
 		recv, sg := in.eval(f.X, env)

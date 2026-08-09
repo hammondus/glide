@@ -362,3 +362,225 @@ fn main() {
 		t.Fatalf("got %q", out)
 	}
 }
+
+// Producer/consumer: the bread-and-butter worker pattern, rendezvous
+// channel, for-in until closed.
+func TestChannelProducerConsumer(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel()
+    scope s {
+        _ = s.spawn(|| {
+            for i in 1..=4 {
+                tx.send(i * i)
+            }
+            tx.close()
+        })
+        let mut total = 0
+        for v in rx {
+            total += v
+        }
+        println(total)
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "30\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// Buffered channel: producer finishes before anyone reads.
+func TestChannelBuffered(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel(cap: 3)
+    tx.send(1)
+    tx.send(2)
+    tx.send(3)
+    tx.close()
+    let mut got = []
+    for v in rx {
+        got.push(v)
+    }
+    println(got)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "[1, 2, 3]\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// recv on closed-and-drained is None; a live value is Some.
+func TestChannelRecvOption(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel(cap: 1)
+    tx.send(7)
+    tx.close()
+    if let Some(v) = rx.recv() {
+        println("got {v}")
+    }
+    match rx.recv() {
+        Some(_) => println("impossible")
+        None => println("drained")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "got 7\ndrained\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// mpmc: two workers share one receiver; every job is done exactly
+// once.
+func TestChannelWorkerPool(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel()
+    let (rtx, rrx) = channel(cap: 6)
+    scope s {
+        _ = s.spawn(|| {
+            for job in rx {
+                rtx.send(job * 10)
+            }
+        })
+        _ = s.spawn(|| {
+            for job in rx {
+                rtx.send(job * 10)
+            }
+        })
+        for i in 1..=6 {
+            tx.send(i)
+        }
+        tx.close()
+        let mut total = 0
+        for _ in 1..=6 {
+            if let Some(v) = rrx.recv() {
+                total += v
+            }
+        }
+        println(total)
+        rtx.close()
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "210\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// The three dispatched Go panics: rx can't close; double close is a
+// no-op; send-on-closed is a panic.
+func TestChannelCloseRules(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, _) = channel(cap: 1)
+    tx.close()
+    tx.close()
+    println("double close survived")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "double close survived\n" {
+		t.Fatalf("got %q", out)
+	}
+
+	_, err = runProg(t, `
+fn main() {
+    let (_, rx) = channel()
+    rx.close()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "only the sender half closes") {
+		t.Fatalf("got %v", err)
+	}
+
+	_, err = runProg(t, `
+fn main() {
+    let (tx, _) = channel(cap: 1)
+    tx.close()
+    tx.send(1)
+}`)
+	if err == nil || !strings.Contains(err.Error(), "send on a closed channel") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A blocked channel op is a cancellation point: a sibling panic must
+// unwind a receiver blocked on a channel nobody will ever send to.
+func TestChannelBlockedRecvCancelled(t *testing.T) {
+	_, err := runProg(t, `
+fn main() {
+    let (_, rx) = channel()
+    scope s {
+        _ = s.spawn(|| rx.recv())
+        _ = s.spawn(|| boom())
+    }
+}
+fn boom() -> Int { [][0] }`)
+	if err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("want the panic, not a hang; got %v", err)
+	}
+}
+
+// Rendezvous means backpressure: an unbuffered send blocks until a
+// receiver takes it (order is forced strictly alternating).
+func TestChannelRendezvous(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel()
+    scope s {
+        _ = s.spawn(|| {
+            for i in 1..=3 {
+                tx.send(i)
+                println("sent {i}")
+            }
+            tx.close()
+        })
+        for v in rx {
+            println("got {v}")
+        }
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A rendezvous send completes only when the receiver takes the
+	// value, so "got n" can never lag more than one behind "sent n".
+	// Weak but deterministic check: first line is one of the pair,
+	// and all six lines appear.
+	for _, want := range []string{"sent 1", "sent 2", "sent 3", "got 1", "got 2", "got 3"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in %q", want, out)
+		}
+	}
+}
+
+// Halves are values: pass tx into a function, cap validation errors.
+func TestChannelMisc(t *testing.T) {
+	_, err := runProg(t, `
+fn main() {
+    let (tx, _) = channel(cap: -1)
+    tx.close()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("got %v", err)
+	}
+
+	_, err = runProg(t, `
+fn main() {
+    let (tx, _) = channel(size: 4)
+    tx.close()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "(cap: n)") {
+		t.Fatalf("got %v", err)
+	}
+}

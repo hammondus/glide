@@ -223,6 +223,67 @@ func (in *Interp) spawnTask(s *ScopeV, f Value, line int) Value {
 	return t
 }
 
+// Channels. The Go channel provides the entire engine: mpmc,
+// buffered/rendezvous, and closed-and-drained recv semantics match
+// the ratified design one-for-one. Send-on-closed is Go's runtime
+// panic, recovered into a Glide panic with a line number — it IS a
+// bug in the ratified semantics, just a diagnosable one.
+type chanState struct {
+	ch        chan Value
+	closeOnce sync.Once
+}
+
+func newChannel(cap int) (Value, Value) {
+	st := &chanState{ch: make(chan Value, cap)}
+	return &SenderV{st: st}, &ReceiverV{st: st}
+}
+
+// chanSend blocks until delivered; a cancellation unwinds, a close
+// (before or during) panics — a sender coordination bug.
+func (in *Interp) chanSend(s *SenderV, v Value, line int) {
+	cancel := in.cur.cancel
+	var cancelled, wasClosed bool
+	in.unblock(func() {
+		defer func() {
+			if p := recover(); p != nil {
+				wasClosed = true // Go: "send on closed channel"
+			}
+		}()
+		select {
+		case s.st.ch <- v:
+		case <-cancel:
+			cancelled = true
+		}
+	})
+	if cancelled {
+		panic(cancelUnwind{})
+	}
+	if wasClosed {
+		panic(rtErr{line, "send on a closed channel (only senders close — coordinate them)"})
+	}
+}
+
+// chanRecv blocks for a value; closed-and-drained is None.
+func (in *Interp) chanRecv(r *ReceiverV) Value {
+	cancel := in.cur.cancel
+	var v Value
+	var ok, cancelled bool
+	in.unblock(func() {
+		select {
+		case v, ok = <-r.st.ch:
+		case <-cancel:
+			cancelled = true
+		}
+	})
+	if cancelled {
+		panic(cancelUnwind{})
+	}
+	if !ok {
+		return NoneV{}
+	}
+	return v
+}
+
 // joinTask blocks until the child finishes and returns exactly what
 // its closure returned. A cancellation arriving first unwinds the
 // joiner; a panicked child unwinds it too (the scope is already
