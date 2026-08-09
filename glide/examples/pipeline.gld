@@ -1,0 +1,88 @@
+// pipeline.gld — the M3 concurrency surface in one program:
+// a worker pool over channels inside a scope, fan-in via select
+// with guards, and a timeout that cancels the whole tree.
+
+import time
+
+fn slow_square(n: Int) -> Int {
+    time.sleep(1.ms)
+    n * n
+}
+
+// Fan out jobs to two workers over a rendezvous channel; collect
+// results on a buffered one. The scope guarantees nothing leaks.
+fn pool_sum(upto: Int) -> Int {
+    let (jobs_tx, jobs_rx) = channel()
+    let (out_tx, out_rx) = channel(cap: 64)
+    scope s {
+        _ = s.spawn(|| {
+            for j in jobs_rx {
+                out_tx.send(slow_square(j))
+            }
+        })
+        _ = s.spawn(|| {
+            for j in jobs_rx {
+                out_tx.send(slow_square(j))
+            }
+        })
+        for i in 1..=upto {
+            jobs_tx.send(i)
+        }
+        jobs_tx.close()
+        let mut total = 0
+        for _ in 1..=upto {
+            total += out_rx.recv() ?? 0
+        }
+        total
+    }
+}
+
+// select with guards: drain two producers, disabling each channel's
+// arms as it closes — Go's nil-channel trick, spelled honestly.
+fn fan_in() -> Int {
+    let (atx, arx) = channel()
+    let (btx, brx) = channel()
+    scope s {
+        _ = s.spawn(|| {
+            for i in 1..=5 { atx.send(i) }
+            atx.close()
+        })
+        _ = s.spawn(|| {
+            for i in 1..=5 { btx.send(i * 10) }
+            btx.close()
+        })
+        let mut a_open = true
+        let mut b_open = true
+        let mut total = 0
+        for a_open || b_open {
+            select {
+                Some(v) = arx.recv() if a_open => { total += v }
+                None = arx.recv() if a_open => { a_open = false }
+                Some(v) = brx.recv() if b_open => { total += v }
+                None = brx.recv() if b_open => { b_open = false }
+            }
+        }
+        total
+    }
+}
+
+// scope(timeout:) is the whole cancellation story: no ctx, no
+// deadline parameter — the tree dies together and reports Timeout.
+fn with_deadline() -> String {
+    let r = scope(timeout: 25.ms) s {
+        _ = s.spawn(|| time.sleep(10.s))
+        time.sleep(10.s)
+        "finished"
+    }
+    match r {
+        Ok(msg) => msg
+        Err(Timeout) => "timed out (children cancelled and joined)"
+        Err(_) => "other"
+    }
+}
+
+fn main() {
+    println("pool_sum(10)  = {pool_sum(10)}")
+    println("fan_in()      = {fan_in()}")
+    println("with_deadline = {with_deadline()}")
+}
