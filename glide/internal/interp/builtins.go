@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -102,6 +103,46 @@ func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
 		}
 		in.exiting = true
 		panic(exitPanic{code: int(code)})
+	case "time.now":
+		if len(args) != 0 {
+			panic(rtErr{line, "time.now takes no arguments"})
+		}
+		return InstantV{T: time.Now()}
+	case "time.sleep":
+		d, ok := one("time.sleep", args, line).(DurationV)
+		if !ok {
+			panic(rtErr{line, fmt.Sprintf("time.sleep takes a Duration (e.g. 100.ms), got %s", typeName(args[0]))})
+		}
+		cancel := in.cur.cancel
+		timer := time.NewTimer(time.Duration(d))
+		cancelled := false
+		in.unblock(func() {
+			select {
+			case <-timer.C:
+			case <-cancel:
+				timer.Stop()
+				cancelled = true
+			}
+		})
+		if cancelled {
+			panic(cancelUnwind{})
+		}
+		return UnitV{}
+	case "time.after":
+		d, ok := one("time.after", args, line).(DurationV)
+		if !ok {
+			panic(rtErr{line, fmt.Sprintf("time.after takes a Duration, got %s", typeName(args[0]))})
+		}
+		// Just a channel: the timeout arm in a select is an ordinary
+		// recv case, nothing special in select itself (recorded).
+		tx, rx := newChannel(1)
+		go func() {
+			time.Sleep(time.Duration(d))
+			st := tx.(*SenderV).st
+			st.ch <- UnitV{}
+			st.closeOnce.Do(func() { close(st.ch) })
+		}()
+		return rx
 	case "fs.read_string":
 		path, ok := one("fs.read_string", args, line).(StrV)
 		if !ok {
@@ -114,6 +155,14 @@ func (in *Interp) moduleCall(mod, name string, args []Value, line int) Value {
 		return &ResultV{Ok: true, V: StrV(string(data))}
 	}
 	panic(rtErr{line, fmt.Sprintf("module %s has no function %q", mod, name)})
+}
+
+// Duration suffix constructors on Int and Float: 250.ms, 0.5.s.
+// `.mins` not `.min` (min is the obvious future math method); stops
+// at hours — days are calendar arithmetic (recorded).
+var durationUnits = map[string]time.Duration{
+	"ns": time.Nanosecond, "us": time.Microsecond, "ms": time.Millisecond,
+	"s": time.Second, "mins": time.Minute, "h": time.Hour,
 }
 
 // Builtin methods that mutate their receiver, keyed "Type.method".
@@ -411,7 +460,13 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, line int) Va
 		case "spawn":
 			return in.spawnTask(r, one("spawn", args, line), line)
 		case "deadline":
-			panic(rtErr{line, "deadline() arrives with the time types (in progress)"})
+			if len(args) != 0 {
+				panic(rtErr{line, "deadline takes no arguments"})
+			}
+			if r.st.deadline.IsZero() {
+				return NoneV{}
+			}
+			return InstantV{T: r.st.deadline}
 		}
 	case *TaskV:
 		switch name {

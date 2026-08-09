@@ -128,11 +128,26 @@ deliberately cut because the real compiler makes them obsolete.
   body's signal > first unjoined child `Err` (via the same
   conversion path `?` uses) > body value.
 
-## Deliberately absent (after M3 phase 1)
+- **`Timeout` is a synthetic variant, not a declared type.** A
+  timed-out scope's Err payload is `&VariantV{Type: "Timeout",
+  Name: "Timeout"}` — so `Err(Timeout)` matches the bare pattern
+  `Timeout`, renders as `Timeout`, and converts through a user's
+  `fn from(t: Timeout)` — without any global type declaration the
+  program didn't write. The checker era makes `Timeout` a real
+  stdlib type; nothing about programs changes.
+- **`select` rides `reflect.Select`.** Dynamic arity plus
+  uniform-random-among-ready for free — it IS Go's select. Recv
+  arms sharing a channel share one case (the delivered value tries
+  their patterns in order); send arms never merge (each sends its
+  own value). The whole wait happens with the GIL released, with
+  the task's cancellation channel as an extra case.
+
+## Deliberately absent (after M3 concurrency)
 
 `distinct` types, static generics (parsed, ignored), trait
 *checking* (impl blocks register methods; conformance is asserted,
-not verified), channels and `select` (designed, next), the time
-types and `scope(timeout:)` (designed, next), `derive`, method
+not verified), `Mutex<T>` (stdlib-era; ownership-transfer culture
+first), http/sql/json host shims (the rest of M3), `derive`, method
 values as closures (`x.method` unapplied), `or |e|` blocks
-(declined — see DESIGN.md).
+(declined — see DESIGN.md), time formatting/parsing/calendars
+(the `time` module's own later design).

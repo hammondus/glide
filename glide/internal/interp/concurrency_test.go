@@ -289,13 +289,13 @@ fn main() {
 	}
 }
 
-// Timeout config parses but is honest about not existing yet.
-func TestScopeTimeoutNotYet(t *testing.T) {
+// A bare Int is not a Duration — units are mandatory.
+func TestScopeTimeoutNeedsDuration(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
     scope(timeout: 5) { println("hi") }
 }`)
-	if err == nil || !strings.Contains(err.Error(), "time types") {
+	if err == nil || !strings.Contains(err.Error(), "must be a Duration") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -786,6 +786,200 @@ fn main() {
 		t.Fatal(err)
 	}
 	if out != "606\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// Duration suffixes, arithmetic, and display.
+func TestDurations(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let d = 1.s + 500.ms
+    println(d)
+    println(2.mins + 30.s)
+    println(d * 2)
+    println(2 * d)
+    println(d / 3)
+    println(0.5.s)
+    println(1.s > 999.ms)
+    println(90.s == 1.mins + 30.s)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "1.5s\n2m30s\n3s\n3s\n500ms\n500ms\ntrue\ntrue\n"
+	if out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
+// Instant arithmetic: the ratified minimal set; Instant+Instant does
+// not exist.
+func TestInstants(t *testing.T) {
+	out, err := runProg(t, `
+import time
+
+fn main() {
+    let t0 = time.now()
+    let t1 = t0 + 10.s
+    println(t1 - t0)
+    println(t1 > t0)
+    println((t1 - 10.s) == t0)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "10s\ntrue\ntrue\n" {
+		t.Fatalf("got %q", out)
+	}
+
+	_, err = runProg(t, `
+import time
+
+fn main() {
+    let t0 = time.now()
+    _ = t0 + t0
+}`)
+	if err == nil || !strings.Contains(err.Error(), "not defined") {
+		t.Fatalf("Instant + Instant must not exist; got %v", err)
+	}
+}
+
+// scope(timeout:) evaluates to Result: Ok on completion, Err(Timeout)
+// when the clock wins; the ? machinery converts Timeout like any
+// other error.
+func TestScopeTimeout(t *testing.T) {
+	out, err := runProg(t, `
+import time
+
+fn main() {
+    let fast = scope(timeout: 5.s) { 42 }
+    match fast {
+        Ok(v) => println("fast: {v}")
+        Err(_) => println("fast timed out")
+    }
+    let slow = scope(timeout: 20.ms) {
+        time.sleep(5.s)
+        1
+    }
+    match slow {
+        Ok(_) => println("impossible")
+        Err(Timeout) => println("slow timed out")
+        Err(_) => println("other")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "fast: 42\nslow timed out\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// Timeout cancels spawned children too — a child sleeping forever is
+// unwound, and the scope reports Timeout.
+func TestScopeTimeoutCancelsChildren(t *testing.T) {
+	out, err := runProg(t, `
+import time
+
+fn main() {
+    let r = scope(timeout: 20.ms) s {
+        _ = s.spawn(|| {
+            defer { println("child cleaned up") }
+            time.sleep(10.s)
+        })
+        time.sleep(10.s)
+        0
+    }
+    if let Err(Timeout) = r {
+        println("timed out")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "child cleaned up") || !strings.Contains(out, "timed out") {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// Timeout converts through E.from at the outer ? — timeouts are
+// non-viral: no ctx parameter anywhere in the chain.
+func TestScopeTimeoutConversion(t *testing.T) {
+	out, err := runProg(t, `
+import time
+
+type ApiError = Db(String) | TooSlow
+impl ApiError {
+    fn from(t: Timeout) -> ApiError { .TooSlow }
+}
+fn fetch_slowly() -> Result<Int, ApiError> {
+    let v = scope(timeout: 20.ms) { time.sleep(5.s)
+        9 }?
+    Ok(v)
+}
+fn main() {
+    match fetch_slowly() {
+        Ok(_) => println("impossible")
+        Err(e) => println("error: {e:?}")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "error: TooSlow\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// s.deadline(): None outside timed scopes; inherited inside.
+func TestScopeDeadline(t *testing.T) {
+	out, err := runProg(t, `
+import time
+
+fn main() {
+    scope plain {
+        match plain.deadline() {
+            Some(_) => println("has deadline")
+            None => println("no deadline")
+        }
+    }
+    _ = scope(timeout: 5.s) outer {
+        scope inner {
+            match inner.deadline() {
+                Some(d) => println("inherited: {(d - time.now()) <= 5.s}")
+                None => println("lost the deadline")
+            }
+        }
+        0
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "no deadline\ninherited: true\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// time.sleep is a cancellation point; time.after is an ordinary
+// select case.
+func TestTimeAfterInSelect(t *testing.T) {
+	out, err := runProg(t, `
+import time
+
+fn main() {
+    let (_, rx) = channel()
+    let v = select {
+        Some(v) = rx.recv() => v
+        Some(_) = time.after(20.ms).recv() => -1
+    }
+    println(v)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "-1\n" {
 		t.Fatalf("got %q", out)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"glide/internal/ast"
 )
@@ -88,7 +89,7 @@ type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code) }
 
-var knownModules = map[string]bool{"fs": true, "os": true}
+var knownModules = map[string]bool{"fs": true, "os": true, "time": true}
 
 func New() *Interp {
 	return &Interp{
@@ -1099,6 +1100,16 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		if sg != nil {
 			return UnitV{}, sg
 		}
+		// Duration suffixes read as fields: 250.ms, 0.5.s (Kotlin's
+		// extension properties, not calls).
+		if unit, ok := durationUnits[ex.Name]; ok {
+			switch n := v.(type) {
+			case IntV:
+				return DurationV(time.Duration(n) * unit), nil
+			case FloatV:
+				return DurationV(time.Duration(float64(n) * float64(unit))), nil
+			}
+		}
 		if tv, isType := v.(TypeV); isType {
 			// Namespaced variant: Color.Red, Shape.Circle (ctor).
 			if vi, ok := in.variants[ex.Name]; ok && vi.typeName == string(tv) {
@@ -1621,6 +1632,66 @@ func binop(op string, l, r Value, line int) Value {
 				return BoolV(lr > rr)
 			case ">=":
 				return BoolV(lr >= rr)
+			}
+		}
+	}
+	// Time arithmetic — the ratified minimal set. No Instant+Instant
+	// (meaningless), no Duration/Duration (Go's float-division wart).
+	if ld, ok := l.(DurationV); ok {
+		switch rv := r.(type) {
+		case DurationV:
+			switch op {
+			case "+":
+				return ld + rv
+			case "-":
+				return ld - rv
+			case "<":
+				return BoolV(ld < rv)
+			case "<=":
+				return BoolV(ld <= rv)
+			case ">":
+				return BoolV(ld > rv)
+			case ">=":
+				return BoolV(ld >= rv)
+			}
+		case IntV:
+			switch op {
+			case "*":
+				return ld * DurationV(rv)
+			case "/":
+				if rv == 0 {
+					panic(rtErr{line, "division by zero"})
+				}
+				return ld / DurationV(rv)
+			}
+		}
+	}
+	if li, ok := l.(IntV); ok {
+		if rd, ok := r.(DurationV); ok && op == "*" {
+			return DurationV(li) * rd // commutative convenience
+		}
+	}
+	if lt, ok := l.(InstantV); ok {
+		switch rv := r.(type) {
+		case InstantV:
+			switch op {
+			case "-":
+				return DurationV(lt.T.Sub(rv.T))
+			case "<":
+				return BoolV(lt.T.Before(rv.T))
+			case "<=":
+				return BoolV(!rv.T.Before(lt.T))
+			case ">":
+				return BoolV(lt.T.After(rv.T))
+			case ">=":
+				return BoolV(!lt.T.After(rv.T))
+			}
+		case DurationV:
+			switch op {
+			case "+":
+				return InstantV{T: lt.T.Add(time.Duration(rv))}
+			case "-":
+				return InstantV{T: lt.T.Add(-time.Duration(rv))}
 			}
 		}
 	}

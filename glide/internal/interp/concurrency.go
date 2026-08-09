@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	"glide/internal/ast"
 )
@@ -31,18 +32,21 @@ type cancelUnwind struct{}
 // It lives in in.cur, which is GIL-protected: every blocking site
 // saves and restores it around the release.
 type taskCtx struct {
-	cancel <-chan struct{} // closed when this task's scope cancels; nil at top level
+	cancel   <-chan struct{} // closed when this task's scope cancels; nil at top level
+	deadline time.Time       // nearest enclosing deadline; zero = none (inherited)
 }
 
 type scopeState struct {
-	cancelled  chan struct{} // closed on cancel: early exit, child panic, outer cancel
+	cancelled  chan struct{} // closed on cancel: early exit, child panic, outer cancel, timeout
 	done       chan struct{} // closed when the scope has fully exited (frees the outer watcher)
 	cancelOnce sync.Once
 	doneOnce   sync.Once
+	deadline   time.Time // effective (nearest, inherited); zero = none
 
-	mu    sync.Mutex // guards tasks/panicVal (written by child goroutines)
-	tasks []*TaskV
-	pan   any // first child panic; the scope re-panics it at exit
+	mu       sync.Mutex // guards tasks/pan/timedOut (written by child/timer goroutines)
+	tasks    []*TaskV
+	pan      any  // first child panic; the scope re-panics it at exit
+	timedOut bool // this scope's own timer fired
 }
 
 func (st *scopeState) doCancel() { st.cancelOnce.Do(func() { close(st.cancelled) }) }
@@ -80,14 +84,59 @@ func (in *Interp) exitRoot() { in.gil.Unlock() }
 //  3. At normal exit an unjoined Err fails the scope (first spawned wins).
 //  4. A child panic cancels siblings immediately; the scope re-panics.
 func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
-	if ex.Timeout != nil || ex.Deadline != nil {
-		panic(rtErr{ex.Line, "scope(timeout:/deadline:) arrives with the time types (in progress)"})
-	}
 	if in.constEval {
 		panic(rtErr{ex.Line, "a const initializer cannot open a scope (pure expressions only)"})
 	}
 	st := &scopeState{cancelled: make(chan struct{}), done: make(chan struct{})}
 	outer := in.cur
+
+	// Clock-driven cancellation: timeout/deadline reduce to the same
+	// timer; the effective deadline is the nearest of ours and the
+	// inherited one, and children inherit it via s.deadline().
+	timed := false
+	st.deadline = outer.deadline
+	arm := func(at time.Time) {
+		timed = true
+		if st.deadline.IsZero() || at.Before(st.deadline) {
+			st.deadline = at
+		}
+	}
+	if ex.Timeout != nil {
+		v, sg := in.eval(ex.Timeout, env)
+		if sg != nil {
+			return UnitV{}, sg
+		}
+		d, ok := v.(DurationV)
+		if !ok {
+			panic(rtErr{ex.Line, fmt.Sprintf("scope timeout must be a Duration (e.g. 5.s), got %s", typeName(v))})
+		}
+		arm(time.Now().Add(time.Duration(d)))
+	}
+	if ex.Deadline != nil {
+		v, sg := in.eval(ex.Deadline, env)
+		if sg != nil {
+			return UnitV{}, sg
+		}
+		at, ok := v.(InstantV)
+		if !ok {
+			panic(rtErr{ex.Line, fmt.Sprintf("scope deadline must be an Instant, got %s", typeName(v))})
+		}
+		arm(at.T)
+	}
+	if timed {
+		timer := time.NewTimer(time.Until(st.deadline))
+		go func() {
+			select {
+			case <-timer.C:
+				st.mu.Lock()
+				st.timedOut = true
+				st.mu.Unlock()
+				st.doCancel()
+			case <-st.done:
+				timer.Stop()
+			}
+		}()
+	}
 	if outer.cancel != nil {
 		// Chain: an outer cancellation cancels this scope too. The
 		// watcher dies with the scope.
@@ -99,7 +148,7 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 			}
 		}()
 	}
-	in.cur = &taskCtx{cancel: st.cancelled}
+	in.cur = &taskCtx{cancel: st.cancelled, deadline: st.deadline}
 	scopeEnv := newEnv(env, false)
 	if ex.Handle != "" {
 		scopeEnv.declare(ex.Handle, &ScopeV{st: st}, false, ex.Line)
@@ -137,20 +186,25 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 	st.doneOnce.Do(func() { close(st.done) })
 	in.cur = outer
 
-	// Aftermath, in precedence order: bugs first, then the body's own
-	// exit, then unobserved child errors.
-	if _, isCancel := bodyPanic.(cancelUnwind); isCancel && st.pan == nil {
-		// Cancelled from outside: keep unwinding toward the scope
-		// that started it.
-		panic(bodyPanic)
-	}
-	if bodyPanic != nil {
-		if _, isCancel := bodyPanic.(cancelUnwind); !isCancel {
-			panic(bodyPanic) // the body's own bug
-		}
+	// Aftermath, in precedence order: bugs first, then this scope's
+	// own timeout, then outer cancellation, then the body's own exit,
+	// then unobserved child errors.
+	_, bodyCancelled := bodyPanic.(cancelUnwind)
+	if bodyPanic != nil && !bodyCancelled {
+		panic(bodyPanic) // the body's own bug
 	}
 	if st.pan != nil {
 		panic(st.pan) // rule 4: a child's panic resurfaces at scope exit
+	}
+	if st.timedOut {
+		// This scope started the cancellation; the unwind stops here.
+		// A timed scope evaluates to Result<T, Timeout>.
+		return &ResultV{Ok: false, V: timeoutValue()}, nil
+	}
+	if bodyCancelled {
+		// Cancelled from outside: keep unwinding toward the scope
+		// that started it.
+		panic(bodyPanic)
 	}
 	if sg != nil {
 		return UnitV{}, sg // return/?/break/continue pass through
@@ -168,7 +222,17 @@ func (in *Interp) evalScope(ex *ast.ScopeExpr, env *Env) (Value, *sig) {
 			return UnitV{}, in.propagateErr(r, env, ex.Line)
 		}
 	}
+	if timed {
+		return &ResultV{Ok: true, V: val}, nil
+	}
 	return val, nil
+}
+
+// timeoutValue is the Err payload of a timed-out scope: a synthetic
+// bare variant, so `Err(Timeout)` matches the pattern `Timeout`,
+// renders as "Timeout", and converts via a user `from(t: Timeout)`.
+func timeoutValue() Value {
+	return &VariantV{Type: "Timeout", Name: "Timeout"}
 }
 
 // propagateErr builds the return signal `?` would: converting the
@@ -204,7 +268,7 @@ func (in *Interp) spawnTask(s *ScopeV, f Value, line int) Value {
 
 	go func() {
 		in.gil.Lock()
-		in.cur = &taskCtx{cancel: st.cancelled}
+		in.cur = &taskCtx{cancel: st.cancelled, deadline: st.deadline}
 		defer func() {
 			if p := recover(); p != nil {
 				if _, isCancel := p.(cancelUnwind); isCancel {

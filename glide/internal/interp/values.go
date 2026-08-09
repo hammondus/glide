@@ -3,6 +3,7 @@ package interp
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"glide/internal/ast"
 )
@@ -90,6 +91,11 @@ type (
 	// (mpmc); only the sender half can close.
 	SenderV   struct{ st *chanState }
 	ReceiverV struct{ st *chanState }
+
+	// Time: Duration and Instant are distinct, never conflated.
+	// Wrapping Go's types buys the dual wall/monotonic clock for free.
+	DurationV time.Duration
+	InstantV  struct{ T time.Time }
 	TaskV     struct {
 		done      chan struct{} // closed after result/pan are set
 		result    Value
@@ -169,6 +175,10 @@ func typeName(v Value) string {
 		return "Sender"
 	case *ReceiverV:
 		return "Receiver"
+	case DurationV:
+		return "Duration"
+	case InstantV:
+		return "Instant"
 	}
 	return fmt.Sprintf("%T", v)
 }
@@ -269,6 +279,10 @@ func render(v Value, quoted bool) string {
 		return "<sender>"
 	case *ReceiverV:
 		return "<receiver>"
+	case DurationV:
+		return time.Duration(x).String()
+	case InstantV:
+		return x.T.Format("2006-01-02T15:04:05.999999999Z07:00")
 	}
 	return fmt.Sprintf("%v", v)
 }
@@ -277,8 +291,11 @@ func render(v Value, quoted bool) string {
 // comparable (runtime error at the call site's line).
 func eq(a, b Value, line int) bool {
 	switch x := a.(type) {
-	case IntV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV:
+	case IntV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV, DurationV:
 		return a == b
+	case InstantV:
+		y, ok := b.(InstantV)
+		return ok && x.T.Equal(y.T) // Go's ==-on-time.Time trap, dodged
 	case TupleV:
 		y, ok := b.(TupleV)
 		if !ok || len(x) != len(y) {
