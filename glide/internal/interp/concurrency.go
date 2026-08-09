@@ -378,7 +378,7 @@ func (in *Interp) chanRecv(r *ReceiverV) Value {
 	if !ok {
 		return NoneV{}
 	}
-	return v
+	return some(v)
 }
 
 // evalSelect: operands and guards evaluate once at entry, in arm
@@ -512,7 +512,7 @@ func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
 	}
 	var v Value = NoneV{}
 	if recvOK {
-		v = recvVal.Interface().(Value)
+		v = some(recvVal.Interface().(Value))
 	}
 	for _, ai := range g.arms {
 		arm := &ex.Arms[ai]

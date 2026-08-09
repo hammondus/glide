@@ -409,11 +409,18 @@ If you want shape dispatch, use `match`. The rule keeps `if let` from
 quietly becoming a second, weaker `match` with no exhaustiveness
 story.
 
-#### The `Option` unboxing wart
+#### `Option` is boxed
 
-The interpreter represents `T?` unboxed: `Some` is the identity
-function and `None` is a distinct value. This makes `Some(p)` patterns
-match any non-`None` value.
+The interpreter represents `T?` **boxed**: every `T?` is `None` or
+`Some(v)`, never a bare `v`. It was unboxed through M4b — `Some` was
+the identity — because without static types the interpreter could not
+see where the implicit `T -> T?` coercion belonged. The checker
+removed that constraint, and M4c collected: the checker records each
+coercion site and the evaluator builds the box there.
+
+That closed three *silent wrong answers*: a present-but-`None` map
+entry read as absent, a `None` sent over a channel ended the stream,
+and `Option<Option<T>>` collapsed a level.
 
 The consequence: **`Option<Option<T>>` is unrepresentable today.** A
 `Some(None)` collapses to `None`. This shows up in one visible place —

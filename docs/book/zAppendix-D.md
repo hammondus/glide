@@ -190,7 +190,6 @@ with a designed fix.
 
 | Wart | Effect | Fix |
 |---|---|---|
-| **`Option` is unboxed** | `Some` is identity; `Option<Option<T>>` unrepresentable; a *sent* `None` reads as end-of-stream | checker boxes it |
 | **Receiver-mut unenforced on builtins** | `xs.push(3)` works through a `let` | the checker |
 | **Defaults fill through function values** | `let f = connect; f("db")` works | the checker (defaults are declaration sugar, not type) |
 | **Decoded JSON keys are sorted** | encode preserves order, decode does not | `derive Json` with an ordered map |

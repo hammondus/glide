@@ -639,7 +639,10 @@ fn main() {
 
     let mut m = ["n": 9]
     m["n"] %= 5
+    // A map read is an Option, and Option is boxed, so this prints
+    // Some(4); ?? is how you ask for the value.
     println("{m["n"]}")
+    println("{m["n"] ?? 0}")
 
     let mut p = Point{ x: 8 }
     p.x /= 2
@@ -649,7 +652,7 @@ fn main() {
 		t.Fatal(err)
 	}
 	// 7*6=42, 42/2=21, 21%4=1
-	if out != "1\n2 60\n4\n4\n" {
+	if out != "1\n2 60\nSome(4)\n4\n4\n" {
 		t.Fatalf("output:\n%q", out)
 	}
 }

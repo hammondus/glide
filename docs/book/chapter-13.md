@@ -249,12 +249,18 @@ Two consequences worth knowing:
 In the interpreter, a variant is a small record holding the type name,
 the variant name, and the payload. Matching compares names.
 
-#### The `Option` unboxing wart
+#### `Option` is boxed
 
-The interpreter represents `T?` **unboxed**: `Some` is the identity
-function and `None` is a distinct sentinel value. This is recorded in
-`glide/DESIGN-DECISIONS.md` and it exists because without static types
-the interpreter cannot see where `T -> T?` coercion should happen.
+The interpreter represents `T?` **boxed**: every `T?` is `None` or
+`Some(v)`, never a bare `v`. It was unboxed through M4b — `Some` was
+the identity — because without static types the interpreter could not
+see where the implicit `T -> T?` coercion belonged. The checker
+removed that constraint, and M4c collected: the checker records each
+coercion site and the evaluator builds the box there.
+
+That closed three *silent wrong answers*: a present-but-`None` map
+entry read as absent, a `None` sent over a channel ended the stream,
+and `Option<Option<T>>` collapsed a level.
 
 Consequences today:
 
@@ -916,8 +922,8 @@ variant. Every `match` on `Door` in the program lights up.
   to be built in.
 - ○: `derive Enum` (giving `all()`, `name()`, `from_name()`), explicit
   discriminants for wire stability, and niche-optimised representation.
-- Interpreter caveat: `Option` is unboxed, so `Option<Option<T>>` is
-  unrepresentable.
+- `Option` is boxed as of M4c, so `Option<Option<T>>` is
+  representable; spell it `Option<Int?>`, since `T??` cannot lex.
 
 **Exercises**
 

@@ -125,7 +125,7 @@ func (in *Interp) sqlMethod(d *DbV, name string, args []Value, at source.Span) V
 		case 0:
 			return &ResultV{Ok: true, V: NoneV{}}
 		case 1:
-			return &ResultV{Ok: true, V: l.Elems[0]}
+			return &ResultV{Ok: true, V: some(l.Elems[0])}
 		default:
 			return &ResultV{Ok: false, V: &ErrV{Msg: fmt.Sprintf("query_one matched %d rows", len(l.Elems))}}
 		}
@@ -196,6 +196,8 @@ func toDriver(v Value, at source.Span) any {
 	switch x := v.(type) {
 	case NoneV:
 		return nil
+	case *SomeV:
+		return toDriver(x.V, at) // the box does not reach the driver
 	case IntV:
 		return int64(x)
 	case UintV:

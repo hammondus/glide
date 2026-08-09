@@ -52,6 +52,11 @@ func encodeJSON(b *strings.Builder, v Value, at source.Span) {
 	switch x := v.(type) {
 	case NoneV:
 		b.WriteString("null")
+	case *SomeV:
+		// Option is boxed, and JSON has no box: Some(v) encodes as v,
+		// None as null. Round-tripping therefore loses the distinction
+		// between None and Some(None), which JSON cannot express.
+		encodeJSON(b, x.V, at)
 	case BoolV:
 		fmt.Fprintf(b, "%t", bool(x))
 	case IntV:

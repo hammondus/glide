@@ -268,9 +268,8 @@ here to a compiler.
 
 You will see this reflected in every chapter. Sections marked ✓ have
 been run. Sections marked ○ are read from the design document. Where a
-feature exists in a reduced form today — `Option` is unboxed in the
-interpreter, so `Option<Option<T>>` cannot be represented — the book
-says so and explains what the checker era will change.
+feature exists in a reduced form today, the book says so and explains
+what the remaining milestones will change.
 
 ---
 

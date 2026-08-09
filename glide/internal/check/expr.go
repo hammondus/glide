@@ -25,12 +25,20 @@ func (c *checker) checkExpr(e ast.Expr, want types.Type) types.Type {
 		// types from it) but not worth asserting: comparing a concrete
 		// type against a variable that is about to be bound *to* it
 		// would fail every time.
-		return c.typeOf(e, want)
+		//
+		// The T -> T? coercion is still recorded, because whether the
+		// target is an Option is knowable without knowing what it is an
+		// Option *of*. Skipping it here is what left `left:
+		// insert_node(…)` at a `Node<T>?` field unwrapped in tree.gld.
+		got := c.typeOf(e, want)
+		c.noteWrap(e, got, want)
+		return got
 	}
 	got := c.typeOf(e, want)
 	if types.AssignableTo(got, want) {
 		c.rangeCheck(e, want)
 		c.settle(e, got, want)
+		c.noteWrap(e, got, want)
 		return got
 	}
 	if types.IsOpaque(got) || types.IsOpaque(want) {
@@ -99,6 +107,27 @@ func signed(mag uint64, neg bool) string {
 //
 // Both of those were wrong before M4b, silently: `let f: Float = 5`
 // built an integer, so `f / 2` did integer division and answered 2.
+// noteWrap records an implicit T -> T? at e. Option is boxed in the
+// runtime, so the evaluator has to build the Some, and the expression
+// itself carries no sign that it should — its type is the T.
+//
+// Only when `got` is not already an Option: `let x: Int? = None` and
+// `let x: Int? = Some(1)` are already the target type and must not be
+// wrapped twice.
+func (c *checker) noteWrap(e ast.Expr, got, want types.Type) {
+	w, ok := want.(*types.App)
+	if !ok || w.C != types.Option {
+		return
+	}
+	if g, isApp := got.(*types.App); isApp && g.C == types.Option {
+		return
+	}
+	if types.IsNever(got) {
+		return // a diverging expression produces no value to wrap
+	}
+	c.info.Wrap[e] = true
+}
+
 func (c *checker) settle(e ast.Expr, got, want types.Type) {
 	gb, ok := got.(*types.Basic)
 	if !ok || !gb.IsUntyped() {

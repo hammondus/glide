@@ -184,13 +184,61 @@ or it is a bug.
   same-scope redeclare from retargeting the closure. The first
   implementation shared the live env map (call-time name lookup) and
   got redeclare-straddling closures wrong.
-- **Option is unboxed**: a `T?` is "the value, or None". The sketch
-  assigns a `Node` straight to a `Node?` field, so the language has
-  implicit `T -> T?` coercion; without static types the interpreter
-  can't see the wrap points, and unboxing makes coercion a no-op.
-  `Some` is the identity function; `Some(p)` patterns match any
-  non-None value. Cost: `Option<Option<T>>` is unrepresentable in
-  this tier — the checker era must box.
+- **Option is boxed** (M4c). *Reverses the M1 decision*, which was:
+  a `T?` is "the value, or None", `Some` is the identity, and
+  `Some(p)` matches any non-None value. That was forced at the time —
+  the language has implicit `T -> T?` coercion, and without static
+  types the interpreter could not see the wrap points, so unboxing
+  made the coercion a no-op.
+
+  The checker removed the constraint, and the cost of keeping it was
+  three *silent wrong answers*, not three missing diagnostics:
+
+  1. A key present in a `Map<K, V?>` holding `None` was
+     indistinguishable from an absent key. Data loss.
+  2. A `None` **sent** over a channel read as end-of-stream, ending
+     the loop early — recorded as a wart in stdlib.md for two
+     milestones.
+  3. `Option<Option<T>>` was unwritable, so any generic over `T?`
+     silently collapsed a level.
+
+  What boxing costs is that the coercion is no longer free. The
+  checker records each site in `Info.Wrap` and the evaluator wraps
+  there — see the two entries below for the chokepoint and the
+  assertion that makes a missed site loud rather than silent.
+
+  Not taken: removing the implicit coercion, which would have made
+  the representation canonical by construction with no sites to
+  record at all. `DESIGN.md` names that coercion as one of the two
+  features justifying bidirectional checking, and `let x: Int? =
+  Some(5)` everywhere is a real ergonomic loss to pay for
+  implementation convenience.
+
+- **The coercion has one chokepoint on each side.** In the checker,
+  `checkExpr` is the only place `AssignableTo` decides a `T` may
+  become a `T?`, so `noteWrap` records there. In the evaluator, `eval`
+  wraps `evalRaw`'s result once, so every expression is considered.
+  The alternative — wrapping at each of the dozen syntactic sites
+  where the coercion is legal (let, argument, return, struct field,
+  list element, map value, tuple slot, …) — is a list that can be
+  incomplete, and an incomplete list is a silent wrong value.
+
+  One gap had to be closed explicitly: `checkExpr` returns early when
+  `hasVar(want)`, without asserting. The coercion is still recorded
+  there, because whether the target is an Option is knowable without
+  knowing what it is an Option *of*. Missing that left `left:
+  insert_node(…)` at a `Node<T>?` field unwrapped, and tree.gld
+  caught it.
+
+- **Every Option consumer asserts canonical form.** `readOption`
+  panics if a value reaching an Option context is neither `NoneV` nor
+  `*SomeV`. That is what makes the coercion machinery safe to trust: a
+  site the checker fails to record fails loudly in the test suite
+  instead of silently deciding a value was `Some` when the program
+  meant `None`. It is also DESIGN.md's standing answer for a rule
+  enforced in two places — the runtime keeps its copy as an
+  assertion, so a checker bug is a panic rather than undefined
+  behaviour.
 - **Generators run on a goroutine + channel.** Cheapest correct lazy
   implementation for a tree-walker: `yield` sends, `Next` receives;
   body panics are forwarded to the consumer; an abandoned iterator's
@@ -613,18 +661,17 @@ or it is a bug.
 
 ## Remaining in M4c
 
-Sized numerics, explicit conversion, bound checking, trait conformance
-and the `Ord` operator trait are **done** (see the decisions above).
-Arithmetic operator traits (`Add`, `Mul`) are not, and nothing yet
-needs them. Still open, in the
+Sized numerics, explicit conversion, bound checking, trait conformance,
+the `Ord` operator trait and boxed `Option` are **done** (see the
+decisions above). Arithmetic operator traits (`Add`, `Mul`) are not,
+and nothing yet needs them.
+
+With boxing landed, **every remaining M4 gap is a missing diagnostic
+rather than a wrong answer** — the checker stays quiet where it could
+speak, but nothing computes the wrong value. Still open, in the
 order they are worth doing:
 
-1. **Boxed `Option`.** A key present in a `Map<K, V?>` holding `None`
-   is indistinguishable from an absent key — real data loss, and the
-   only remaining *wrong answer* rather than a missing diagnostic. The
-   most invasive change left: runtime representation as well as
-   checker.
-2. The cheaper leftovers: static match exhaustiveness (the runtime
+1. The cheaper leftovers: static match exhaustiveness (the runtime
    catches it, and its message still says "exhaustiveness checking
    arrives with the compiler" — now the checker's job), the
    spawn-captures-mut ban, generator element types (a `yield`ing

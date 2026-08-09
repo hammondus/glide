@@ -524,9 +524,10 @@ per entry and makes iteration O(n) in insertion order without sorting —
 which is the win, because in Go you pay an O(n log n) key sort every
 time you need deterministic output.
 
-**Map indexing allocates nothing** — `V?` is unboxed in the
-interpreter, and in the designed compiler an `Option<V>` for a
-reference-typed `V` is a nullable pointer with no allocation.
+**Map indexing returns an `Option`**, so a key present holding `None`
+is distinguishable from an absent key — they were the same value until
+M4c. In the designed compiler an `Option<V>` for a reference-typed `V`
+is a nullable pointer with no allocation.
 
 **Spread copies.** `[0, ..xs, 99]` allocates a new list of
 `xs.len() + 2` and copies. It is honest about it — `DESIGN.md` calls

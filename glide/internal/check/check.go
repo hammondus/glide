@@ -31,6 +31,13 @@ type Info struct {
 	// Funcs is each declared function's resolved signature, keyed by
 	// declaration so methods and free functions share one map.
 	Funcs map[*ast.FuncDecl]*types.Func
+
+	// Wrap marks the expressions where the implicit T -> T? coercion
+	// applies. Option is boxed in the runtime, so `let x: Int? = 5`
+	// has to build a Some around the 5, and this is the only record of
+	// where: the expression's own type says `Int`, and nothing else
+	// distinguishes it from an `Int` going into an `Int`.
+	Wrap map[ast.Expr]bool
 }
 
 // local is one binding in a lexical scope.
@@ -92,6 +99,7 @@ func File(f *ast.File, tab *program.Table) (*Info, error) {
 			Types:     map[ast.Expr]types.Type{},
 			Shorthand: map[*ast.DotName]*types.Variant{},
 			Funcs:     map[*ast.FuncDecl]*types.Func{},
+			Wrap:      map[ast.Expr]bool{},
 		},
 		named:   map[string]*types.Named{},
 		fns:     map[string]*types.Func{},

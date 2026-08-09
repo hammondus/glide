@@ -130,7 +130,7 @@ Type annotations are written but unchecked in M2.
 | `Bool`, `String`, `()` | | ✓ |
 | `List<T>`, `Map<K, V>` | Map preserves insertion order | ✓ |
 | `(A, B)` tuples | fields `.0`, `.1`. Two members minimum: `(T)` is a parse error, since a 1-tuple has no constructor and parenthesising a type buys nothing | ✓ |
-| `T?` = `Option<T>` | unboxed in M2: `Some` is identity, so `Option<Option<T>>` is unrepresentable until the checker era | ✓ |
+| `T?` = `Option<T>` | **boxed**: every `T?` is `None` or `Some(v)`, never a bare `v`. `Option<Option<T>>` is representable and `Some(None)` differs from `None`; spell it long-form (`Option<Int?>`) since `T??` cannot lex. Implicit `T -> T?` still applies. `Some(x)` renders as `Some(x)`, matching `None` | ✓ |
 | `Result<T, E>` | `Ok(v)` / `Err(e)` | ✓ |
 | `Range` | value of `lo..hi` | ✓ |
 | `fn(A) -> B` | one function type for named fns, closures, method values | ✓ for named fns and closures (a closure passed to `filter`/`sort_by`/`map` is checked against the parameter's signature); method values unapplied (`x.method`) ○ |

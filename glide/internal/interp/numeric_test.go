@@ -154,7 +154,7 @@ import json
 fn main() {
     let mut m: Map<u8, String> = [:]
     m[200] = "two hundred"
-    println(m[200])
+    println(m[200] ?? "absent")
 
     let l: List<i32> = [3, 1, 2]
     println(l.sorted())
@@ -394,5 +394,100 @@ fn main() {
 	// consulted the trait.
 	if out != "true\nfalse\ntrue\n" {
 		t.Fatalf("output:\n%q", out)
+	}
+}
+
+// Option is boxed as of M4c. These three were silent wrong answers,
+// not missing diagnostics: the program ran and produced the wrong
+// value, which is why this was the last thing in M4 worth fixing.
+func TestBoxedOptionClosesTheThreeHoles(t *testing.T) {
+	// 1. A key present holding None is not an absent key.
+	out, err := runProg(t, `
+fn main() {
+    let mut m: Map<String, Int?> = [:]
+    m["present"] = None
+    // == None is deliberately not a thing (presence is if let, not
+    // an equality test), so the distinction is drawn with match.
+    match m["present"] {
+        Some(inner) => println("present")
+        None        => println("absent")
+    }
+    match m["absent"] {
+        Some(inner) => println("present")
+        None        => println("absent")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "present\nabsent\n" {
+		t.Fatalf("present-but-None must differ from absent: %q", out)
+	}
+
+	// 2. Option<Option<T>> is representable and the two levels differ.
+	out, err = runProg(t, `
+fn main() {
+    let a: Option<Int?> = Some(None)
+    let b: Option<Int?> = None
+    println(a)
+    println(b)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Some(None)\nNone\n" {
+		t.Fatalf("Some(None) must differ from None: %q", out)
+	}
+
+	// 3. A sent None does not close a channel.
+	out, err = runProg(t, `
+fn main() {
+    scope s {
+        let (tx, rx) = channel()
+        s.spawn(|| {
+            tx.send(None)
+            tx.send(Some(7))
+            tx.close()
+        })
+        for v in rx { println(v) }
+        println("ended")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "None\nSome(7)\nended\n" {
+		t.Fatalf("a sent None must not end the stream: %q", out)
+	}
+}
+
+// The implicit T -> T? coercion survives boxing. It is the feature
+// DESIGN.md cites as one of two justifying bidirectional checking, so
+// "make the representation canonical by removing the coercion" was
+// never on the table.
+func TestImplicitOptionCoercionStillWorks(t *testing.T) {
+	out, err := runProg(t, `
+type Node = struct { next: Node?, v: Int }
+
+fn wrap(n: Int) -> Int? { n }
+
+fn main() {
+    let direct: Int? = 5
+    println(direct)
+    println(wrap(7))
+    let inner = Node{ next: None, v: 1 }
+    let outer = Node{ next: inner, v: 2 }
+    if let n = outer.next { println(n.v) }
+    let xs: List<Int?> = [1, 2]
+    println(xs)
+    let t: (Int?, String) = (3, "x")
+    println(t)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Some(5)\nSome(7)\n1\n[Some(1), Some(2)]\n(Some(3), \"x\")\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
 	}
 }

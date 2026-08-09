@@ -67,11 +67,19 @@ type (
 		m    map[Value]Value
 	}
 
-	// Option is UNBOXED in the interpreter: a T? is "the value, or
-	// NoneV". Implicit T -> T? coercion falls out for free; the cost
-	// is that Option<Option<T>> is unrepresentable here (a checker-
-	// era concern, recorded in DESIGN-DECISIONS.md).
+	// Option is BOXED: every T? value is either NoneV or a *SomeV, and
+	// never a bare T. Unboxed until M4c, which cost three silent wrong
+	// answers — a present-but-None map entry read as absent, a sent
+	// None closed a channel, and Option<Option<T>> was unwritable.
+	//
+	// The price is that the implicit T -> T? coercion no longer falls
+	// out for free: the checker records each site in Info.Wrap and the
+	// evaluator wraps there. Every consumer below asserts canonical
+	// form rather than assuming it, so a coercion site the checker
+	// failed to record fails loudly instead of silently deciding a
+	// value was Some when it was None.
 	NoneV struct{}
+	SomeV struct{ V Value }
 
 	StructV struct {
 		Type   string
@@ -194,7 +202,7 @@ func typeName(v Value) string {
 		return "List"
 	case *MapV:
 		return "Map"
-	case NoneV:
+	case NoneV, *SomeV:
 		return "Option"
 	case *StructV:
 		return x.Type
@@ -293,6 +301,12 @@ func render(v Value, quoted bool) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	case NoneV:
 		return "None"
+	case *SomeV:
+		// Rendered as Some(x), not as x. None already prints as None,
+		// so printing Some(1) as 1 would make an Option print as two
+		// different shapes; and it is the only way Some(None) is
+		// distinguishable from None in output.
+		return "Some(" + render(x.V, true) + ")"
 	case *StructV:
 		parts := make([]string, len(x.Order))
 		for i, f := range x.Order {

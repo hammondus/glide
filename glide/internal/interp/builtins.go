@@ -38,10 +38,8 @@ var builtins = map[string]*BuiltinV{
 	"Err": {Name: "Err", Fn: func(in *Interp, args []Value, at source.Span) Value {
 		return &ResultV{Ok: false, V: one("Err", args, at)}
 	}},
-	// Option is unboxed here, so Some is the identity function; it
-	// exists so the spelling stays legal.
 	"Some": {Name: "Some", Fn: func(in *Interp, args []Value, at source.Span) Value {
-		return one("Some", args, at)
+		return some(one("Some", args, at))
 	}},
 	// channel() -> (tx, rx): rendezvous by default, channel(cap: n)
 	// buffered. No unbounded variant (recorded). The named form is
@@ -304,7 +302,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			if err != nil {
 				return NoneV{}
 			}
-			return IntV(n)
+			return some(IntV(n))
 		case "trim_prefix":
 			return StrV(strings.TrimPrefix(string(r), string(strArg(name, args, at))))
 		case "trim_suffix":
@@ -494,7 +492,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			if v == "" {
 				return NoneV{}
 			}
-			return StrV(v)
+			return some(StrV(v))
 		case "body":
 			if len(args) != 0 {
 				panic(rtErr{at, "body takes no arguments"})
@@ -537,7 +535,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			if r.st.deadline.IsZero() {
 				return NoneV{}
 			}
-			return InstantV{T: r.st.deadline}
+			return some(InstantV{T: r.st.deadline})
 		}
 	case *TaskV:
 		switch name {
@@ -847,11 +845,11 @@ func (in *Interp) iterate(v Value, at source.Span) func() (Value, bool) {
 		// `for v in rx` consumes until closed-and-drained — blocking
 		// recv per element, each a cancellation point.
 		return func() (Value, bool) {
-			v := in.chanRecv(it)
-			if _, isNone := v.(NoneV); isNone {
-				return nil, false
-			}
-			return v, true
+			// recv returns an Option: None is closed-and-drained. Boxed,
+			// so a *sent* None is an ordinary element rather than an
+			// end-of-stream signal — the M2 wart, gone.
+			inner, ok := readOption(in.chanRecv(it), at)
+			return inner, ok
 		}
 	}
 	panic(rtErr{at, fmt.Sprintf("%s is not iterable", typeName(v))})

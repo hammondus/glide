@@ -1,0 +1,68 @@
+// Option is boxed: every `T?` is `None` or `Some(v)`, never a bare
+// `v`. Unboxed through M4b, which cost three silent wrong answers —
+// all three are pinned here, and all three were unwritable before.
+//
+// The implicit `T -> T?` coercion survives: `let plain: Int? = 5`
+// still works, and the checker records where the box has to be built
+// because the expression's own type says `Int`.
+fn find(xs: List<Int>, want: Int) -> Int? {
+    for x in xs {
+        if x == want { return x }      // T -> T? with no Some()
+    }
+    None
+}
+
+fn main() {
+    // 1. A key present holding None is not an absent key. These read
+    //    identically until M4c, which is data loss, not a diagnostic.
+    let mut m: Map<String, Int?> = [:]
+    m["present"] = None
+    match m["present"] {
+        Some(inner) => match inner {
+            Some(v) => println("present, holding {v}")
+            None    => println("present, holding None")
+        }
+        None => println("absent")
+    }
+    match m["never-inserted"] {
+        Some(inner) => println("present")
+        None        => println("absent")
+    }
+
+    // 2. Option<Option<T>> is representable. Spelled long-form: `T??`
+    //    cannot lex, because `??` is the coalescing operator.
+    let nested: Option<Int?> = Some(None)
+    match nested {
+        Some(inner) => println("outer Some, inner {inner}")
+        None        => println("outer None")
+    }
+
+    // 3. A sent None is an ordinary element, not end-of-stream. The
+    //    channel's own "closed and drained" signal is the box being
+    //    absent, which a payload can no longer impersonate.
+    scope s {
+        let (tx, rx) = channel()
+        s.spawn(|| {
+            tx.send(None)
+            tx.send(Some(7))
+            tx.close()
+        })
+        for v in rx {
+            match v {
+                Some(n) => println("got {n}")
+                None    => println("got a None, and the stream continues")
+            }
+        }
+        println("stream ended")
+    }
+
+    // The coercion, and the two unwrapping forms, all still work.
+    let plain: Int? = 5
+    println(plain)
+    println(plain ?? 0)
+    if let hit = find([1, 2, 3], 2) { println(hit + 1) }
+    match find([1, 2, 3], 9) {
+        Some(n) => println(n)
+        None    => println("absent")
+    }
+}

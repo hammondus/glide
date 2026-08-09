@@ -820,8 +820,9 @@ should be making explicitly anyway.
   a dying scope unwinds.
 - Channels are for **streams**; a single result is a `Task` and
   `join()`.
-- Interpreter wart: `Option` is unboxed, so a **sent `None` reads as
-  end-of-stream**. Do not send Options.
+- A sent `None` is an ordinary element, not end-of-stream: `Option` is
+  boxed as of M4c, so a payload cannot impersonate the channel's own
+  closed-and-drained signal. Sending Options is fine.
 - ○: `Mutex<T>` that wraps the data it guards — the other half of the
   data-sharing story.
 

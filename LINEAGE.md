@@ -469,6 +469,38 @@ ordering would let field *declaration order* silently decide sort
 order, which is the bug Rust's mandatory `#[derive(Ord)]` exists to
 prevent.
 
+## Option: boxed, with implicit promotion
+
+- **1965** — Hoare's null reference, later called his billion-dollar
+  mistake: absence spelled as a value of the same type.
+- **1970s–90s** — ML and Haskell answer with a *boxed* sum type,
+  `Maybe`/`option`. `Some None` and `None` are distinct values because
+  the box is a real constructor. Nothing is implicit, and
+  `Just (Just x)` is ordinary.
+- **2014** — Swift ships `Optional` boxed, and adds *implicit
+  promotion*: a `T` may be passed where a `T?` is expected, with the
+  compiler inserting the wrap. Nested optionals stay writable
+  (`Int??`), so ergonomics arrive without collapsing a level.
+- **2015** — Rust boxes and requires `Some(x)` everywhere, no
+  promotion. Explicit, and the noise is a standing complaint; the
+  `?` operator (2016) exists partly to reduce it.
+- **The counter-example is Go's comma-ok and JS's `undefined`**: an
+  absence signal that shares a representation with a value. `m[k]`
+  returning the zero value and `undefined` being storable are the same
+  bug, and both are why "present holding nothing" and "absent" have to
+  be different values.
+
+**Glide takes** Swift's shape exactly: **boxed, with implicit `T -> T?`
+promotion**. Boxing is what makes `Some(None)`, a present-but-`None`
+map entry, and a `None` sent over a channel all mean what they say —
+Glide had all three wrong while Option was unboxed. The promotion is
+kept because the alternative is Rust's noise, and it is one of the two
+features that justify bidirectional checking at all (`.Variant`
+shorthand is the other). The implementation cost — the checker must
+record every promotion site, since the evaluator can no longer treat
+the coercion as a no-op — is paid with an assertion at every consumer,
+so a missed site is a loud panic rather than a wrong value.
+
 ## Numbers: sized ints, signed sizes, honest literals
 
 - **1972** — C's `int` means "whatever the machine likes"; forty

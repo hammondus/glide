@@ -856,17 +856,15 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 	case *ast.CtorPat:
 		switch pt.Name {
 		case "None":
-			_, isNone := v.(NoneV)
-			return nil, isNone && len(pt.Args) == 0
+			_, isSome := v.(*SomeV)
+			_, wasNone := v.(NoneV)
+			return nil, wasNone && !isSome && len(pt.Args) == 0
 		case "Some":
-			// Unboxed Option: Some(p) matches any non-None value.
-			if _, isNone := v.(NoneV); isNone {
+			inner, isSome := v.(*SomeV)
+			if !isSome || len(pt.Args) != 1 {
 				return nil, false
 			}
-			if len(pt.Args) != 1 {
-				return nil, false
-			}
-			return match(pt.Args[0], v)
+			return match(pt.Args[0], inner.V)
 		case "Ok", "Err":
 			rv, isRes := v.(*ResultV)
 			if !isRes || rv.Ok != (pt.Name == "Ok") || len(pt.Args) != 1 {
@@ -947,7 +945,21 @@ func match(p ast.Pattern, v Value) ([]bound, bool) {
 
 // Expressions
 
+// eval is evalRaw plus the implicit T -> T? coercion. Option is boxed,
+// so a bare T flowing into a T? slot has to be wrapped, and the
+// checker recorded exactly where. One chokepoint rather than a wrap at
+// each of the dozen syntactic sites where the coercion is legal —
+// missing one of those would be a silent wrong value, which is the
+// bug class boxing exists to remove.
 func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
+	v, sg := in.evalRaw(e, env)
+	if sg != nil {
+		return v, sg
+	}
+	return in.wrapIf(e, v), nil
+}
+
+func (in *Interp) evalRaw(e ast.Expr, env *Env) (Value, *sig) {
 	switch ex := e.(type) {
 	case *ast.IntLit:
 		// A literal is a magnitude; the checker says what type it
@@ -1435,7 +1447,7 @@ func (in *Interp) evalIfLet(ex *ast.IfLet, env *Env) (Value, *sig) {
 	if sg != nil {
 		return UnitV{}, sg
 	}
-	if _, isNone := x.(NoneV); isNone {
+	if _, wasNone := x.(NoneV); wasNone {
 		if ex.ElseIf != nil {
 			return in.eval(ex.ElseIf, env)
 		}
@@ -1444,7 +1456,18 @@ func (in *Interp) evalIfLet(ex *ast.IfLet, env *Env) (Value, *sig) {
 		}
 		return UnitV{}, nil
 	}
-	binds, ok := match(ex.Pat, x)
+	// `if let` is a one-armed match, and the scrutinee is unwrapped
+	// only for a plain binding: `if let root = self.root` takes the
+	// value out of the Option, while `if let Err(Timeout) = r` matches
+	// the pattern against the Result itself. A CtorPat therefore sees
+	// the box, and Some(n) destructures it like any other constructor.
+	scrut := x
+	if boxed, isSome := x.(*SomeV); isSome {
+		if _, plain := ex.Pat.(*ast.IdentPat); plain {
+			scrut = boxed.V
+		}
+	}
+	binds, ok := match(ex.Pat, scrut)
 	if !ok {
 		panic(rtErr{ex.Span, fmt.Sprintf("if let pattern does not match %s", render(x, true))})
 	}
@@ -1609,8 +1632,11 @@ func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {
 		// the default on Err — the error is discarded deliberately
 		// (the sketch's `db.exec(…) ?? 0`; ratified with the or-block
 		// decision).
-		if _, isNone := l.(NoneV); isNone {
+		if _, wasNone := l.(NoneV); wasNone {
 			return in.eval(ex.R, env)
+		}
+		if boxed, isSome := l.(*SomeV); isSome {
+			return boxed.V, nil // ?? unwraps a present Option
 		}
 		if r, isRes := l.(*ResultV); isRes {
 			if r.Ok {
@@ -1945,13 +1971,14 @@ func (in *Interp) evalIndex(ex *ast.Index, env *Env) (Value, *sig) {
 	}
 	switch o := obj.(type) {
 	case *MapV:
-		// A map read is honest about absence: it returns an Option
-		// (unboxed: the value, or None).
+		// A map read is honest about absence: it returns an Option.
+		// Boxed, so a key present holding None is distinguishable from
+		// a key that is absent — the two read identically until M4c.
 		v, ok := o.get(hashable(idx, ex.Span))
 		if !ok {
 			return NoneV{}, nil
 		}
-		return v, nil
+		return some(v), nil
 	case *ListV:
 		i, ok := idx.(IntV)
 		if !ok {

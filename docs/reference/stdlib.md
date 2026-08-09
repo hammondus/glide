@@ -21,7 +21,7 @@ implemented ✓; pointers to the designed future are marked ○.
 | `eprintln(v)` | `(T) -> ()` | stderr + newline |
 | `Ok(v)` | `(T) -> Result<T, E>` | success constructor |
 | `Err(e)` | `(E) -> Result<T, E>` | failure constructor |
-| `Some(v)` | `(T) -> T?` | identity at runtime — Option is still unboxed, so `Option<Option<T>>` is unrepresentable ○ |
+| `Some(v)` | `(T) -> T?` | boxes: `Option<Option<T>>` is representable, and `Some(None)` differs from `None` ✓ |
 | `None` | `T?` | the absent value (a literal, not a call) |
 | `expect(cond)` | test blocks only | on failure reports both sides of a comparison and continues |
 
@@ -141,7 +141,7 @@ compression, persistent collections, `Mutex<T>` — per
 | `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ✓ |
 | `tx.send(v)` | `(T) -> ()` | blocks per capacity (cancellation point); **panics** on closed channel (sender coordination bug) | ✓ |
 | `tx.close()` | `() -> ()` | idempotent; only the sender half has it | ✓ |
-| `rx.recv()` | `() -> Option<T>` | blocks (cancellation point); `None` = closed and drained. M2 wart: Option is unboxed, so a *sent* `None` reads as end-of-stream | ✓ |
+| `rx.recv()` | `() -> Option<T>` | blocks (cancellation point); `None` = closed and drained. A *sent* `None` is an ordinary element — Option is boxed as of M4c, so a payload can no longer impersonate the end-of-stream signal | ✓ |
 | `for v in rx` | — | consumes until closed (receiver satisfies the iteration protocol) | ✓ |
 | `s.deadline()` | `() -> Option<Instant>` | nearest enclosing timeout/deadline, inherited | ✓ |
 

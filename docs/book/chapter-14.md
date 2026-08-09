@@ -214,13 +214,18 @@ pointer that Go and Java use — the difference is entirely in what the
 type system lets you do with it. You get null's efficiency and none of
 its danger.
 
-#### The unboxing wart
+#### Boxed, with implicit promotion
 
-The interpreter represents `T?` **unboxed**: `Some` is the identity
-function and `None` is a distinct sentinel. `glide/DESIGN-DECISIONS.md`
-records the reason — without static types, the interpreter cannot see
-where `T -> T?` coercion should happen, so it makes the coercion a
-no-op.
+The interpreter represents `T?` **boxed**: every `T?` is `None` or
+`Some(v)`, never a bare `v`. It was unboxed through M4b — `Some` was
+the identity — because without static types the interpreter could not
+see where the implicit `T -> T?` coercion belonged. The checker
+removed that constraint, and M4c collected: the checker records each
+coercion site and the evaluator builds the box there.
+
+That closed three *silent wrong answers*: a present-but-`None` map
+entry read as absent, a `None` sent over a channel ended the stream,
+and `Option<Option<T>>` collapsed a level.
 
 Three consequences today:
 
@@ -534,9 +539,9 @@ allocation, no dynamic dispatch.
 larger and strictly safer. Compared to Go's comma-ok, it is the same
 machinery with better composition.
 
-**In the interpreter**, `Option` is unboxed, so `Some(x)` is a no-op
-and `None` is a sentinel comparison. This is actually the *fastest*
-possible representation and is the one silver lining of the wart.
+**In the interpreter**, `Some(x)` allocates a box. Unboxing was the
+faster representation and it was also wrong — it made three distinct
+values indistinguishable, which is not a trade worth an allocation.
 
 ---
 
@@ -809,8 +814,8 @@ is not a discipline; it is the only way the code compiles.
 - Several correlated Options in one struct is a sum type wearing a
   disguise.
 - ○: niche optimisation makes `T?` free for reference types.
-  Interpreter caveat: `Option` is unboxed, so `Option<Option<T>>` is
-  unrepresentable and `Some(x)` patterns match any non-`None` value.
+  `Option` is boxed as of M4c, so `Option<Option<T>>` is
+  representable and `Some(x)` matches only an actual `Some`.
 
 **Exercises**
 
