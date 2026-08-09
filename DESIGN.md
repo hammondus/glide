@@ -1013,6 +1013,32 @@ Go's model, with its defects designed out:
   sacrificed); idempotent close hides sloppy double-close where Go
   would panic; no unbounded channel means porting buffer-hungry Go
   code takes an explicit decision.
+- **`select`: match's clothes, Go's engine, `ctx.Done` designed away**
+  (ratified 2026-08-09). Arms, line-separated like match:
+  `pat = rx.recv() => expr` (pattern over the `Option<T>`),
+  `tx.send(v) => expr`, `else => expr` (non-blocking default);
+  select is an expression yielding the taken arm's value. The same
+  op may appear in several arms (`Some`/`None` split); a ready op's
+  arms are tried in order, no match → runtime error — match's
+  dynamic-exhaustiveness posture exactly, made static in the checker
+  era. **Arm guards** (`if cond`, evaluated once at entry) replace
+  Go's nil-channel disable trick — Occam's ALT had guarded
+  alternatives in 1983; the CSP lineage had this and Go dropped it.
+  Go's engine verbatim: operands evaluated once at entry in order;
+  uniformly random choice among ready arms (anti-starvation); no
+  ready arm and no `else` → block; blocking select is a cancellation
+  point. Deliberately absent: **no `ctx.Done()` arm** — the most
+  common arm in real Go selects has no Glide equivalent because the
+  scope cancels a blocked select (the payoff of the cancellation
+  design); no timeout arm (`time.after(d) -> Receiver<()>` is just
+  another recv case; `scope(timeout:)` covers real uses); no select
+  over task joins (a selectable task sends its result into a
+  channel; revisit on evidence); zero-arm `select {}` is a parse
+  error. Accepted costs: random choice means no priority select
+  (nested-select-with-`else` workaround carries over); an unmatched
+  ready recv has already consumed the value when it errors — the
+  known sharpest edge until the checker, accepted as the same
+  bargain dynamic match already makes.
 - **Races: honest mitigation, no false promise** (no borrow checker —
   recorded sacrifice). Ownership-transfer makes the default pattern
   race-free; **`Mutex<T>` wraps the data it guards** (Rust's best

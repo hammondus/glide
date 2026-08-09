@@ -726,6 +726,20 @@ workload is conceded.
   mistake frozen by stability promises. Kotlin/Swift reuse the same
   lessons in their channel/AsyncStream APIs: close is sender-side,
   end-of-stream is a value (`null`/`nil`), not an exception.
+- **`select`'s forty-year lineage** — Occam's `ALT` (1983, the first
+  CSP language on real hardware) offered guarded alternatives:
+  boolean condition + channel input per branch. Rob Pike carried the
+  construct through Newsqueak (1988), Alef, and Limbo into Go's
+  `select` (2009) — but dropped the guards, leaving Go programmers
+  to disable a case by setting its channel to nil, an idiom built on
+  the language's worst channel behavior (nil blocks forever). Go
+  added uniform-random choice among ready cases — the
+  anti-starvation rule Occam left implementation-defined. Kotlin's
+  `select` has sat in experimental status for years; Java shipped
+  virtual threads with *no* select at all (StructuredTaskScope can't
+  wait on multiple queues — users fall back to polling or merge
+  queues), proving the construct is hard to retrofit and worth
+  designing in from day one.
 - **What cancellation *is*** — nobody made it a first-class thing.
   Trio (2018) delivers it as a `Cancelled` exception raised at
   checkpoints, with documentation begging users to always re-raise
@@ -787,7 +801,14 @@ only; `rx.recv() -> Option<T>` (`None` = closed-and-drained, so
 away), `tx.close()` is idempotent (ships what Go users hand-roll
 with `sync.Once`), send-on-closed stays a panic — it's a sender
 coordination bug, and shutdown flows down the scope tree via
-cancellation, not up via send failures.
+cancellation, not up via send failures. For `select` (ratified
+2026-08-09): Go's engine (operands once at entry, uniform-random
+among ready, `else` for non-blocking) wearing match's syntax
+(patterns over `recv`'s `Option`, line-separated arms), with
+Occam's guards restored (`if cond` disables an arm — replacing
+Go's nil-channel trick) and Go's most common arm, `<-ctx.Done()`,
+designed away entirely: a blocked select is a cancellation point,
+so the scope cancels it.
 
 ## Comptime, not macros
 

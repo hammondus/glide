@@ -74,6 +74,7 @@ Reserved for later eras (using one today is a parse error):
 | `distinct` | `type UserId = distinct Int` — no implicit conversion | ○ |
 | `unsafe` | `unsafe fn` / `unsafe { }` | ○ |
 | `scope` | structured-concurrency scope | ○ |
+| `select` | wait on multiple channel ops | ○ |
 | `embed` | build-time file embedding | ○ |
 | `derive` | comptime derive (Json, Debug, Enum, …) | ○ |
 
@@ -308,4 +309,12 @@ patterns in function signatures, ref/binding modes.
   both halves clone; `tx.send(v)` (panics if closed), `tx.close()`
   (idempotent; only `tx` has it), `rx.recv() -> Option<T>` (`None` =
   closed-and-drained), `for v in rx` consumes until closed.
+  `select`: an expression; arms line-separated like match —
+  `pat = rx.recv() => expr`, `tx.send(v) => expr`, `else => expr`
+  (non-blocking), optional `if cond` guard per arm (evaluated once
+  at entry; false removes the arm). Same op may appear in several
+  arms; a ready op's arms try in order, no match → runtime error.
+  Operands evaluated once at entry; uniformly random among ready
+  arms; blocking select is a cancellation point (no `ctx.Done` arm
+  exists or is needed). Zero-arm `select {}` is a parse error.
 - Comptime (const eval, derive, reflection): ○.
