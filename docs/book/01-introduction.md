@@ -1051,7 +1051,8 @@ edit; the test boundary is where the standards apply.
   `500.ms` — stdlib-defined methods on numbers, no language magic, no
   bare-int timeouts (`sleep(1.min)` cannot be confused with
   `sleep(60)` of unknown unit).
-- **Integer overflow**: traps in dev builds, wraps in release.
+- **Integer overflow**: traps, in every build and at every width.
+  `wrapping_add` and friends are the explicit modular escape.
   Constant arithmetic is exact at compile time (`1 << 100` is fine in
   a constant; `let x: u8 = 300` is a compile error).
 - **Const names are `snake_case`** like any binding — there is no

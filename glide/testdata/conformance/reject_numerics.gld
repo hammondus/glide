@@ -14,4 +14,11 @@ fn main() {
     println(a + c)
     println(b)
     println(d)
+
+    // Widths do not mix, and the explicit escape hatch is no
+    // exception: wrapping_add takes the receiver's own width.
+    let h: u16 = 1
+    println(c + h)          // error: operator + is not defined for u8 and u16
+    println(c.wrapping_add(d))  // error: expected u8, found Int
+    println(c.wrapping_add(h))  // error: expected u8, found u16
 }

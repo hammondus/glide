@@ -44,10 +44,11 @@ working through the book.
 | Reserved builtin names | ✓ | 4 |
 | Import shadowing conflict as an error | ○ | 4, 29 |
 | `Int` (i64), `Float`, `Bool`, `String`, `Rune`, `()` | ✓ | 5 |
-| Sized numerics `i8`…`u128`, `f32` | ○ | 5 |
+| Sized numerics `i8`…`u64`, `f32` (represented and trapping at their own width; no conversions yet) | ✓ | 5 |
+| Sized numerics `i128`, `u128` | ○ | 5 |
 | `BigInt`, `Decimal` | ○ | 5 |
-| Overflow trap in dev | ✓ | 5 |
-| Release-tier wrapping, `wrapping_*` | ○ | 5 |
+| Overflow traps in every tier, at every width | ✓ | 5 |
+| `wrapping_*` on every integer width | ✓ | 5 |
 | Arbitrary-precision literals until typed | ○ | 5, 34 |
 | No truthiness, no implicit conversions | ✓ | 5 |
 | Ranges `..` and `..=` | ✓ | 5 |

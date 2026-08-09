@@ -154,11 +154,26 @@ yet either — a byte offset is useless until byte-offset slicing
 exists; `contains`/`starts_with`/`ends_with` cover the real uses.
 (○: `StringBuilder`.)
 
-### Int
+### Int (and every integer width)
+
+These are shared by `Int`/`i64` and by `i8`–`i32`, `u8`–`u32` and
+`u64`. `Self` is the receiver's own width: `u8.wrapping_add` takes and
+returns a `u8`, never an `Int`.
 
 | Method | Signature | Notes |
 |---|---|---|
-| `cmp(other)` | `(Int) -> Int` | three-way |
+| `cmp(other)` | `(Self) -> Int` | three-way: negative / 0 / positive |
+| `wrapping_add(other)` | `(Self) -> Self` | modular `+`; no trap |
+| `wrapping_sub(other)` | `(Self) -> Self` | modular `-`; no trap |
+| `wrapping_mul(other)` | `(Self) -> Self` | modular `*`; no trap |
+| `wrapping_neg()` | `() -> Self` | modular negation; a type's minimum negates to itself |
+
+The `wrapping_*` family is the explicit escape from trap-on-overflow.
+Plain `+` `-` `*` `/` trap at the declared width in every tier
+(DESIGN.md), so hashes, checksums, PRNGs and wrapping counters say
+`wrapping_add` where a reader can see it. `wrapping_div` does not
+exist: division cannot wrap except for minimum ÷ -1, which is
+`wrapping_neg`.
 
 ### List
 

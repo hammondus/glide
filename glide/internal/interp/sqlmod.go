@@ -198,6 +198,10 @@ func toDriver(v Value, at source.Span) any {
 		return nil
 	case IntV:
 		return int64(x)
+	case UintV:
+		return uint64(x)
+	case SizedV:
+		return x.V
 	case FloatV:
 		return float64(x)
 	case StrV:

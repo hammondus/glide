@@ -44,15 +44,14 @@ or it is a bug.
      `.Shorthand` resolved in the expected type, `Timeout` as a real
      type, integer literal range checking, and `?` conversion resolved
      from real types — retiring `resultErrType`'s string slicing.
-     Still open inside M4b: **boxing `Option`** and **sized numerics
-     in the runtime**. The checker knows `i8`–`u64`/`f32` as types and
-     rejects `let x: u8 = 300`; the *runtime* still stores every
-     integer as an i64, so a sized type does not wrap or trap at its
-     own width yet. Every program correct under sized semantics
-     behaves identically — only the overflow point differs — but this
-     is a stated gap, not a design position.
-   - **M4c — generics and traits.** Declaration-site bound checking,
-     trait structural conformance. The interpreter runs generics
+     Deferred out of M4b: **boxing `Option`** and **sized numerics in
+     the runtime**.
+   - **M4c — generics, traits, and the numeric floor.** Sized
+     numerics landed first (see below): the six narrow widths now
+     have a runtime representation and trap at their own width, and
+     overflow traps in every tier. Still to come: declaration-site
+     bound checking, trait structural conformance, static match
+     exhaustiveness, boxed `Option`. The interpreter runs generics
      type-erased; monomorphisation is the compiled tier's problem.
 
 ## Decisions
@@ -374,10 +373,8 @@ or it is a bug.
      the type it landed in, including through a binary operator: in
      `f / 2` the 2 adopts Float, and in `big - 1` the 1 adopts u64.
 
-  `UintV uint64` is the runtime's only new value type, and exists
-  solely for u64 — the one integer type whose range an i64 cannot
-  hold. i8–i32 and u8–u32 all fit an IntV, which is why they still do
-  not wrap at their own width. A u64 never mixes with an Int: DESIGN.md
+  `UintV uint64` exists solely for u64 — the one integer type whose
+  range an i64 cannot hold. A u64 never mixes with an Int: DESIGN.md
   forbids implicit numeric conversion, the checker enforces it, and
   `binop` has no case for the pair.
 
@@ -386,6 +383,61 @@ or it is a bug.
   constant math) still cannot be evaluated. That wants real
   arbitrary-precision constants and arrives with comptime. The range
   *check* is now exact for every type the language has.
+
+- **The six narrow widths carry their own size on the value, not on
+  the checker's annotation.** `SizedV{Bits, Signed, V int64}` is one
+  carrier for i8/i16/i32/u8/u16/u32.
+
+  The tempting cheaper design was to leave them in an `IntV` and read
+  the width from `check.Info` at the operator node — the seam already
+  exists, and it is what fixed the Float-division bug. It is wrong,
+  and the counter-example is one line: inside
+  `fn double<T>(v: T) -> T { v + v }` the interpreter runs generics
+  type-erased, so by the time `+` executes there is no static type to
+  consult. A `u8` passed in would silently not trap. The width has to
+  survive erasure, which means it has to be on the value.
+
+  One carrier rather than six Go types (`U8V`, `I8V`, …) because six
+  would mean six more cases in `typeName`, `render`, `eq`, `hashable`,
+  `binop`, `naturalLess`, the json encoder and the sql binder — the
+  same switch written six times. `Int` and `u64` keep their own
+  unboxed types: `Int` is the default and hot, `u64` is the one width
+  an int64 cannot hold, and the narrow six are exactly the ones with
+  something to remember. `V` is kept sign- or zero-extended so it is
+  always the true magnitude, which makes `%d` correct for both signs
+  and makes the carrier comparable — so map keys and `==` need no
+  extra cases at all.
+
+  Arithmetic is exact before the range check: operands are at most 32
+  bits, so signed products fit an int64 (2^31 · 2^31 < 2^63) and
+  unsigned products fit a uint64 ((2^32-1)^2 < 2^64). Nothing has to
+  be done in two halves.
+
+- **Overflow traps in every tier, and `wrapping_*` is the escape.**
+  This reverses `../DESIGN.md`'s original "trap in dev, wrap in
+  release" — see that file for the language-level argument. What it
+  means here: the interpreter is no longer "the dev tier that traps",
+  it is simply the tier that computes the same answer as the other
+  one. The overflow message names the operator that would have
+  succeeded (`use wrapping_add for modular arithmetic`) rather than
+  the build mode that would have wrapped, because the second was
+  advice to change how you build in order to get a wrong answer
+  quietly.
+
+  `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg`
+  live in one table on each side — `check.intMethods` with `Self`
+  bound to the receiver, and `interp.intMethod` — so a width cannot
+  acquire a method in one tier and not the other. That also fixed a
+  smaller gap: `cmp` was `Int`-only, so a `u64` could not answer it.
+
+- **A tuple literal's expected element types win, as a list
+  literal's already did.** `checkExpr` pushed the expectation into
+  each slot and then rebuilt the tuple's type from
+  `types.Default(got)`, so `(250, -300)` at `(u8, i16)` reported
+  "expected (u8, i16), found (Int, Int)" — every element had just
+  satisfied the expectation individually. Pre-existing since M4b and
+  not specific to widths: `let t: (Int, Float) = (1, 2)` failed the
+  same way.
 
 - **The checker closed two holes the dynamic tier had papered over.**
   Both are language changes, both make an existing annotation mean
@@ -432,18 +484,40 @@ or it is a bug.
   an int64" into the *type* representation, and `types.Basic` carries
   an explicit width for exactly that reason.
 
-## Scheduled for M4c
+## Remaining in M4c
 
-Static generics (M4a parses type parameters and bounds into the AST;
-M4b resolves them into `types.Var` and erases them at call sites;
-nothing checks a *bound* yet), trait *checking* (impl blocks register
-methods; conformance is asserted, not verified), boxed `Option`, sized
-numerics in the runtime, static match exhaustiveness, the
-spawn-captures-mut ban, generator element types (a `yield`ing function
-is exempt from the tail-value check today), and call-site inference for
-associated functions. Each has its own entry above or in
-`../docs/reference/language.md`; they are listed together here because
-they are one body of work, not a scattering of small ones.
+Sized numerics in the runtime are **done** (see the decisions above).
+Still open, in the order they are worth doing:
+
+1. **Generic bound checking and trait conformance — one job, not
+   two.** Checking `T: Ord` at a call site *is* asking "does this
+   type conform to `Ord`?", so conformance is the prerequisite rather
+   than a sibling. M4a parses bounds into the AST and M4b resolves
+   them into `types.Var`, but nothing checks one, and `impl Greet for
+   Foo {}` with `hello` never written is accepted today. The payoff
+   is larger than one more diagnostic: `types.IsOpaque` currently
+   makes *every* operation inside *every* generic body pass in
+   silence, and a bound is what turns a type parameter from a hole
+   into a known surface. It shrinks `Unknown` more than anything else
+   left.
+2. **Boxed `Option`.** A key present in a `Map<K, V?>` holding `None`
+   is indistinguishable from an absent key — real data loss, but the
+   most invasive change of the three, since it touches the runtime
+   representation as well as the checker.
+3. The cheaper leftovers: static match exhaustiveness (the runtime
+   catches it, and its message still says "exhaustiveness checking
+   arrives with the compiler" — now the checker's job), the
+   spawn-captures-mut ban, generator element types (a `yield`ing
+   function is exempt from the tail-value check, so `yield "s"` in an
+   `Iterator<Int>` passes), and call-site inference for associated
+   functions.
+
+**Sized numerics have no conversions.** They are reachable from
+literals and nothing else — no `u8(n)`, no `n.to_u8()` — so a `u8`
+cannot be computed from runtime data, which rules out the byte, hash
+and checksum work the type exists for. That is a language-surface
+decision (`u8(n)` would reuse the `*types.Meta` callee path that
+already builds distinct types) and is not made yet.
 
 ## Deliberately absent (after M4)
 

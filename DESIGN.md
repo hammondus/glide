@@ -140,10 +140,28 @@ Glide takes both layers:
   something breaks far from the cause. Types can opt in to a default via a
   trait (so `Mutex`, `Builder` still work bare), but domain types get no
   fake instances for free.
-- **Integer overflow: trap in dev builds, wrap in release.** Falls out of
-  the tiered-backend design. Explicit `wrapping_*` ops for code that wants
-  modular arithmetic. Accepted cost: dev and release differ on overflow
-  ("test what you ship" is violated) — trade taken knowingly, as Zig did.
+- **Integer overflow traps. Always, in every tier, at every width.**
+  *Reverses the original "trap in dev builds, wrap in release"*, which
+  was Zig's trade and was taken here on the grounds that it "falls out
+  of the tiered-backend design". It falls out of nothing — it is a
+  choice to make the same program compute different answers under
+  `glide run` and from the compiled binary. That is precisely the
+  drift the one-frontend design exists to prevent, and the tier
+  differences this project accepts are stated ones: speed, and
+  standalone binaries. A silently different answer is not a speed
+  difference.
+
+  Modular arithmetic is spelled `wrapping_add`, `wrapping_sub`,
+  `wrapping_mul`, `wrapping_neg`, on every integer width — so the
+  code that genuinely wants it (hashes, checksums, PRNGs, wrapping
+  counters) says so where a reader can see it, and the overflow
+  message names the escape hatch at the point of failure.
+
+  Accepted cost: release-tier arithmetic carries an overflow check
+  forever. That is the price of "test what you ship", and it is the
+  cheaper mistake — an unchecked wrap is a wrong answer that
+  propagates, while a check is a branch the hardware predicts.
+  Revisit only with a measurement, never on principle.
 - **Strings are UTF-8 bytes, Go-style** — not Rust's enforced-valid
   `String`/`OsString` split, which makes every OS/network boundary a
   conversion ceremony. Iteration yields runes; validity is checked at

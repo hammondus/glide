@@ -322,20 +322,9 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			}
 			return StrV(strings.Repeat(string(r), int(k)))
 		}
-	case IntV:
-		switch name {
-		case "cmp":
-			o, ok := one("cmp", args, at).(IntV)
-			if !ok {
-				panic(rtErr{at, "Int.cmp compares against another Int"})
-			}
-			switch {
-			case r < o:
-				return IntV(-1)
-			case r > o:
-				return IntV(1)
-			}
-			return IntV(0)
+	case IntV, UintV, SizedV:
+		if out, handled := intMethod(r, name, args, at); handled {
+			return out
 		}
 	case *ListV:
 		switch name {
@@ -687,6 +676,16 @@ func naturalLess(a, b Value, at source.Span) bool {
 	if x, ok := a.(IntV); ok {
 		if y, ok := b.(IntV); ok {
 			return x < y
+		}
+	}
+	if x, ok := a.(UintV); ok {
+		if y, ok := b.(UintV); ok {
+			return x < y
+		}
+	}
+	if x, ok := a.(SizedV); ok {
+		if y, ok := b.(SizedV); ok && x.Bits == y.Bits && x.Signed == y.Signed {
+			return x.V < y.V
 		}
 	}
 	if x, ok := a.(StrV); ok {

@@ -6,8 +6,10 @@ truthiness, Go's platform-sized `int`, Python's silent bignum
 promotion. Glide's primitives are boring by construction, and each
 piece of boringness is a specific bug class that has been deleted.
 
-This chapter is mostly ✓. Sized integers (`i8`…`u128`, `f32`) are ○ —
-designed but not implemented — and are flagged where they appear.
+This chapter is ✓ throughout. The sized integers `i8`…`u64` and `u8`…
+`u64` run: they are declared, checked, represented at their own width
+and trap at it. Only `i128`/`u128` remain ○, and the sized types have
+no conversions yet — a `u8` can still only come from a literal.
 
 ---
 
@@ -19,8 +21,8 @@ designed but not implemented — and are flagged where they appear.
 Bool · Int · Float · Rune · String · () · Range
 ```
 
-plus the designed sized numerics (○): `i8 i16 i32 i64 i128`,
-`u8 u16 u32 u64 u128`, `f32`.
+plus the sized numerics `i8 i16 i32 i64`, `u8 u16 u32 u64`, `f32` (✓),
+and `i128`/`u128` (○).
 
 - **`Int` is i64 on every target.** Not platform-sized. Not `usize`.
   One integer type that behaves identically on your laptop and on the
@@ -69,9 +71,11 @@ println(1 + 2.0)
 error: line 1: operator + not defined for Int and Float
 ```
 
-`Int` and `Float` do not mix. Neither will `i32` and `i64` when sized
-integers arrive. Conversions are always explicit and always visible.
-This is Go's rule, and Go proved the strictness is tolerable.
+`Int` and `Float` do not mix, and neither do `i32` and `i64`, or `u8`
+and `u16` — every pair of widths is a compile error. This is Go's
+rule, and Go proved the strictness is tolerable. The one wrinkle today
+is that Glide has no *explicit* conversion either (○), so a sized
+value can only come from a literal.
 
 #### Integer overflow traps
 
@@ -83,20 +87,28 @@ fn main() {
 ```
 
 ```
-error: line 3: Int overflow: 9223372036854775807 + 1 (dev builds trap; release wraps)
+error: line 3: Int overflow: 9223372036854775807 + 1 (use wrapping_add for modular arithmetic)
 ```
 
-Read the parenthetical: **overflow traps in dev builds and wraps in
-release builds.** The interpreter is the dev tier, so it traps —
-including on `-` , `*`, `/` of `MinInt / -1`, and unary `-` on
-`MinInt`. Explicit `wrapping_*` operations (○) exist for code that
-genuinely wants modular arithmetic.
+Read the parenthetical: **overflow traps — in every build, at every
+width.** Not just `+`: also `-`, `*`, `/` of `MinInt / -1`, and unary
+`-` on `MinInt`. And not just `Int`: a `u8` traps at 8 bits, so `250 +
+10` is an error rather than 260.
 
-This is Zig's model, and `DESIGN.md` records the cost knowingly: dev
-and release differ on overflow, which violates "test what you ship."
-The trade was taken because a trap in dev catches the bug at the moment
-it happens, and a check on every arithmetic operation in release is a
-tax most programs should not pay.
+The parenthetical also tells you the fix. `wrapping_add`,
+`wrapping_sub`, `wrapping_mul` and `wrapping_neg` exist on every
+integer width, and code that genuinely wants modular arithmetic —
+hashes, checksums, PRNGs, wrapping counters — calls them by name.
+
+This is Swift's model, and it is a reversal. Glide originally took
+Zig's: trap in dev builds, wrap in release. The argument against it is
+that the same program then computes different answers under `glide
+run` and from the compiled binary, and the whole point of one shared
+frontend is that the tiers cannot drift. The accepted cost is now the
+other way round — release-tier arithmetic carries the check forever —
+and `DESIGN.md` records it as the cheaper mistake: a check is a branch
+the hardware predicts, while a silent wrap is a wrong answer that
+propagates.
 
 #### Booleans, and the absence of truthiness
 
@@ -228,9 +240,17 @@ fields, and index targets, and requires a `mut` path.
 #### `Int` is a Go `int64` today
 
 The interpreter's `Int` is a Go `int64`, and overflow detection is an
-explicit check after each arithmetic operation. In the designed
-compiler, dev builds emit the same check and release builds do not —
-which is exactly why the two tiers differ.
+explicit check after each arithmetic operation. The designed compiler
+emits the same check, in every build — the two tiers agree on every
+answer, which is the point.
+
+`u64` gets its own runtime representation, because it is the one
+integer width an `int64` cannot hold. The six narrow widths — `i8`,
+`i16`, `i32`, `u8`, `u16`, `u32` — share one carrier that records the
+width alongside the value. That matters more than it sounds: generics
+are type-erased, so inside `fn double<T>(v: T) -> T { v + v }` there
+is no static type left by the time `+` runs. The only thing that can
+say "trap at 8 bits" is the value itself.
 
 `Float` is a Go `float64` with IEEE 754 semantics, including the parts
 nobody enjoys: `0.1 + 0.2 != 0.3`, `NaN != NaN`, and signed zero. Glide
@@ -361,23 +381,35 @@ particularly that `??` is Option-based rather than
 falsiness-based, so unlike JavaScript's `||` it does not break on `0`
 or `""`.
 
-#### Why overflow traps in dev and wraps in release
+#### Why overflow always traps
 
 Three positions exist and each is defensible:
 
 - **Always wrap** (C's unsigned, Go, Java): fast, and silently wrong.
-- **Always trap** (Swift, Python's ints effectively): correct, and
-  taxes every arithmetic operation in production.
-- **Trap in dev, wrap in release** (Zig, Glide): catches the bug at the
+- **Always trap** (Swift, and Glide): correct, and taxes every
+  arithmetic operation in production.
+- **Trap in dev, wrap in release** (Zig, Rust): catches the bug at the
   moment it happens during development, costs nothing in production.
 
-The third position's cost is that dev and release differ, violating
-"test what you ship". `DESIGN.md` takes the trade knowingly and Zig's
-experience supports it: overflow bugs are found in development, because
-that is where the code is exercised with the developer watching.
+Glide originally took the third position and reversed to the second.
+The third one's cost is that dev and release differ, which violates
+"test what you ship" — and in a two-tier language that cost is much
+worse than it first appears. The interpreter and the compiler share
+one frontend precisely so that a program cannot mean two things; an
+overflow policy that varies by build reintroduces exactly the drift
+the design exists to prevent. Worse, the overflow bug that only
+appears in release is the hardest kind to reproduce, because the build
+that would have caught it is not the build that ran.
 
-It only works because of the tiered-backend design. A language with one
-backend has to pick one behaviour.
+Swift is the evidence that the second position is affordable: a decade
+of shipped iOS, trapping in release, with `&+` `&-` `&*` for the
+modular cases. Glide spells those `wrapping_add`, `wrapping_sub`,
+`wrapping_mul` and `wrapping_neg` — longer on purpose, because
+modular arithmetic in code that did not mean to ask for it is a bug,
+and it should be conspicuous.
+
+The first position stays rejected for the reason it always was: a
+wrong answer that keeps going is worse than a stopped program.
 
 #### Why `BigInt` is a named type and not automatic promotion ○
 
@@ -429,11 +461,12 @@ implicit conversions at all, and overflow is defined at both tiers.
 conversions, `Bool`-only conditions, no truthiness, defined wrapping
 overflow. Differences: Go's `int` is platform-sized (Glide fixes at
 64), Go's `rune` is an alias (Glide makes it a type), Go wraps in all
-builds (Glide traps in dev), and Go has no `??` so nil-map reads return
-zero values.
+builds (Glide traps in all builds), and Go has no `??` so nil-map reads
+return zero values.
 
 **Rust.** Also very close. Rust traps in debug and wraps in release —
-the exact model Glide copies. Differences: Rust's `usize` for indexing
+the model Glide started with and reversed, for the reason above.
+Differences: Rust's `usize` for indexing
 (Glide says signed `Int`), Rust's `as` casts (Glide will require named
 conversions), and Rust's rich integer method surface
 (`checked_add`, `saturating_sub`, `wrapping_mul`) which Glide will
@@ -697,7 +730,7 @@ fn main() {
 
 ```
 2000
-error: line 2: Int overflow: 9000000000000000000 * 2 (dev builds trap; release wraps)
+error: line 2: Int overflow: 9000000000000000000 * 2 (use wrapping_mul for modular arithmetic)
 ```
 
 The error names the line inside `checked_double`, not the call site.
@@ -741,9 +774,10 @@ signature.
   and its single value.
 - There are no implicit numeric conversions, in any direction. `1 +
   2.0` is an error.
-- Integer overflow **traps in dev builds and wraps in release**. The
-  interpreter is the dev tier, so it traps. This is Zig's model and it
-  costs a deliberate dev/release divergence.
+- Integer overflow **traps, in every build and at every width** — a
+  `u8` traps at 8 bits, not at 64. This is Swift's model; the
+  `wrapping_*` methods are the explicit escape, and there is no build
+  mode that wraps silently.
 - There is no truthiness. Conditions take `Bool` only, and every
   legitimate use of truthiness has an explicit substitute: `if let` for
   presence, `is_empty()` for emptiness, `??` for defaulting, `!= 0` for

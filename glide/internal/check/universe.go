@@ -34,10 +34,16 @@ var (
 	tvU = &types.Var{Name: "U"}
 	tvK = &types.Var{Name: "K"}
 	tvV = &types.Var{Name: "V"}
+	// tvSelf stands for the receiver in a signature shared across a
+	// family of types — every integer width gets the same methods, and
+	// `u8.wrapping_add` must take and return a u8, not an Int.
+	tvSelf = &types.Var{Name: "Self"}
 )
 
-func p(name string, t types.Type) types.Param  { return types.Param{Name: name, Type: t} }
-func pd(name string, t types.Type) types.Param { return types.Param{Name: name, Type: t, HasDefault: true} }
+func p(name string, t types.Type) types.Param { return types.Param{Name: name, Type: t} }
+func pd(name string, t types.Type) types.Param {
+	return types.Param{Name: name, Type: t, HasDefault: true}
+}
 
 // meth builds a method signature taking `self`.
 func meth(ret types.Type, params ...types.Param) *types.Func {
@@ -98,8 +104,17 @@ var stringMethods = map[string]*types.Func{
 	"cmp":              meth(types.Int, p("other", types.String)),
 }
 
+// intMethods are shared by every integer width, with Self bound to the
+// receiver. The wrapping_* family is the explicit escape from
+// trap-on-overflow: `+` traps in every tier, and code that wants
+// modular arithmetic — hashes, checksums, PRNGs, wrapping counters —
+// says so at the call site (DESIGN.md).
 var intMethods = map[string]*types.Func{
-	"cmp": meth(types.Int, p("other", types.Int)),
+	"cmp":          meth(types.Int, p("other", tvSelf)),
+	"wrapping_add": meth(tvSelf, p("other", tvSelf)),
+	"wrapping_sub": meth(tvSelf, p("other", tvSelf)),
+	"wrapping_mul": meth(tvSelf, p("other", tvSelf)),
+	"wrapping_neg": meth(tvSelf),
 }
 
 // Duration constructors are suffix *properties* on a number, not
@@ -280,11 +295,20 @@ func Host() program.Known {
 func builtinMethod(recv types.Type, name string) (fn *types.Func, modelled bool) {
 	switch r := recv.(type) {
 	case *types.Basic:
-		switch r {
-		case types.String:
+		switch {
+		case r == types.String:
 			return stringMethods[name], true
-		case types.Int, types.UntypedInt:
-			return intMethods[name], true
+		case r.IsInteger():
+			// Every width, not just Int: a u8 that cannot answer
+			// `cmp` or `wrapping_add` is a type you cannot compute
+			// with. Self binds to the receiver — defaulted first, so
+			// an untyped literal's methods are Int's.
+			sig := intMethods[name]
+			if sig == nil {
+				return nil, true
+			}
+			f, _ := types.Subst(sig, map[string]types.Type{"Self": types.Default(r)}).(*types.Func)
+			return f, true
 		}
 		return nil, false
 	case *types.App:

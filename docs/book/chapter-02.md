@@ -263,9 +263,8 @@ compiler or fast code" dilemma:
   Go source nearly one-to-one and inherits Go's GC, scheduler,
   cross-compilation, and static linking for free.
 
-The tiering pays rent repeatedly throughout this book. Integer overflow
-traps in dev builds and wraps in release. Backtraces are captured in
-dev and skipped in release. Unused variables are a warning in dev and
+The tiering pays rent repeatedly throughout this book. Backtraces are
+captured in dev and skipped in release. Unused variables are a warning in dev and
 an error in release and in `glide test`. Complete debug info is a
 dev-tier guarantee and best-effort in release. Each of those is a case
 where the right answer for the edit loop and the right answer for

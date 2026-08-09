@@ -629,7 +629,7 @@ fn main() {
 
 ```
 # dev tier (the interpreter, today)
-error: line 3: Int overflow: 9223372036854775807 + 1 (dev builds trap; release wraps)
+error: line 3: Int overflow: 9223372036854775807 + 1 (use wrapping_add for modular arithmetic)
 ```
 
 ```

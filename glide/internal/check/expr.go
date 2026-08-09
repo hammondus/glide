@@ -172,7 +172,17 @@ func (c *checker) typeOfRaw(e ast.Expr, want types.Type) types.Type {
 		}
 		elems := make([]types.Type, len(x.Elems))
 		for i, el := range x.Elems {
-			elems[i] = types.Default(c.checkExpr(el, wants[i]))
+			got := c.checkExpr(el, wants[i])
+			// Where a slot has an expectation and the element meets
+			// it, that expectation is the element's type — the same
+			// rule listLit already applies. Defaulting instead would
+			// make `(250, -300)` an (Int, Int) that then fails to be
+			// the (u8, i16) each of its elements had just satisfied.
+			if wants[i] != nil && !types.IsUnknown(wants[i]) && types.AssignableTo(got, wants[i]) {
+				elems[i] = wants[i]
+				continue
+			}
+			elems[i] = types.Default(got)
 		}
 		return &types.Tuple{Elems: elems}
 

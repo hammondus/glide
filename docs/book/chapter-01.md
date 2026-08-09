@@ -62,8 +62,8 @@ The short version of where the pieces come from:
 |---|---|---|
 | **Go** | The entire runtime model — green threads, channels, tracing GC, `defer`. Sub-second builds. One static binary. One canonical formatter. Errors as values. Directory-is-a-package. Inert, order-independent declarations. | `nil`, zero values, implicit interfaces, `init()`, runtime reflection, `:=`, `context.Context` threading. |
 | **Rust** | `Result` + `?`, sum types with exhaustive `match`, `let`/`mut` immutability, `\|x\|` closure syntax, `Mutex<T>` that owns its data, sequential redeclaration, the orphan rule. | The borrow checker, lifetimes, macros, async/await, the turbofish, `Fn`/`FnMut`/`FnOnce`. |
-| **Zig** | Comptime instead of macros, `errdefer`, `test` blocks as a language construct, overflow traps in dev builds, `//`-only comments. | Manual memory management, comptime-as-generics, errors on every unused variable. |
-| **Swift** | `T?` optionals, `if let`, `let … else`, declared trait conformance with structural satisfaction, leading-dot enum shorthand, block-scoped `defer`. | Trailing closures, `$0`, the two-name parameter split. |
+| **Zig** | Comptime instead of macros, `errdefer`, `test` blocks as a language construct, `//`-only comments. | Manual memory management, comptime-as-generics, errors on every unused variable. |
+| **Swift** | `T?` optionals, `if let`, `let … else`, declared trait conformance with structural satisfaction, leading-dot enum shorthand, block-scoped `defer`, trapping overflow in *every* build. | Trailing closures, `$0`, the two-name parameter split. |
 | **Haskell / ML** | The data model: sum types, pattern matching, no null, type classes (as traits), typed holes. | Whole-program type inference, user-invented operators. |
 | **Kotlin** | Named arguments and default parameter values, wholesale. | Trailing closures, `it`. |
 | **Nim** | `distinct` types. | |
@@ -227,7 +227,7 @@ Where they genuinely conflict, the default favours the human and an
 explicit opt-in favours the machine. Garbage collection by default,
 arenas where profiling demands them. Immutable strings by default,
 `StringBuilder` when the loop is hot. `Int` is a 64-bit integer with
-trapping overflow in dev builds; `wrapping_add` exists for code that
+trapping overflow in every build; `wrapping_add` exists for code that
 means it. Unbuffered prints so debug output always lands, with an
 explicit buffered writer for bulk output.
 

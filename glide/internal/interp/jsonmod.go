@@ -56,6 +56,10 @@ func encodeJSON(b *strings.Builder, v Value, at source.Span) {
 		fmt.Fprintf(b, "%t", bool(x))
 	case IntV:
 		fmt.Fprintf(b, "%d", int64(x))
+	case UintV:
+		fmt.Fprintf(b, "%d", uint64(x))
+	case SizedV:
+		fmt.Fprintf(b, "%d", x.V)
 	case FloatV:
 		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
 			panic(rtErr{at, "JSON cannot represent NaN or infinity"})

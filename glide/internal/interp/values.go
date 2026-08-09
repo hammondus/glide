@@ -15,16 +15,40 @@ import (
 type Value any
 
 type (
-	IntV   int64
+	IntV int64
 
 	// UintV is a u64 value, and only a u64: it exists because u64 is
-	// the one integer type whose range an int64 cannot hold. The
-	// narrower sized types (i8-i32, u8-u32) still live in an IntV,
-	// which is why they do not yet wrap at their own width — the
-	// stated gap in DESIGN-DECISIONS.md. A u64 never mixes with an
-	// Int: DESIGN.md forbids implicit numeric conversion, the checker
-	// enforces it, and binop has no case for the pair.
+	// the one integer type whose range an int64 cannot hold. A u64
+	// never mixes with an Int: DESIGN.md forbids implicit numeric
+	// conversion, the checker enforces it, and binop has no case for
+	// the pair.
 	UintV uint64
+
+	// SizedV is an i8/i16/i32/u8/u16/u32 value. Those six carry their
+	// own width at runtime because generics are type-erased: inside
+	// `fn double<T>(v: T) -> T { v + v }` the static type is gone by
+	// the time `+` runs, so the value itself is the only thing that
+	// can say "trap at 8 bits". Deriving the width from the checker's
+	// annotation on the operator node instead would be silently wrong
+	// for exactly that call.
+	//
+	// One carrier with a width field rather than six Go types: six
+	// would mean six more cases in typeName, render, eq, hashable,
+	// binop, naturalLess, json and sql — the same switch written six
+	// times. Int and u64 keep their own unboxed types because Int is
+	// the default and hot, and u64 is the one width an int64 cannot
+	// hold; the narrow six are exactly the ones that need to remember
+	// something.
+	//
+	// V is sign-extended when Signed and zero-extended otherwise, so
+	// it is always the value's true mathematical magnitude and `%d`
+	// prints it correctly either way. SizedV is comparable, so it
+	// works as a map key and under `==` with no extra cases.
+	SizedV struct {
+		Bits   int // 8, 16 or 32
+		Signed bool
+		V      int64
+	}
 
 	FloatV float64
 	StrV   string
@@ -128,7 +152,7 @@ func newMap() *MapV { return &MapV{m: map[Value]Value{}} }
 
 func hashable(k Value, at source.Span) Value {
 	switch k.(type) {
-	case IntV, UintV, StrV, BoolV, RuneV:
+	case IntV, UintV, SizedV, StrV, BoolV, RuneV:
 		return k
 	}
 	panic(rtErr{at, fmt.Sprintf("%s cannot be a map key", typeName(k))})
@@ -152,6 +176,8 @@ func typeName(v Value) string {
 		return "Int"
 	case UintV:
 		return "u64"
+	case SizedV:
+		return x.name()
 	case FloatV:
 		return "Float"
 	case StrV:
@@ -224,6 +250,10 @@ func render(v Value, quoted bool) string {
 		return fmt.Sprintf("%d", int64(x))
 	case UintV:
 		return fmt.Sprintf("%d", uint64(x))
+	case SizedV:
+		// V is kept sign- or zero-extended, so it is already the
+		// value's true magnitude and needs no per-width formatting.
+		return fmt.Sprintf("%d", x.V)
 	case FloatV:
 		return fmt.Sprintf("%g", float64(x))
 	case StrV:
@@ -334,7 +364,7 @@ func render(v Value, quoted bool) string {
 // comparable (runtime error at the call site's at).
 func eq(a, b Value, at source.Span) bool {
 	switch x := a.(type) {
-	case IntV, UintV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV, DurationV:
+	case IntV, UintV, SizedV, FloatV, StrV, BoolV, RuneV, UnitV, NoneV, DurationV:
 		return a == b
 	case InstantV:
 		y, ok := b.(InstantV)

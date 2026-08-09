@@ -1,0 +1,58 @@
+// Sized numerics are ordinary types: they propagate through every
+// binding form, they carry their own arithmetic, and every integer
+// width has the same method set. Before M4c the six narrow widths had
+// no runtime representation at all — they lived in an i64 and neither
+// wrapped nor trapped at their own width.
+type Pixel = struct { r: u8, g: u8, b: u8 }
+
+fn brighten(c: u8, by: u8) -> u8 {
+    c + by
+}
+
+// The declared width survives type erasure: the checker has no idea
+// what T is here, and the value has to answer for itself at runtime.
+fn double<T>(v: T) -> T {
+    v + v
+}
+
+fn main() {
+    // Both ends of every narrow width, exactly.
+    let lo8: i8 = -128
+    let hi8: i8 = 127
+    let hiu8: u8 = 255
+    let lo32: i32 = -2147483648
+    let hiu32: u32 = 4294967295
+    println("{lo8} {hi8} {hiu8} {lo32} {hiu32}")
+
+    // A literal lands at the width the context asks for, through a
+    // struct field, a call argument, a list element and a tuple slot.
+    let p = Pixel { r: 250, g: 10, b: 0 }
+    println(brighten(p.g, 5))
+    let vals: List<u8> = [1, 200]
+    println(vals)
+    let t: (u8, i16) = (250, -300)
+    println(t)
+    let o: u8? = 250
+    println(o ?? 0)
+    println(double(p.b))
+
+    // Arithmetic and ordering are defined at every width, and the
+    // result keeps the width rather than widening to Int.
+    let a: u8 = 200
+    let b: u8 = 3
+    println("{a % b} {a / b} {a > b} {a == 200}")
+
+    // wrapping_* is the explicit escape from trap-on-overflow, and it
+    // exists at every integer width — Int and u64 included.
+    println(hiu8.wrapping_add(1))
+    println(lo8.wrapping_neg())
+    println(hiu32.wrapping_mul(hiu32))
+    println(9223372036854775807.wrapping_add(1))
+    let big: u64 = 18446744073709551615
+    println(big.wrapping_add(1))
+
+    // cmp too: a width that cannot answer cmp is a type you cannot
+    // sort, and it was Int-only until M4c.
+    println(a.cmp(b))
+    println(big.cmp(3))
+}

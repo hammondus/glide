@@ -1050,14 +1050,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		}
 		switch ex.Op {
 		case "-":
-			switch n := v.(type) {
-			case IntV:
-				if n == math.MinInt64 {
-					panic(rtErr{ex.Span, "Int overflow: negating the minimum Int (dev builds trap; release wraps)"})
-				}
-				return -n, nil
-			case FloatV:
-				return -n, nil
+			if n, ok := negateChecked(v, ex.Span); ok {
+				return n, nil
 			}
 			panic(rtErr{ex.Span, fmt.Sprintf("cannot negate %s", typeName(v))})
 		case "!":
@@ -1194,12 +1188,23 @@ func (in *Interp) landed(e ast.Expr) types.Type {
 // intLit builds the value of an integer literal at the type it landed
 // in. The default — nothing recorded, or a type with no separate
 // representation — is Int.
+//
+// No range check here: the checker's FitsIn already proved the literal
+// fits, and a negative literal arrives as its magnitude with the sign
+// still to be applied by negate — so `-128` at i8 is momentarily the
+// out-of-range 128 on its way to being in range.
 func intLit(lit *ast.IntLit, t types.Type) Value {
 	switch t {
 	case types.U64:
 		return UintV(lit.V)
 	case types.Float, types.F32:
 		return FloatV(lit.V)
+	}
+	if b, ok := t.(*types.Basic); ok {
+		if s, sized := sizedZero(b); sized {
+			s.V = int64(lit.V)
+			return s
+		}
 	}
 	return IntV(int64(lit.V))
 }
@@ -1213,6 +1218,9 @@ func negate(v Value) Value {
 		return IntV(-int64(n))
 	case FloatV:
 		return -n
+	case SizedV:
+		n.V = -n.V
+		return n
 	}
 	return v
 }
@@ -1632,25 +1640,27 @@ func binop(op string, l, r Value, at source.Span) Value {
 	}
 	if li, ok := l.(IntV); ok {
 		if ri, ok := r.(IntV); ok {
-			// The interpreter is the dev tier: overflow traps here,
-			// wraps in release builds (recorded trade, Zig's).
+			// Overflow traps, in every tier and at every width. The
+			// escape hatch is named at the point of failure because
+			// the answer to "my checksum keeps trapping" is a
+			// different operator, not a different build.
 			switch op {
 			case "+":
 				c := li + ri
 				if (c > li) != (ri > 0) {
-					panic(rtErr{at, fmt.Sprintf("Int overflow: %d + %d (dev builds trap; release wraps)", li, ri)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d + %d (use wrapping_add for modular arithmetic)", li, ri)})
 				}
 				return c
 			case "-":
 				c := li - ri
 				if (c < li) != (ri > 0) {
-					panic(rtErr{at, fmt.Sprintf("Int overflow: %d - %d (dev builds trap; release wraps)", li, ri)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d - %d (use wrapping_sub for modular arithmetic)", li, ri)})
 				}
 				return c
 			case "*":
 				c := li * ri
 				if li != 0 && (c/li != ri || (li == -1 && ri == math.MinInt64)) {
-					panic(rtErr{at, fmt.Sprintf("Int overflow: %d * %d (dev builds trap; release wraps)", li, ri)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d * %d (use wrapping_mul for modular arithmetic)", li, ri)})
 				}
 				return c
 			case "/":
@@ -1658,7 +1668,7 @@ func binop(op string, l, r Value, at source.Span) Value {
 					panic(rtErr{at, "division by zero"})
 				}
 				if li == math.MinInt64 && ri == -1 {
-					panic(rtErr{at, fmt.Sprintf("Int overflow: %d / -1 (dev builds trap; release wraps)", li)})
+					panic(rtErr{at, fmt.Sprintf("Int overflow: %d / -1 (use wrapping_neg for modular arithmetic)", li)})
 				}
 				return li / ri
 			case "%":
@@ -1684,6 +1694,13 @@ func binop(op string, l, r Value, at source.Span) Value {
 			}
 		}
 	}
+	// The narrow widths, which carry their own size. Placed before the
+	// u64 block only for reading order; the type switches are disjoint.
+	if ls, ok := l.(SizedV); ok {
+		if rs, ok := r.(SizedV); ok {
+			return sizedBinop(op, ls, rs, at)
+		}
+	}
 	// u64: unsigned arithmetic, trapping on overflow the way Int does.
 	// There is deliberately no UintV/IntV case — mixing a u64 with an
 	// Int is a compile error, so reaching this code with one would
@@ -1694,18 +1711,18 @@ func binop(op string, l, r Value, at source.Span) Value {
 			case "+":
 				c := lu + ru
 				if c < lu {
-					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d + %d (dev builds trap; release wraps)", lu, ru)})
+					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d + %d (use wrapping_add for modular arithmetic)", lu, ru)})
 				}
 				return c
 			case "-":
 				if ru > lu {
-					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d - %d (dev builds trap; release wraps)", lu, ru)})
+					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d - %d (use wrapping_sub for modular arithmetic)", lu, ru)})
 				}
 				return lu - ru
 			case "*":
 				c := lu * ru
 				if lu != 0 && c/lu != ru {
-					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d * %d (dev builds trap; release wraps)", lu, ru)})
+					panic(rtErr{at, fmt.Sprintf("u64 overflow: %d * %d (use wrapping_mul for modular arithmetic)", lu, ru)})
 				}
 				return c
 			case "/":

@@ -428,14 +428,34 @@ year five; traits + composition are the whole story.
   (2016+) is the same insight.
 - **2016+** — Zig traps overflow in debug builds, wraps/UB in
   release: "test what you ship" knowingly traded for catching
-  overflow where it's cheap.
+  overflow where it's cheap. Rust made the same split in 2015
+  (`debug_assertions` on, wrap off) with the same escape hatches —
+  `wrapping_add`, `checked_add`, `saturating_add`, `overflowing_add`
+  — and the same complaint follows both: an overflow bug that only
+  exists in release is the hardest kind to reproduce, because the
+  build that would have caught it is not the build that ran.
+- **2007** — Python 3 goes the other way and removes fixed-width
+  integers entirely: every `int` promotes to arbitrary precision, so
+  overflow is unrepresentable rather than checked. It buys
+  correctness with a branch and an allocation in every add — the
+  reason Glide takes `BigInt` by name instead.
+- **2015** — Swift traps overflow in *every* build, release
+  included, and spells the modular versions `&+` `&-` `&*`. A decade
+  of shipped iOS says the cost is affordable and the escape hatch
+  gets used where it belongs. This is the evidence Glide's reversal
+  rests on.
 
 **Glide takes**: `Int` = i64 *everywhere* (cross-compilation deletes
 the platform-int bug class), lengths and indices **signed** (a `-1`
-error traps in dev and can never address memory; `u64`/`u128` are for
+error traps rather than laundering into eighteen quintillion, and can
+never address memory; `u64`/`u128` are for
 hashes and bit patterns, not sizing), no implicit conversions (Go
 proved the strictness is tolerable), Go/Zig's arbitrary-precision
-literals via comptime, Zig's trap-in-dev/wrap-in-release, and
+literals via comptime, **Swift's trap-in-every-build** rather than
+Zig's and Rust's debug/release split — a program that answers
+differently under the interpreter and the compiler is the drift the
+shared frontend exists to prevent, and `wrapping_*` names the
+modular case where a reader can see it — and
 `BigInt` chosen by name — Python's silent auto-bignum puts a branch
 in every add and is incompatible with overflow trapping. No
 truthiness: conditions take `Bool` only — JS's coercion table is scar

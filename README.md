@@ -23,10 +23,11 @@ every borrowed idea back to its source. Inspiration has come from:
   Rejected: the borrow checker, lifetimes, macros, async/await, the
   turbofish.
 - **Zig** — kept: comptime instead of macros, `errdefer`, `test` blocks in
-  the language itself, overflow traps in dev builds. Rejected: manual
+  the language itself. Rejected: manual
   memory management, comptime-as-generics, errors on every unused variable.
 - **Swift** — kept: `T?` optionals, `if let` and `let … else`, declared
-  trait conformance, leading-dot enum shorthand, block-scoped `defer`.
+  trait conformance, leading-dot enum shorthand, block-scoped `defer`,
+  trapping overflow in every build.
   Rejected: trailing closures, `$0`, the two-name parameter split.
 - **Haskell & the ML family** — kept: the data model — sum types, pattern
   matching, no null, type classes (as traits), typed holes. Rejected:
