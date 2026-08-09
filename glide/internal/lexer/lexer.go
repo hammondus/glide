@@ -151,8 +151,8 @@ type Token struct {
 	// maximum — and it is why this is unsigned.
 	Num   uint64
 	Float float64
-	Parts       []StrPart // String tokens only
-	Line        int
+	Parts []StrPart // String tokens only
+	Line  int
 }
 
 // Tokens whose presence at end-of-line means the statement is complete.
@@ -323,7 +323,7 @@ func (lx *lexer) lexNumber() error {
 	if err != nil {
 		return source.Diagnostic{
 			Span: lx.span(lx.start),
-			Msg: fmt.Sprintf("integer literal %s is out of range (the largest any Glide integer type holds is u64's 18446744073709551615)", text),
+			Msg:  fmt.Sprintf("integer literal %s is out of range (the largest any Glide integer type holds is u64's 18446744073709551615)", text),
 		}
 	}
 	lx.toks = append(lx.toks, Token{Span: lx.span(lx.start), Kind: Int, Text: text, Num: n, Line: lx.line})

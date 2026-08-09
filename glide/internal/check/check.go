@@ -40,10 +40,10 @@ type local struct {
 }
 
 type scope struct {
-	parent   *scope
-	vars     map[string]*local
-	fnBound  bool
-	inLoop   bool
+	parent    *scope
+	vars      map[string]*local
+	fnBound   bool
+	inLoop    bool
 	generator bool
 }
 

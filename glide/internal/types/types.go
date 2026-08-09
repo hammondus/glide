@@ -109,7 +109,7 @@ var (
 // `i64` and `Int` are the same entry on purpose.
 var Primitives = map[string]*Basic{
 	"Bool": Bool,
-	"Int": Int, "i64": Int,
+	"Int":  Int, "i64": Int,
 	"i8": I8, "i16": I16, "i32": I32,
 	"u8": U8, "u16": U16, "u32": U32, "u64": U64,
 	"Float": Float, "f32": F32,
@@ -147,23 +147,23 @@ type Ctor int
 // would be inventing language surface. Constructors land here when the
 // runtime gains them, not before.
 const (
-	List Ctor = iota // List<T>
-	Map              // Map<K, V>
-	Option           // Option<T>, also written T?
-	Result           // Result<T, E>
-	Sender           // Sender<T>
-	Receiver         // Receiver<T>
-	Iterator         // Iterator<T>
-	Task             // Task<T>
-	Range            // Range
-	Duration         // Duration
-	Instant          // Instant
-	Scope            // Scope
-	Error            // Error
-	Router           // Router
-	Request          // Request
-	Response         // Response
-	Db               // Db
+	List     Ctor = iota // List<T>
+	Map                  // Map<K, V>
+	Option               // Option<T>, also written T?
+	Result               // Result<T, E>
+	Sender               // Sender<T>
+	Receiver             // Receiver<T>
+	Iterator             // Iterator<T>
+	Task                 // Task<T>
+	Range                // Range
+	Duration             // Duration
+	Instant              // Instant
+	Scope                // Scope
+	Error                // Error
+	Router               // Router
+	Request              // Request
+	Response             // Response
+	Db                   // Db
 )
 
 var ctors = [...]struct {

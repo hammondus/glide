@@ -528,7 +528,7 @@ func (p *parser) parseTrait() (*ast.TraitDecl, error) {
 
 func (p *parser) parseTest() (*ast.TestDecl, error) {
 	at := p.next().Span // "test" ident
-	name := p.next()      // string; caller checked
+	name := p.next()    // string; caller checked
 	td := &ast.TestDecl{Name: strLitText(name), Span: at}
 	if p.accept(lexer.LParen) {
 		for p.cur().Kind != lexer.RParen {
