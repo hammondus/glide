@@ -336,6 +336,9 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 		if out, handled := intMethod(r, name, args, at); handled {
 			return out
 		}
+		if out, handled := in.mathMethod(r, name, args, at); handled {
+			return out
+		}
 	case *ListV:
 		switch name {
 		case "len":

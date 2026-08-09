@@ -516,3 +516,64 @@ fn main() {
 // (unset)
 // true
 ```
+
+## Arithmetic
+
+`abs`, `min`, `max` and `pow` are methods on the number, not a `math`
+module — `cmp` already lives there, and an import in front of
+`n.abs()` buys nothing. The result keeps the receiver's own width.
+```rust
+fn main() {
+    println((0 - 7).abs())
+    println(5.min(3))
+    println(5.max(3))
+    println(2.pow(10))
+}
+// 7
+// 3
+// 5
+// 1024
+```
+
+Overflow traps here as it does everywhere else: a signed type's
+minimum has no positive counterpart, so `abs` refuses rather than
+quietly handing back the negative number.
+```rust
+fn main() {
+    let n: i8 = -128
+    println(n.abs())
+}
+// error: line 3: i8 overflow: abs of -128 (use wrapping_neg for modular arithmetic)
+```
+
+Float adds the rounding and classification family. `floor` and friends
+return a Float — convert explicitly if you want the integer, since
+nothing converts behind your back.
+```rust
+fn main() {
+    let f = 0.0 - 2.5
+    println(f.abs())
+    println(f.floor())
+    println(f.ceil())
+    println(f.round())
+    println(Int(f.trunc()))
+    println((9.0).sqrt())
+    println((2.0).pow(10.0))
+}
+// 2.5
+// -3
+// -2
+// -3
+// -2
+// 3
+// 1024
+```
+
+Asking an integer for a Float method tells you the conversion rather
+than just saying no.
+```rust
+fn main() {
+    println(5.sqrt())
+}
+// error: line 2: sqrt is defined on Float — write Float(n).sqrt()
+```

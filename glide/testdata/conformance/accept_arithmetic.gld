@@ -1,0 +1,57 @@
+// The arithmetic method set — abs, min, max, pow on every numeric
+// type, plus the float-only rounding and classification family.
+//
+// These live on the numbers rather than in a `math` module: `cmp` and
+// the `wrapping_*` family are already there, and splitting the numeric
+// surface across two places would put an import in front of `n.abs()`.
+// Go's `math.Abs` is float-only because Go could not hang a method on
+// `int` — which is why Go still has no integer abs.
+fn main() {
+    // Self is the receiver's own type, at every width.
+    let n: Int = (0 - 7).abs()
+    let lo: Int = 5.min(3)
+    let hi: Int = 5.max(3)
+    let p: Int = 2.pow(10)
+    println("{n} {lo} {hi} {p}")
+
+    let a: i8 = -100
+    let b: i8 = 4
+    let narrow: i8 = a.abs()
+    let bounded: i8 = a.max(b)
+    let raised: i8 = b.pow(2)
+    println("{narrow} {bounded} {raised}")
+
+    // Unsigned types get min/max/pow but not abs — there is no sign
+    // to remove, so offering it would read like one was handled.
+    let u: u8 = 200
+    let um: u8 = u.min(3)
+    let big: u64 = 18446744073709551615
+    let ub: u64 = big.max(1)
+    println("{um} {ub}")
+
+    // The exponent is an Int at every width: it counts
+    // multiplications rather than being a value of the receiver type.
+    let wide: u32 = 3
+    let cubed: u32 = wide.pow(3)
+    println("{cubed}")
+
+    // Float gets everything, and Self is Float.
+    let f: Float = 2.5
+    let r: Float = f.round()
+    let s: Float = f.sqrt()
+    let e: Float = f.pow(2.0)
+    println("{f.abs()} {f.floor()} {f.ceil()} {r} {f.trunc()} {s} {e}")
+
+    let nan: Bool = f.is_nan()
+    let inf: Bool = f.is_infinite()
+    let fin: Bool = f.is_finite()
+    println("{nan} {inf} {fin}")
+
+    // Generic code reaches these through an Ord bound only for `cmp`;
+    // the arithmetic ones are not trait methods, so they stay on the
+    // concrete types. This is the sanity check that a concrete call
+    // inside a generic function still resolves.
+    println("{square(7)} {square(-7)}")
+}
+
+fn square(v: Int) -> Int { v.abs().pow(2) }

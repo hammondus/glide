@@ -19,6 +19,8 @@
 package check
 
 import (
+	"fmt"
+
 	"glide/internal/ast"
 	"glide/internal/program"
 	"glide/internal/types"
@@ -117,6 +119,13 @@ var intMethods = func() map[string]*types.Func {
 		"wrapping_sub": meth(tvSelf, p("other", tvSelf)),
 		"wrapping_mul": meth(tvSelf, p("other", tvSelf)),
 		"wrapping_neg": meth(tvSelf),
+		"min":          meth(tvSelf, p("other", tvSelf)),
+		"max":          meth(tvSelf, p("other", tvSelf)),
+		// The exponent counts multiplications, so it is an Int at
+		// every receiver width rather than a value of the receiver's
+		// type: a u8 raised to the 200th is an overflow, not an
+		// unrepresentable exponent.
+		"pow": meth(tvSelf, p("exp", types.Int)),
 	}
 	// The truncating conversions: `n.wrapping_u8()` is the counterpart
 	// to `u8(n)`, which traps. Generated from types.Primitives so the
@@ -132,11 +141,38 @@ var intMethods = func() map[string]*types.Func {
 }()
 
 // ordMethods is what a type needs to satisfy Ord, and nothing more.
-// Float and Rune get exactly this: the wrapping_* family is
-// integer-only, and Rune is deliberately not an integer.
+// Rune gets exactly this: the wrapping_* family is integer-only, and
+// Rune is deliberately not an integer. Float gets these *plus*
+// floatMethods.
 var ordMethods = map[string]*types.Func{
 	"cmp": meth(types.Int, p("other", tvSelf)),
 }
+
+// floatMethods is Ord plus the arithmetic surface Float alone has.
+// `sqrt` and the rounding family are Float-only because their integer
+// forms would each need a decision the language has not made — does
+// `Int.sqrt()` truncate or return a Float? — and explicit conversion
+// already spells the answer: `Float(n).sqrt()`.
+var floatMethods = func() map[string]*types.Func {
+	m := map[string]*types.Func{
+		"abs":         meth(tvSelf),
+		"min":         meth(tvSelf, p("other", tvSelf)),
+		"max":         meth(tvSelf, p("other", tvSelf)),
+		"pow":         meth(tvSelf, p("exp", tvSelf)),
+		"sqrt":        meth(tvSelf),
+		"floor":       meth(tvSelf),
+		"ceil":        meth(tvSelf),
+		"round":       meth(tvSelf),
+		"trunc":       meth(tvSelf),
+		"is_nan":      meth(types.Bool),
+		"is_infinite": meth(types.Bool),
+		"is_finite":   meth(types.Bool),
+	}
+	for name, sig := range ordMethods {
+		m[name] = sig
+	}
+	return m
+}()
 
 // Duration constructors are suffix *properties* on a number, not
 // calls: `250.ms`, `0.5.s`. They are looked up as fields, which is
@@ -309,11 +345,37 @@ var freeBuiltins = map[string]*types.Func{
 // deliberate design decision rather than an oversight. A checker that
 // only ever says "no such method" makes the reader go and find out
 // why; these are the cases where the language already knows.
-var methodHints = map[string]string{
-	"Receiver.close": "only the sender half closes a channel",
-	"Receiver.send":  "only the sender half sends; this is the receiving end",
-	"Sender.recv":    "only the receiver half receives; this is the sending end",
-}
+var methodHints = func() map[string]string {
+	m := map[string]string{
+		"Receiver.close": "only the sender half closes a channel",
+		"Receiver.send":  "only the sender half sends; this is the receiving end",
+		"Sender.recv":    "only the receiver half receives; this is the sending end",
+	}
+	// The float-only arithmetic, reached from an integer. `5.sqrt()`
+	// is the obvious thing to type, and "Int has no method sqrt" is
+	// true but unhelpful: the answer is a conversion, and this
+	// language does not perform one behind your back.
+	widths := []string{"Int", "i8", "i16", "i32", "u8", "u16", "u32", "u64"}
+	for _, name := range []string{"sqrt", "floor", "ceil", "round", "trunc"} {
+		for _, recv := range widths {
+			m[recv+"."+name] = fmt.Sprintf(
+				"%s is defined on Float — write Float(n).%s()", name, name)
+		}
+	}
+	for _, name := range []string{"is_nan", "is_infinite", "is_finite"} {
+		for _, recv := range widths {
+			m[recv+"."+name] = fmt.Sprintf(
+				"%s asks a Float question; an integer is always finite and never NaN", name)
+		}
+	}
+	// `abs` on an unsigned type is the one absence that is a design
+	// decision rather than a gap: it would be the identity, and
+	// writing it reads like a sign was handled.
+	for _, recv := range []string{"u8", "u16", "u32", "u64"} {
+		m[recv+".abs"] = recv + " is unsigned, so abs would be the identity — there is no sign to remove"
+	}
+	return m
+}()
 
 // typeCtorName is the constructor name of a built-in type, used to key
 // methodHints without the type arguments getting in the way.
@@ -381,8 +443,19 @@ func builtinMethod(recv types.Type, name string) (fn *types.Func, modelled bool)
 			// `cmp` or `wrapping_add` is a type you cannot compute
 			// with. Self binds to the receiver — defaulted first, so
 			// an untyped literal's methods are Int's.
+			if name == "abs" && r.IsUnsigned() {
+				// Withheld rather than made the identity: an `abs` on
+				// an unsigned type reads like a sign was handled when
+				// there was never a sign to handle.
+				return nil, true
+			}
+			if name == "abs" {
+				return selfBound(meth(tvSelf), r), true
+			}
 			return selfBound(intMethods[name], r), true
-		case r.IsFloat() || r.IsRune():
+		case r.IsFloat():
+			return selfBound(floatMethods[name], r), true
+		case r.IsRune():
 			return selfBound(ordMethods[name], r), true
 		}
 		// Bool and () have no methods, and that is a *known* empty

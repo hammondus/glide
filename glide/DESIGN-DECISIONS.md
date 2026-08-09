@@ -907,6 +907,63 @@ Decisions worth recording:
   (a tuple, or a Map) throws away the typing that makes the checker
   useful here.
 
+### Arithmetic: methods, not a `math` module
+
+`abs`, `min`, `max`, `pow` on every numeric type; `sqrt`, `floor`,
+`ceil`, `round`, `trunc`, `is_nan`, `is_infinite`, `is_finite` on
+Float. Landed straight after the above, on the same "there is no way
+to take an absolute value" reasoning.
+
+**Methods rather than a module**, which is the one real decision here.
+`cmp` and the `wrapping_*` family already hang off the numeric types,
+so a module would split the numeric surface across two places and put
+an import in front of `n.abs()`. Go's `math.Abs` is float-only
+*precisely* because Go could not hang a method on `int` — and the
+consequence, fifteen years on, is that Go still has no integer `abs`.
+That is a warning, not a model. Rust, Swift and Kotlin all put these
+on the number. `STDLIB-GOALS.md` lists `math` as a module; that entry
+now means the *numerics* surface (correct rounding modes, the
+transcendental set), not `abs`.
+
+Consequences worth stating:
+
+- **No constants yet** (`pi`, `e`, infinity). They have nowhere to
+  live — a module here holds functions, not values — and nothing has
+  needed one. The dogfood rule applies.
+- **`abs` is signed-only.** On an unsigned type it would be the
+  identity, and writing it reads like a sign was handled when there
+  was never a sign. The checker says so by name rather than reporting
+  a missing method.
+- **`abs` traps at a type's minimum**, which has no positive
+  counterpart — the same rule as `-x`, and for the same reason.
+- **`pow`'s exponent is an `Int` at every receiver width.** It counts
+  multiplications; it is not a value of the receiver's type. A `u8`
+  raised to the 200th is an overflow, not an unrepresentable exponent.
+  The Float form takes a Float exponent, so `(2.0).pow(0.5)` is a
+  square root.
+- **`pow` multiplies in a loop through the ordinary checked `*`**, so
+  it traps at exactly the step that overflows and the message names
+  the operands the caller can see. Exponentiation by squaring would
+  report a mid-computation product that appears nowhere in the source.
+- **`sqrt` of a negative is `NaN`, not a trap.** IEEE 754's answer,
+  `Float` already admits NaN, and `is_nan()` is right there. Trapping
+  would make `sqrt` the one float operation that cannot produce a
+  value its own type has.
+- **`min`/`max` use the total order `cmp` and `sorted()` use**, so NaN
+  loses `min` and wins `max`. Rust's `f64::min` agrees about the
+  first, Go's `math.Max` about the second. One coherent order beats
+  matching either piecemeal — in this language `min`, `<` and
+  `sorted()` are specified never to disagree.
+- **Float-only names get a hint on integer receivers**: `5.sqrt()`
+  reports *write `Float(n).sqrt()`*. "Int has no method sqrt" is true
+  and useless; the answer is always an explicit conversion, because
+  this language never performs one silently. The hint machinery
+  already existed for the channel-half errors.
+- **The "no method" diagnostic now defaults its receiver**, so an
+  untyped literal is named by the type it would become. `5.nope()`
+  said `untyped integer has no method "nope"` — a type name that
+  appears nowhere in the language.
+
 **Found by using it.** Two things surfaced within ten minutes of
 writing the first real script, which is the entire argument for
 writing one:
@@ -940,5 +997,5 @@ error-to-status middleware for http (the one default mapping — Err →
 output / per-call env and cwd / stdin (see DESIGN.md's *Running other
 programs* — streaming is not a triviality, since a subprocess writing
 to the real file descriptor bypasses the writer the interpreter's
-stdout actually is), and `math` (`abs`, `min`, `max`, `sqrt`,
-`floor` — no design questions, just unwritten).
+stdout actually is), and numeric *constants* (`pi`, `e`,
+infinity — they have nowhere to live until a module can hold a value).

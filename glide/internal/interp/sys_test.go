@@ -325,3 +325,73 @@ fn main() {
 		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
 	}
 }
+
+// The arithmetic methods. Two things are worth asserting beyond the
+// values: that Self really is the receiver's own width (a u8's max is
+// a u8, not an Int), and that abs and pow trap where the type runs
+// out rather than wrapping.
+func TestArithmeticMethods(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    println("{(0 - 7).abs()} {7.abs()} {0.abs()}")
+    println("{5.min(3)} {5.max(3)} {2.pow(10)} {2.pow(0)} {2.pow(1)}")
+
+    // Widths carry: Self binds to the receiver, so these stay i8/u8.
+    let a: i8 = -100
+    let b: i8 = 4
+    println("{a.abs()} {a.min(b)} {a.max(b)} {b.pow(2)}")
+    let u: u8 = 200
+    println("{u.min(3)} {u.max(3)} {u.pow(1)}")
+
+    let f = 0.0 - 2.5
+    println("{f.abs()} {f.floor()} {f.ceil()} {f.round()} {f.trunc()}")
+    println("{(2.5).round()} {(3.5).round()} {(0.0 - 2.5).round()}")
+    println("{(9.0).sqrt()} {(2.0).pow(10.0)} {(2.0).pow(0.5)}")
+
+    // Classification, and the total order min/max inherits from cmp:
+    // NaN sorts after every number, so it loses min and wins max.
+    let nan = (0.0 - 1.0).sqrt()
+    let inf = 1.0 / 0.0
+    println("{nan.is_nan()} {inf.is_infinite()} {(1.0).is_finite()} {nan.is_finite()}")
+    println("{nan.min(1.0)} {nan.max(1.0)}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"7 7 0",
+		"3 5 1024 1 2",
+		"100 -100 4 16",
+		"3 200 200",
+		"2.5 -3 -2 -3 -2",
+		"3 4 -3", // half away from zero, not banker's rounding
+		"3 1024 1.4142135623730951",
+		"true true true false",
+		"1 NaN",
+		"",
+	}, "\n")
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// abs and pow trap at the edges rather than wrapping, like every other
+// arithmetic operation in the language.
+func TestArithmeticTraps(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"let n: i8 = -128\n    println(n.abs())", "i8 overflow: abs of -128"},
+		{"println((0 - 9223372036854775807 - 1).abs())", "abs of the minimum Int"},
+		{"println(2.pow(64))", "Int overflow"},
+		{"let n: u8 = 16\n    println(n.pow(3))", "u8 overflow"},
+		{"println(2.pow(0 - 1))", "exponent -1 is negative"},
+	} {
+		_, err := runProg(t, "fn main() {\n    "+tc.src+"\n}")
+		if err == nil {
+			t.Errorf("%s: expected a trap", tc.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want %q", tc.src, err, tc.want)
+		}
+	}
+}

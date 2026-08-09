@@ -257,10 +257,15 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call, want types.Type) types.Type
 			if v, isVar := recv.(*types.Var); isVar {
 				c.errf(x.Span, "%s has no method %q: it is bounded by %s, which does not declare one",
 					v.Name, f.Name, boundsOf(v))
-			} else if hint, ok := methodHints[typeCtorName(recv)+"."+f.Name]; ok {
+			} else if hint, ok := methodHints[typeCtorName(types.Default(recv))+"."+f.Name]; ok {
 				c.errf(x.Span, "%s", hint)
 			} else {
-				c.errf(x.Span, "%s has no method %q", recv, f.Name)
+				// Defaulted, so an untyped literal is named by the
+				// type it would become. "untyped integer has no
+				// method" leaks a name that appears nowhere in the
+				// language — the reader wrote `5.sqrt()` and needs to
+				// be told about Int.
+				c.errf(x.Span, "%s has no method %q", types.Default(recv), f.Name)
 			}
 		}
 		return types.Unknown

@@ -259,6 +259,9 @@ returns a `u8`, never an `Int`.
 | Method | Signature | Notes |
 |---|---|---|
 | `cmp(other)` | `(Self) -> Int` | three-way: negative / 0 / positive |
+| `abs()` | `() -> Self` | **signed only** — an unsigned `abs` would be the identity, and writing it reads like a sign was handled. Traps at the type's minimum, which has no positive counterpart (same rule as `-x`) |
+| `min(other)` / `max(other)` | `(Self) -> Self` | ordered by the same comparison `<` and `sorted()` use |
+| `pow(exp)` | `(Int) -> Self` | the exponent is an `Int` at every width — it counts multiplications. Traps on overflow; a negative exponent is an error (convert to Float) |
 | `wrapping_add(other)` | `(Self) -> Self` | modular `+`; no trap |
 | `wrapping_sub(other)` | `(Self) -> Self` | modular `-`; no trap |
 | `wrapping_mul(other)` | `(Self) -> Self` | modular `*`; no trap |
@@ -275,6 +278,45 @@ Plain `+` `-` `*` `/` trap at the declared width in every tier
 `wrapping_add` where a reader can see it. `wrapping_div` does not
 exist: division cannot wrap except for minimum ÷ -1, which is
 `wrapping_neg`.
+
+### Float
+
+Everything under Int above except the `wrapping_*` family (nothing to
+wrap), with `Self` = `Float` or `f32`, plus:
+
+| Method | Signature | Notes |
+|---|---|---|
+| `sqrt()` | `() -> Self` | a negative operand gives `NaN`, the IEEE 754 answer — not a trap. `Float` already admits NaN and `is_nan()` is right there |
+| `floor()` / `ceil()` / `trunc()` | `-> Self` | still a Float; `Int(x.floor())` when you want the integer |
+| `round()` | `-> Self` | half **away from zero** (Go's `math.Round`), not banker's rounding. Money wants `Decimal` ○, not a second rounding mode here |
+| `pow(exp)` | `(Self) -> Self` | the Float form takes a Float exponent, so `(2.0).pow(0.5)` is a square root |
+| `is_nan()` / `is_infinite()` / `is_finite()` | `-> Bool` | |
+
+`min`/`max` order by the same **total** order `cmp` and `sorted()` use,
+where NaN sorts after every number — so `nan.min(1.0)` is `1.0` and
+`nan.max(1.0)` is `nan`. Rust's `f64::min` agrees about the first and
+Go's `math.Max` about the second; one coherent order beats matching
+either piecemeal, because here `min`, `<` and `sorted()` must never
+disagree.
+
+**These are methods, not a `math` module** — deliberately. `cmp` and
+`wrapping_*` already live on the numbers; a module would split the
+numeric surface across two places and put an import in front of
+`n.abs()`. Go's `math.Abs` is float-only precisely because Go could
+not hang a method on `int`, and the consequence is that Go still has
+no integer `abs`: a warning, not a model. Rust, Swift and Kotlin all
+put these on the number.
+
+Reaching for a Float method on an integer reports the conversion
+rather than a bare "no such method": `5.sqrt()` says *write
+`Float(n).sqrt()`*. There is no implicit numeric conversion here, so
+the fix is always a visible one.
+
+Still ○: constants (`pi`, `e`, infinity). They have nowhere to live —
+a module here holds functions, not values — and nothing has needed
+one yet. Also ○: `f32` arithmetic is computed at **f64** precision in
+the interpreter, as it already is for `+` and `*`; rounding happens
+only at an `f32(x)` conversion.
 
 ### Conversion
 

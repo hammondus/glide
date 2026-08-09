@@ -1,0 +1,29 @@
+// The arithmetic methods are typed at the receiver's own width, and
+// the ones a type genuinely does not have report *why* rather than
+// just "no such method" — an absence that is a design decision should
+// say so, since the reader would otherwise go looking for the bug.
+fn main() {
+    // Float-only, reached from an integer. The answer is an explicit
+    // conversion, because this language never performs one silently.
+    println(5.sqrt())              // error: sqrt is defined on Float — write Float(n).sqrt()
+    println(2.round())             // error: round is defined on Float
+    println(7.is_nan())            // error: is_nan asks a Float question
+
+    let u: u8 = 3
+    println(u.abs())               // error: u8 is unsigned, so abs would be the identity
+
+    // min/max take the receiver's own type: no implicit widening, and
+    // no mixing an Int with a Float.
+    println(5.min(1.0))            // error: expected Int, found Float
+    let n: i8 = 1
+    println(n.max(300))            // error: 300 does not fit in i8
+    println(5.min())               // error: missing its "other" argument
+
+    // The exponent is an Int, not a value of the receiver's type.
+    println(2.pow(3.0))            // error: expected Int, found Float
+    println((2.0).pow(3))          // this one is fine: 3 is an untyped literal
+
+    // Self is the receiver's width, so the result is too.
+    let wide: Int = n.abs()        // error: expected Int, found i8
+    println(wide)
+}
