@@ -907,29 +907,51 @@ Decisions worth recording:
   (a tuple, or a Map) throws away the typing that makes the checker
   useful here.
 
-### Arithmetic: methods, not a `math` module
+### The numeric surface: split by width
 
-`abs`, `min`, `max`, `pow` on every numeric type; `sqrt`, `floor`,
-`ceil`, `round`, `trunc`, `is_nan`, `is_infinite`, `is_finite` on
-Float. Landed straight after the above, on the same "there is no way
-to take an absolute value" reasoning.
+`abs`, `min`, `max`, `pow` are methods on every numeric type. `sqrt`,
+`floor`, `ceil`, `round`, `trunc`, `is_nan`, `is_infinite`,
+`is_finite`, and the constants `pi`/`e`/`inf`/`nan`, are the `math`
+module. Landed straight after the scripting surface, on the "there is
+no way to take an absolute value" reasoning.
 
-**Methods rather than a module**, which is the one real decision here.
-`cmp` and the `wrapping_*` family already hang off the numeric types,
-so a module would split the numeric surface across two places and put
-an import in front of `n.abs()`. Go's `math.Abs` is float-only
-*precisely* because Go could not hang a method on `int` — and the
-consequence, fifteen years on, is that Go still has no integer `abs`.
-That is a warning, not a model. Rust, Swift and Kotlin all put these
-on the number. `STDLIB-GOALS.md` lists `math` as a module; that entry
-now means the *numerics* surface (correct rounding modes, the
-transcendental set), not `abs`.
+**Built methods-only first, and that was half wrong.** The argument
+for it was "consistent with `cmp` and `wrapping_*`" — which is weaker
+than it looks: `cmp` is a trait requirement and *has* to be a method,
+`wrapping_add` is an operator variant and operators are infix on the
+value. Both are operator-shaped. `sqrt` is not, and neither is evidence
+about general numeric functions. The second argument, "Go's `math.Abs`
+is float-only, so modules are the problem", was simply wrong: that is a
+type-system limitation, not a module-vs-method one.
+
+**What survives is narrow and mechanical.** `abs`/`min`/`max`/`pow`
+must serve nine numeric types. As methods the receiver binds `Self`
+through machinery that already runs. As free functions there is no
+receiver, so the checker has to infer from argument one and then unify
+an *untyped literal* against a later argument — `math.min(5, x)` where
+`x: u8` — which it does nowhere else. `x.min(5)` needs none of that:
+the receiver types the literal through the ordinary bidirectional path.
+Bespoke inference for one module, pinned by the corpus, reimplemented
+in the Glide frontend, is a permanent tax for a spelling.
+
+The rule, stated so it is learnable: **works at every width → method;
+Float-only or a constant → `math`.** And explicitly not permanent —
+when operator traits make a `Numeric` bound expressible, `math.abs<T:
+Numeric>` types itself and the four move. Recorded in `../DESIGN.md`
+with the lineage in `../LINEAGE.md`, so that move is a decision already
+taken rather than a re-argument.
+
+**Modules can now hold values, not just functions.** `moduleValues` in
+the checker, `mathConstants` in the evaluator, one field-resolution
+branch each. This is what a module can do that a method cannot: `pi`
+has no receiver, so before this it had nowhere in the language to
+exist. Kept as a table separate from `modules` rather than a sum type,
+because "is this name a function or a value" is the question both the
+field path and the call path need, and one map each answers it by
+lookup instead of by type switch.
 
 Consequences worth stating:
 
-- **No constants yet** (`pi`, `e`, infinity). They have nowhere to
-  live — a module here holds functions, not values — and nothing has
-  needed one. The dogfood rule applies.
 - **`abs` is signed-only.** On an unsigned type it would be the
   identity, and writing it reads like a sign was handled when there
   was never a sign. The checker says so by name rather than reporting
@@ -945,24 +967,34 @@ Consequences worth stating:
   it traps at exactly the step that overflows and the message names
   the operands the caller can see. Exponentiation by squaring would
   report a mid-computation product that appears nowhere in the source.
-- **`sqrt` of a negative is `NaN`, not a trap.** IEEE 754's answer,
-  `Float` already admits NaN, and `is_nan()` is right there. Trapping
-  would make `sqrt` the one float operation that cannot produce a
-  value its own type has.
+- **`math.sqrt` of a negative is `NaN`, not a trap.** IEEE 754's
+  answer, `Float` already admits NaN, and `math.is_nan` is right
+  there. Trapping would make `sqrt` the one float operation that
+  cannot produce a value its own type has.
 - **`min`/`max` use the total order `cmp` and `sorted()` use**, so NaN
   loses `min` and wins `max`. Rust's `f64::min` agrees about the
   first, Go's `math.Max` about the second. One coherent order beats
   matching either piecemeal — in this language `min`, `<` and
   `sorted()` are specified never to disagree.
-- **Float-only names get a hint on integer receivers**: `5.sqrt()`
-  reports *write `Float(n).sqrt()`*. "Int has no method sqrt" is true
-  and useless; the answer is always an explicit conversion, because
-  this language never performs one silently. The hint machinery
-  already existed for the channel-half errors.
+- **`math.nan` is a value, not a test.** `x == math.nan` is false by
+  IEEE 754 and always will be; asking is `math.is_nan(x)`.
+- **Both spellings of the split get a diagnostic.** `x.sqrt()` on a
+  Float says *write `math.sqrt(x)`*; `5.sqrt()` adds the conversion.
+  `math.pi()` says *`math.pi` is a Float constant, not a function*.
+  A split the reader has to learn is a split the compiler should
+  teach — otherwise it is exactly the kind of arbitrary-looking rule
+  that makes a stdlib feel capricious.
 - **The "no method" diagnostic now defaults its receiver**, so an
   untyped literal is named by the type it would become. `5.nope()`
   said `untyped integer has no method "nope"` — a type name that
   appears nowhere in the language.
+
+Caught by the test suite and worth recording: splitting the `modules`
+map to insert `moduleValues` beside it stranded `json`/`http`/`sql`/
+`time` inside the new table. It **compiled**, because `*types.Func`
+satisfies `types.Type` — the only thing that noticed was
+`TestDocExamples` reporting `unknown module "time"`. An argument for
+keeping the doc examples executable.
 
 **Found by using it.** Two things surfaced within ten minutes of
 writing the first real script, which is the entire argument for
@@ -997,5 +1029,6 @@ error-to-status middleware for http (the one default mapping — Err →
 output / per-call env and cwd / stdin (see DESIGN.md's *Running other
 programs* — streaming is not a triviality, since a subprocess writing
 to the real file descriptor bypasses the writer the interpreter's
-stdout actually is), and numeric *constants* (`pi`, `e`,
-infinity — they have nowhere to live until a module can hold a value).
+stdout actually is), and the rest of `math` (`log`, `exp`, the
+trigonometric set, and the two-argument symmetric `atan2`/`hypot`
+that belong in a module on their own merits).

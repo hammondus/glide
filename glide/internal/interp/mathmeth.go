@@ -7,25 +7,32 @@ import (
 	"glide/internal/source"
 )
 
-// The arithmetic method set: abs, min, max, pow on every numeric type,
-// plus the float-only rounding and classification family.
+// The arithmetic that lives on the numbers: abs, min, max, pow.
 //
-// **Methods, not a `math` module.** Glide already hangs `cmp` and the
-// `wrapping_*` family off the numeric types; a module would split the
-// numeric surface across two places and put an import in front of
-// `n.abs()`. Go's `math.Abs` is float-only precisely because Go could
-// not hang a method on `int`, and the result is that Go still has no
-// integer abs — a warning, not a model. Rust, Swift and Kotlin all put
-// these on the number.
+// The dividing line against the `math` module is *width*. These four
+// have to work at all nine numeric types, and as methods the receiver
+// binds `Self` through machinery that already runs. As free functions
+// there is no receiver, so the checker would have to infer from one
+// argument and unify an untyped literal against a later one — which
+// it does nowhere else, and which the Glide frontend would then have
+// to reproduce exactly. That is a permanent frontend tax to spell it
+// `math.abs(n)`.
 //
-// No constants (`pi`, `e`, infinity) yet: they have nowhere to live —
-// a module here holds functions, not values — and nothing has needed
-// one. They arrive with whatever program first wants them.
+// Not "methods forever": when the operator traits (`Add`, `Mul`) make
+// a `Numeric` bound expressible, `math.abs<T: Numeric>` types itself
+// with no special case and these can move. Everything Float-*only* —
+// sqrt, the rounding family, the classification family — is already in
+// `math`, along with the constants a method cannot express at all.
+//
+// Go's own history is the corroboration: `math.Min` was float64-only
+// because Go could not write it generically, and Go 1.21's fix was not
+// a generic `math.Min` — it made `min`/`max` universe *builtins*. That
+// third option is worse here for a different reason: it would reserve
+// `min` and `max` program-wide, and both are common variable names.
 //
 // f32 is computed at f64 precision, as it already is for `+` and `*`:
 // the interpreter stores every float in a float64 and rounds to f32
-// only at an `f32(x)` conversion. Singling out `sqrt` for a different
-// rule would be arbitrary while the operators behave this way.
+// only at an `f32(x)` conversion.
 func (in *Interp) mathMethod(recv Value, name string, args []Value, at source.Span) (Value, bool) {
 	switch name {
 	case "abs":
@@ -50,45 +57,71 @@ func (in *Interp) mathMethod(recv Value, name string, args []Value, at source.Sp
 	case "pow":
 		return in.powValue(recv, args, at)
 	}
-	f, isFloat := recv.(FloatV)
-	if !isFloat {
+	return nil, false
+}
+
+// mathCall is the `math` module: the Float-only operations, and the
+// constants. Both are here for the same reason — neither can be a
+// method on a number. A constant has no receiver at all, and the
+// Float-only functions do not need one, since there is only ever one
+// type involved.
+func (in *Interp) mathCall(name string, args []Value, at source.Span) Value {
+	if _, isConst := mathConstants[name]; isConst {
+		panic(rtErr{at, fmt.Sprintf("math.%s is a constant, not a function — write math.%s", name, name)})
+	}
+	fn, known := mathFuncs[name]
+	if !known {
+		panic(rtErr{at, fmt.Sprintf("module math has no function %q", name)})
+	}
+	x, ok := one("math."+name, args, at).(FloatV)
+	if !ok {
+		panic(rtErr{at, fmt.Sprintf("math.%s takes a Float, got %s (conversion is explicit here: math.%s(Float(n)))",
+			name, typeName(args[0]), name)})
+	}
+	return fn(float64(x))
+}
+
+// mathFuncs keeps every entry a one-liner so the table reads as the
+// module's surface rather than as code.
+var mathFuncs = map[string]func(float64) Value{
+	// A negative operand gives NaN rather than trapping: that is the
+	// IEEE 754 answer, Float already admits NaN, and `is_nan` is right
+	// here to ask. Trapping would make sqrt the one float operation
+	// that cannot produce a value its own type has.
+	"sqrt":  func(x float64) Value { return FloatV(math.Sqrt(x)) },
+	"floor": func(x float64) Value { return FloatV(math.Floor(x)) },
+	"ceil":  func(x float64) Value { return FloatV(math.Ceil(x)) },
+	// Half away from zero (Go's math.Round), not banker's rounding: it
+	// is what "round" means to everyone who has not read a numerics
+	// paper, and the money case wants Decimal rather than a second
+	// rounding mode bolted onto Float.
+	"round":       func(x float64) Value { return FloatV(math.Round(x)) },
+	"trunc":       func(x float64) Value { return FloatV(math.Trunc(x)) },
+	"is_nan":      func(x float64) Value { return BoolV(math.IsNaN(x)) },
+	"is_infinite": func(x float64) Value { return BoolV(math.IsInf(x, 0)) },
+	"is_finite":   func(x float64) Value { return BoolV(!math.IsNaN(x) && !math.IsInf(x, 0)) },
+}
+
+// mathConstants is what a module could not hold until now: values.
+// `pi` cannot be a method on a number, so before modules carried
+// values it had nowhere in the language to exist.
+var mathConstants = map[string]Value{
+	"pi":  FloatV(math.Pi),
+	"e":   FloatV(math.E),
+	"inf": FloatV(math.Inf(1)),
+	// A value, not a test. `x == math.nan` is false by IEEE 754 and
+	// always will be — asking is still `math.is_nan(x)`.
+	"nan": FloatV(math.NaN()),
+}
+
+// moduleValue resolves `math.pi` — a module member reached without
+// call parens.
+func moduleValue(mod, name string) (Value, bool) {
+	if mod != "math" {
 		return nil, false
 	}
-	switch name {
-	case "sqrt":
-		nilArgs("sqrt", args, at)
-		// A negative operand gives NaN rather than trapping: that is
-		// the IEEE 754 answer, Float already admits NaN, and `is_nan`
-		// is right here to ask. Trapping would make sqrt the one float
-		// operation that cannot produce a NaN its own type has.
-		return FloatV(math.Sqrt(float64(f))), true
-	case "floor":
-		nilArgs("floor", args, at)
-		return FloatV(math.Floor(float64(f))), true
-	case "ceil":
-		nilArgs("ceil", args, at)
-		return FloatV(math.Ceil(float64(f))), true
-	case "round":
-		nilArgs("round", args, at)
-		// Half away from zero (Go's math.Round), not banker's
-		// rounding: it is what "round" means to everyone who has not
-		// read a numerics paper, and the money case wants Decimal
-		// rather than a second rounding mode on Float.
-		return FloatV(math.Round(float64(f))), true
-	case "trunc":
-		nilArgs("trunc", args, at)
-		return FloatV(math.Trunc(float64(f))), true
-	case "is_nan":
-		nilArgs("is_nan", args, at)
-		return BoolV(math.IsNaN(float64(f))), true
-	case "is_infinite":
-		nilArgs("is_infinite", args, at)
-		return BoolV(math.IsInf(float64(f), 0)), true
-	case "is_finite":
-		nilArgs("is_finite", args, at)
-		return BoolV(!math.IsNaN(float64(f)) && !math.IsInf(float64(f), 0)), true
-	}
-	return nil, false
+	v, ok := mathConstants[name]
+	return v, ok
 }
 
 // absValue traps at a signed type's minimum, which has no positive

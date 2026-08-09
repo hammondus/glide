@@ -546,19 +546,22 @@ fn main() {
 // error: line 3: i8 overflow: abs of -128 (use wrapping_neg for modular arithmetic)
 ```
 
-Float adds the rounding and classification family. `floor` and friends
-return a Float — convert explicitly if you want the integer, since
-nothing converts behind your back.
+The dividing line against the `math` module is **width**. Anything that
+has to work at every numeric width is a method, because the receiver is
+what says which width. Anything Float-only lives in `math`, along with
+the constants — which could never have been methods on a number at all.
 ```rust
+import math
+
 fn main() {
     let f = 0.0 - 2.5
-    println(f.abs())
-    println(f.floor())
-    println(f.ceil())
-    println(f.round())
-    println(Int(f.trunc()))
-    println((9.0).sqrt())
-    println((2.0).pow(10.0))
+    println(f.abs())            // works at every width -> method
+    println(math.floor(f))      // Float-only -> module
+    println(math.ceil(f))
+    println(math.round(f))
+    println(Int(math.trunc(f)))
+    println(math.sqrt(9.0))
+    println(math.pi)
 }
 // 2.5
 // -3
@@ -566,14 +569,31 @@ fn main() {
 // -3
 // -2
 // 3
-// 1024
+// 3.141592653589793
 ```
 
-Asking an integer for a Float method tells you the conversion rather
-than just saying no.
+NaN is a value, so testing for one is a call and never a comparison —
+`x == math.nan` is false by IEEE 754 and always will be.
+```rust
+import math
+
+fn main() {
+    println(math.is_nan(math.nan))
+    println(math.nan == math.nan)
+    println(math.is_finite(1.0))
+    println(math.is_infinite(math.inf))
+}
+// true
+// false
+// true
+// true
+```
+
+Reach for one of these as a method and the error says where it went,
+rather than just saying no.
 ```rust
 fn main() {
     println(5.sqrt())
 }
-// error: line 2: sqrt is defined on Float — write Float(n).sqrt()
+// error: line 2: sqrt lives in the math module and takes a Float — write math.sqrt(Float(n))
 ```

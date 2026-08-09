@@ -1924,6 +1924,47 @@ Out-list discipline matters as much as the in-list.
   the scope dies. The ctx-replacement covers HTTP for free.
 - Green thread per request; HTTP/2 in; HTTP/3 when it earns entry.
 
+### The numeric surface: methods or module
+
+Split by one rule, ratified 2026-08-09 after building it the other way
+first: **an operation that must work at every numeric width is a method
+on the number; one that is Float-only, or is a constant, lives in
+`math`.**
+
+`abs`, `min`, `max`, `pow` serve all nine numeric types. As methods the
+receiver binds `Self` through machinery the checker already runs. As
+free functions there is no receiver, so the checker would have to infer
+from one argument and then unify an untyped literal against a *later*
+one — inference that exists nowhere else in the language, would be
+pinned by the conformance corpus, and would have to be reproduced
+exactly by the Glide frontend. That is a permanent frontend tax for a
+spelling.
+
+`sqrt`, `floor`, `ceil`, `round`, `trunc` and the `is_*` family need
+none of it: one type is involved throughout. And `pi`, `e`, `inf`,
+`nan` cannot be methods at all — a constant has no receiver. Both
+belong in a module, which is also the natural home for the
+two-argument symmetric functions still to come (`atan2(y, x)`,
+`hypot(a, b)`) that read wrong as methods in every language that has
+tried them.
+
+Go's history corroborates rather than contradicts. `math.Min` was
+float64-only because Go could not write it generically, and Go 1.21's
+fix was **not** a generic `math.Min` — it made `min`/`max` universe
+*builtins*. That third option is worse here for its own reason: it
+would reserve `min` and `max` program-wide, and both are ordinary
+variable names.
+
+The split is not permanent. When the operator traits (`Add`, `Mul`)
+make a `Numeric` bound expressible, `math.abs<T: Numeric>(v: T) -> T`
+types itself with no special case and the four can move. The rule is
+"methods until `Numeric` exists", and it is stated that way so the
+later move is a decision already taken rather than a re-litigation.
+
+**Modules may hold values, not only functions**, which this forced.
+A constant that cannot be a method and cannot be a module member has
+nowhere in the language to exist.
+
 ### Running other programs
 
 Script mode (below) is a stated target, and a script that cannot shell

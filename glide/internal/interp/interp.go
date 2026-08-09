@@ -109,7 +109,7 @@ func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code
 
 var knownModules = map[string]bool{
 	"fs": true, "os": true, "time": true, "process": true,
-	"json": true, "http": true, "sql": true,
+	"json": true, "http": true, "sql": true, "math": true,
 }
 
 func New() *Interp {
@@ -1155,6 +1155,15 @@ func (in *Interp) evalRaw(e ast.Expr, env *Env) (Value, *sig) {
 			case FloatV:
 				return DurationV(time.Duration(float64(n) * float64(unit))), nil
 			}
+		}
+		// A module constant: math.pi. Reached as a field because it is
+		// a value, not a call — which is exactly what modules could
+		// not hold before.
+		if mod, isMod := v.(ModuleV); isMod {
+			if c, ok := moduleValue(string(mod), ex.Name); ok {
+				return c, nil
+			}
+			panic(rtErr{ex.Span, fmt.Sprintf("module %s has no member %q (a function needs call parens)", mod, ex.Name)})
 		}
 		if tv, isType := v.(TypeV); isType {
 			// Namespaced variant: Color.Red, Shape.Circle (ctor).

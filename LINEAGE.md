@@ -1577,6 +1577,47 @@ incident generator). The out-list is discipline too: no GUI, no ORM,
 no ML, ever; protocol clients with living peripheries (SMTP) live on
 the `x/` porch where they can churn at the world's speed.
 
+## Numerics: on the number, or in a module
+
+- **1975–1990** — C settles it for a generation: `math.h` holds
+  `sqrt`, `floor`, `pow`; `abs` lives in `stdlib.h` and is
+  `int`-only, with `labs`, `llabs` and `fabs` beside it because C had
+  no way to write one function over several widths. Every
+  module-first numerics library since inherits that shape *and* that
+  problem.
+- **2009** — Go copies the shape and the problem. `math.Abs`,
+  `math.Min` and `math.Max` are `float64` only; there is no integer
+  `abs` in the standard library at all, and the idiomatic answer for
+  fifteen years is to write your own three-line `func abs(x int) int`.
+  The cause is not the module — it is that Go had no generics.
+- **2015** — Rust puts them on the number: `i32::abs`, `f64::sqrt`,
+  `Ord::min`. It works because `impl` blocks are per-type, so each
+  width gets its own `abs` with no genericity needed at the call site.
+  Constants go elsewhere regardless (`std::f64::consts::PI`) — a
+  constant has no receiver, so no language has managed to make it a
+  method. Swift (`Double.pi`, `x.squareRoot()`, free `abs()`) and
+  Kotlin (`abs()` top-level, `x.pow()` method, `PI` top-level) both
+  end up mixed for the same reason.
+- **2021** — Go 1.21 finally fixes `min`/`max`, and notably **not** by
+  adding a generic `math.Min`: they become universe *builtins*. The
+  Go team's own reasoning is that these are too common to require an
+  import and too fundamental to leave float-only. It is the clearest
+  statement anywhere that a module was the wrong home for the
+  width-generic ones.
+
+**Glide takes** the split, and states the rule rather than leaving it
+to taste: works at every numeric width → method (`n.abs()`,
+`a.min(b)`, `2.pow(10)`); Float-only or a constant → the `math` module
+(`math.sqrt(x)`, `math.pi`). The reason is mechanical rather than
+aesthetic — the receiver is what binds the width, and a free function
+would need the checker to unify an untyped literal against a later
+argument, which it does nowhere else. Go's builtin route is refused
+for its own reason: it would reserve `min` and `max` program-wide, and
+both are ordinary variable names. When operator traits make a
+`Numeric` bound expressible the four can move into `math` and the
+split closes — recorded as a decision already taken, so it is not
+re-argued later.
+
 ## Running other programs: exit codes aren't errors, and there is no shell
 
 - **1971** — Unix settles the convention that a process exits 0 for

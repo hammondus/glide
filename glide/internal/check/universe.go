@@ -148,25 +148,17 @@ var ordMethods = map[string]*types.Func{
 	"cmp": meth(types.Int, p("other", tvSelf)),
 }
 
-// floatMethods is Ord plus the arithmetic surface Float alone has.
-// `sqrt` and the rounding family are Float-only because their integer
-// forms would each need a decision the language has not made — does
-// `Int.sqrt()` truncate or return a Float? — and explicit conversion
-// already spells the answer: `Float(n).sqrt()`.
+// floatMethods is Ord plus the arithmetic that works at every numeric
+// width. The Float-*only* operations — sqrt and the rounding and
+// classification families — live in the `math` module instead: a
+// method earns its place here by needing the receiver to bind its
+// width, and those do not.
 var floatMethods = func() map[string]*types.Func {
 	m := map[string]*types.Func{
-		"abs":         meth(tvSelf),
-		"min":         meth(tvSelf, p("other", tvSelf)),
-		"max":         meth(tvSelf, p("other", tvSelf)),
-		"pow":         meth(tvSelf, p("exp", tvSelf)),
-		"sqrt":        meth(tvSelf),
-		"floor":       meth(tvSelf),
-		"ceil":        meth(tvSelf),
-		"round":       meth(tvSelf),
-		"trunc":       meth(tvSelf),
-		"is_nan":      meth(types.Bool),
-		"is_infinite": meth(types.Bool),
-		"is_finite":   meth(types.Bool),
+		"abs": meth(tvSelf),
+		"min": meth(tvSelf, p("other", tvSelf)),
+		"max": meth(tvSelf, p("other", tvSelf)),
+		"pow": meth(tvSelf, p("exp", tvSelf)),
 	}
 	for name, sig := range ordMethods {
 		m[name] = sig
@@ -302,6 +294,18 @@ var modules = map[string]map[string]*types.Func{
 		// not have to write an empty one.
 		"run": free(result(tOutput), p("cmd", types.String), pd("args", tStrList)),
 	},
+	// math holds what a *module* can hold and a method cannot: values,
+	// and the Float-only operations. The width-generic four — abs,
+	// min, max, pow — stay methods, because the receiver is what binds
+	// the width. As free functions they would need the checker to
+	// infer from one argument and unify an untyped literal against a
+	// later one, which it does nowhere else; as methods the existing
+	// Self machinery does it for nothing. They move here when operator
+	// traits make a `Numeric` bound expressible (DESIGN.md).
+	//
+	// Two-argument symmetric operations belong here on their own
+	// merits and would read wrong as methods — `y.atan2(x)` is bad
+	// shape even in Rust, where it exists.
 	"json": {
 		"encode": free(types.String, p("v", types.Unknown)),
 		// A dynamic decode: the value's shape is the document's
@@ -327,6 +331,38 @@ var modules = map[string]map[string]*types.Func{
 		"sleep": free(types.Unit, p("d", tDuration)),
 		"after": free(types.Apply(types.Receiver, types.Unit), p("d", tDuration)),
 	},
+	"math": {
+		"sqrt":        free(types.Float, p("x", types.Float)),
+		"floor":       free(types.Float, p("x", types.Float)),
+		"ceil":        free(types.Float, p("x", types.Float)),
+		"round":       free(types.Float, p("x", types.Float)),
+		"trunc":       free(types.Float, p("x", types.Float)),
+		"is_nan":      free(types.Bool, p("x", types.Float)),
+		"is_infinite": free(types.Bool, p("x", types.Float)),
+		"is_finite":   free(types.Bool, p("x", types.Float)),
+	},
+}
+
+// moduleValues is what a module exposes that is not callable. It
+// exists for `math.pi`: a constant cannot be a method on a number, and
+// before this a module could only hold functions — so `pi` had
+// literally nowhere in the language to be.
+//
+// Kept a separate table from `modules` rather than a sum of the two,
+// because "is this name a function or a value" is the question both
+// the field and the call path need answered, and one map each answers
+// it by lookup instead of by type switch.
+var moduleValues = map[string]map[string]types.Type{
+	"math": {
+		"pi": types.Float,
+		"e":  types.Float,
+		// Spelled out rather than reachable only as `1.0 / 0.0`, which
+		// is how you write them today. `nan` is a *value*, and the way
+		// to test for one is still `math.is_nan(x)` — `x == math.nan`
+		// is false by IEEE 754 and always will be.
+		"inf": types.Float,
+		"nan": types.Float,
+	},
 }
 
 // freeBuiltins are the names callable with no import. Ok, Err, Some
@@ -351,21 +387,20 @@ var methodHints = func() map[string]string {
 		"Receiver.send":  "only the sender half sends; this is the receiving end",
 		"Sender.recv":    "only the receiver half receives; this is the sending end",
 	}
-	// The float-only arithmetic, reached from an integer. `5.sqrt()`
-	// is the obvious thing to type, and "Int has no method sqrt" is
-	// true but unhelpful: the answer is a conversion, and this
-	// language does not perform one behind your back.
+	// The math module's functions, reached as methods. `x.sqrt()` is
+	// what anyone arriving from Rust or Swift types first, and "Float
+	// has no method sqrt" is true and useless. Both spellings of the
+	// mistake get named: from a Float the fix is the call, from an
+	// integer it is the call *and* a conversion, since nothing
+	// converts silently here.
 	widths := []string{"Int", "i8", "i16", "i32", "u8", "u16", "u32", "u64"}
-	for _, name := range []string{"sqrt", "floor", "ceil", "round", "trunc"} {
-		for _, recv := range widths {
-			m[recv+"."+name] = fmt.Sprintf(
-				"%s is defined on Float — write Float(n).%s()", name, name)
-		}
-	}
-	for _, name := range []string{"is_nan", "is_infinite", "is_finite"} {
-		for _, recv := range widths {
-			m[recv+"."+name] = fmt.Sprintf(
-				"%s asks a Float question; an integer is always finite and never NaN", name)
+	for _, name := range []string{"sqrt", "floor", "ceil", "round", "trunc", "is_nan", "is_infinite", "is_finite"} {
+		for _, recv := range append(widths, "Float", "f32") {
+			hint := fmt.Sprintf("%s lives in the math module — write math.%s(x)", name, name)
+			if recv != "Float" && recv != "f32" {
+				hint = fmt.Sprintf("%s lives in the math module and takes a Float — write math.%s(Float(n))", name, name)
+			}
+			m[recv+"."+name] = hint
 		}
 	}
 	// `abs` on an unsigned type is the one absence that is a design

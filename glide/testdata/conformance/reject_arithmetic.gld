@@ -1,13 +1,25 @@
-// The arithmetic methods are typed at the receiver's own width, and
-// the ones a type genuinely does not have report *why* rather than
-// just "no such method" — an absence that is a design decision should
-// say so, since the reader would otherwise go looking for the bug.
+// The numeric surface is split by width: abs/min/max/pow are methods
+// because the receiver binds the type, everything Float-only is in
+// `math`. Reaching for one on the wrong side names where it went
+// rather than reporting a bare absence — a split the reader has to
+// learn is a split the compiler should teach.
+import math
+
 fn main() {
-    // Float-only, reached from an integer. The answer is an explicit
-    // conversion, because this language never performs one silently.
-    println(5.sqrt())              // error: sqrt is defined on Float — write Float(n).sqrt()
-    println(2.round())             // error: round is defined on Float
-    println(7.is_nan())            // error: is_nan asks a Float question
+    // Float-only, reached as a method. Both spellings of the mistake
+    // get answered: from a Float it is the call, from an integer it is
+    // the call and a conversion, since nothing converts silently here.
+    println((2.0).sqrt())          // error: sqrt lives in the math module — write math.sqrt(x)
+    println(5.sqrt())              // error: sqrt lives in the math module and takes a Float
+    println(2.round())             // error: round lives in the math module
+    println(7.is_nan())            // error: is_nan lives in the math module
+
+    // The module rejects an integer too: conversion is explicit.
+    let n = 9
+    println(math.sqrt(n))          // error: expected Float, found Int
+    println(math.cbrt(8.0))        // error: module math has no function "cbrt"
+    println(math.tau)              // error: module math has no member "tau"
+    println(math.pi())             // error: math.pi is a Float constant, not a function
 
     let u: u8 = 3
     println(u.abs())               // error: u8 is unsigned, so abs would be the identity
@@ -15,15 +27,15 @@ fn main() {
     // min/max take the receiver's own type: no implicit widening, and
     // no mixing an Int with a Float.
     println(5.min(1.0))            // error: expected Int, found Float
-    let n: i8 = 1
-    println(n.max(300))            // error: 300 does not fit in i8
+    let m: i8 = 1
+    println(m.max(300))            // error: 300 does not fit in i8
     println(5.min())               // error: missing its "other" argument
 
-    // The exponent is an Int, not a value of the receiver's type.
+    // The integer exponent is an Int, not a value of the receiver type.
     println(2.pow(3.0))            // error: expected Int, found Float
     println((2.0).pow(3))          // this one is fine: 3 is an untyped literal
 
     // Self is the receiver's width, so the result is too.
-    let wide: Int = n.abs()        // error: expected Int, found i8
+    let wide: Int = m.abs()        // error: expected Int, found i8
     println(wide)
 }

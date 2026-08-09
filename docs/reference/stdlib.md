@@ -143,6 +143,39 @@ interpreter's stdout is an `io.Writer` a test can redirect, and a
 subprocess writing to the real file descriptor bypasses it, so the two
 tiers could disagree about where output went.
 
+### `math` ✓
+
+The Float-only operations, and the constants. Everything that has to
+work at *every* numeric width — `abs`, `min`, `max`, `pow` — is a
+method on the number instead; see [Float](#float) for why the line
+falls there.
+
+| Surface | Signature | Notes |
+|---|---|---|
+| `math.pi` / `math.e` | `Float` | **values, not calls** — `math.pi()` is an error naming the constant |
+| `math.inf` / `math.nan` | `Float` | spelled out rather than reachable only as `1.0 / 0.0` |
+| `math.sqrt(x)` | `(Float) -> Float` | a negative operand gives `NaN`, the IEEE 754 answer — not a trap. `Float` already admits NaN and `math.is_nan` is right there |
+| `math.floor(x)` / `math.ceil(x)` / `math.trunc(x)` | `(Float) -> Float` | still a Float; `Int(math.floor(x))` when you want the integer |
+| `math.round(x)` | `(Float) -> Float` | half **away from zero** (Go's `math.Round`), not banker's rounding. Money wants `Decimal` ○, not a second rounding mode here |
+| `math.is_nan(x)` / `math.is_infinite(x)` / `math.is_finite(x)` | `(Float) -> Bool` | |
+
+`math.nan` is a *value*; testing is still `math.is_nan(x)`, because
+`x == math.nan` is false by IEEE 754 and always will be.
+
+An untyped literal adapts, so `math.sqrt(9)` works — the same rule as
+any other Float parameter, and the same as Go's `math.Sqrt(9)`. A
+*typed* `Int` does not: conversion is explicit here, so it is
+`math.sqrt(Float(n))`.
+
+**Modules can hold values as of this module.** Before `math` they held
+functions only, which is why `pi` had nowhere in the language to
+exist — it cannot be a method on a number.
+
+Designed growth (○): `log`, `exp`, the trigonometric set, and the
+two-argument symmetric ones (`atan2(y, x)`, `hypot(a, b)`) which
+belong here on their own merits — `y.atan2(x)` is bad shape even in
+Rust, where it exists. They arrive when a program needs them.
+
 ### `json` ✓ (M2 shim — `derive Json` is the real design)
 
 | Function | Signature | Notes |
@@ -185,7 +218,9 @@ distinct values bind by unwrapping; `Instant` stores as RFC 3339.
 
 Designed growth (○): the rest of the committed core set — `tls`,
 `crypto`, `flag`, `regex`, `log`, `template`, `rand`, compression,
-persistent collections, `Mutex<T>` — per `STDLIB-GOALS.md`.
+persistent collections, `Mutex<T>` — per `STDLIB-GOALS.md`. That
+document's `math` entry now means the *numerics* surface
+(transcendentals, correct rounding modes), not `abs`.
 
 ## Concurrency (M3)
 
@@ -282,15 +317,9 @@ exist: division cannot wrap except for minimum ÷ -1, which is
 ### Float
 
 Everything under Int above except the `wrapping_*` family (nothing to
-wrap), with `Self` = `Float` or `f32`, plus:
-
-| Method | Signature | Notes |
-|---|---|---|
-| `sqrt()` | `() -> Self` | a negative operand gives `NaN`, the IEEE 754 answer — not a trap. `Float` already admits NaN and `is_nan()` is right there |
-| `floor()` / `ceil()` / `trunc()` | `-> Self` | still a Float; `Int(x.floor())` when you want the integer |
-| `round()` | `-> Self` | half **away from zero** (Go's `math.Round`), not banker's rounding. Money wants `Decimal` ○, not a second rounding mode here |
-| `pow(exp)` | `(Self) -> Self` | the Float form takes a Float exponent, so `(2.0).pow(0.5)` is a square root |
-| `is_nan()` / `is_infinite()` / `is_finite()` | `-> Bool` | |
+wrap), with `Self` = `Float` or `f32`. That is `cmp`, `abs`, `min`,
+`max` and `pow` — and `pow`'s Float form takes a Float exponent, so
+`(2.0).pow(0.5)` is a square root.
 
 `min`/`max` order by the same **total** order `cmp` and `sorted()` use,
 where NaN sorts after every number — so `nan.min(1.0)` is `1.0` and
@@ -299,24 +328,36 @@ Go's `math.Max` about the second; one coherent order beats matching
 either piecemeal, because here `min`, `<` and `sorted()` must never
 disagree.
 
-**These are methods, not a `math` module** — deliberately. `cmp` and
-`wrapping_*` already live on the numbers; a module would split the
-numeric surface across two places and put an import in front of
-`n.abs()`. Go's `math.Abs` is float-only precisely because Go could
-not hang a method on `int`, and the consequence is that Go still has
-no integer `abs`: a warning, not a model. Rust, Swift and Kotlin all
-put these on the number.
+Everything Float-*only* — `sqrt`, the rounding family, the
+classification family — is in the [`math` module](#math-) instead.
 
-Reaching for a Float method on an integer reports the conversion
-rather than a bare "no such method": `5.sqrt()` says *write
-`Float(n).sqrt()`*. There is no implicit numeric conversion here, so
-the fix is always a visible one.
+**The dividing line is width.** A method earns its place on a number by
+needing the receiver to say which of the nine numeric types it is:
+`abs` must work at `u8` and `Int` alike, and `Self` binds that for
+free. As a free function it would need the checker to infer from one
+argument and unify an untyped literal against a later one — machinery
+that exists nowhere else and that the Glide frontend would have to
+reproduce exactly. `sqrt` needs none of that: there is only ever one
+type involved.
 
-Still ○: constants (`pi`, `e`, infinity). They have nowhere to live —
-a module here holds functions, not values — and nothing has needed
-one yet. Also ○: `f32` arithmetic is computed at **f64** precision in
-the interpreter, as it already is for `+` and `*`; rounding happens
-only at an `f32(x)` conversion.
+Go's history is the corroboration, not the counterexample. `math.Min`
+was float64-only because Go could not write it generically — and Go
+1.21's fix was **not** a generic `math.Min`, it was to make `min`/`max`
+universe *builtins*. That third option is worse here for its own
+reason: it would reserve `min` and `max` program-wide, and both are
+common variable names.
+
+Not permanent: when operator traits (`Add`, `Mul`) make a `Numeric`
+bound expressible ○, `math.abs<T: Numeric>(v: T) -> T` types itself
+with no special case, and the four can move.
+
+Reaching for a `math` function as a method reports where it went:
+`x.sqrt()` says *write `math.sqrt(x)`*, and `5.sqrt()` adds the
+conversion, since nothing converts silently here.
+
+f32 arithmetic is computed at **f64** precision in the interpreter, as
+it already is for `+` and `*`; rounding happens only at an `f32(x)`
+conversion ○.
 
 ### Conversion
 

@@ -842,7 +842,22 @@ func (c *checker) field(x *ast.Field) types.Type {
 	if fn, _ := c.methodOf(recv, x.Name); fn != nil {
 		return types.Unknown
 	}
-	if _, isMod := recv.(*types.Module); isMod {
+	if mod, isMod := recv.(*types.Module); isMod {
+		// A module value: `math.pi`. Only reported when the module is
+		// one the checker models *and* the name is not a function —
+		// `math.sqrt` without parens is a function used as a value,
+		// which the evaluator does not support and about which nothing
+		// is claimed here, exactly as for a method used as a value.
+		if vals, known := moduleValues[mod.Name]; known {
+			if t, ok := vals[x.Name]; ok {
+				return t
+			}
+		}
+		if set, known := modules[mod.Name]; known {
+			if _, isFn := set[x.Name]; !isFn {
+				c.errf(x.Span, "module %s has no member %q", mod.Name, x.Name)
+			}
+		}
 		return types.Unknown
 	}
 	c.errf(x.Span, "%s has no field %q", recv, x.Name)

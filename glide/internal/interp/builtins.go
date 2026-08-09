@@ -99,6 +99,8 @@ func (in *Interp) moduleCall(mod, name string, args []Value, at source.Span) Val
 		return in.osCall(name, args, at)
 	case "process":
 		return in.processCall(name, args, at)
+	case "math":
+		return in.mathCall(name, args, at)
 	}
 	switch mod + "." + name {
 	case "time.now":

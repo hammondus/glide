@@ -1,11 +1,19 @@
-// The arithmetic method set — abs, min, max, pow on every numeric
-// type, plus the float-only rounding and classification family.
+// The numeric surface, split by one rule: **works at every width →
+// method; Float-only or a constant → the `math` module.**
 //
-// These live on the numbers rather than in a `math` module: `cmp` and
-// the `wrapping_*` family are already there, and splitting the numeric
-// surface across two places would put an import in front of `n.abs()`.
-// Go's `math.Abs` is float-only because Go could not hang a method on
-// `int` — which is why Go still has no integer abs.
+// abs, min, max and pow have to serve all nine numeric types. As
+// methods the receiver binds `Self` through machinery that already
+// runs; as free functions the checker would have to infer from one
+// argument and unify an untyped literal against a later one, which it
+// does nowhere else. Go's history corroborates: math.Min was
+// float64-only because Go could not write it generically, and Go
+// 1.21's fix was not a generic math.Min but universe *builtins* —
+// which would be worse here, reserving `min` and `max` program-wide.
+//
+// Not permanent. When operator traits make a `Numeric` bound
+// expressible, math.abs<T: Numeric> types itself and these can move.
+import math
+
 fn main() {
     // Self is the receiver's own type, at every width.
     let n: Int = (0 - 7).abs()
@@ -35,17 +43,30 @@ fn main() {
     let cubed: u32 = wide.pow(3)
     println("{cubed}")
 
-    // Float gets everything, and Self is Float.
+    // Float gets the width-generic four too, with Self = Float.
     let f: Float = 2.5
-    let r: Float = f.round()
-    let s: Float = f.sqrt()
     let e: Float = f.pow(2.0)
-    println("{f.abs()} {f.floor()} {f.ceil()} {r} {f.trunc()} {s} {e}")
+    println("{f.abs()} {f.min(1.0)} {f.max(1.0)} {e}")
 
-    let nan: Bool = f.is_nan()
-    let inf: Bool = f.is_infinite()
-    let fin: Bool = f.is_finite()
-    println("{nan} {inf} {fin}")
+    // Everything Float-*only* is in `math`, because a method earns its
+    // place by needing the receiver to bind a width and these do not.
+    let r: Float = math.round(f)
+    let s: Float = math.sqrt(f)
+    println("{math.floor(f)} {math.ceil(f)} {r} {math.trunc(f)} {s}")
+
+    let isnan: Bool = math.is_nan(f)
+    let isinf: Bool = math.is_infinite(f)
+    let isfin: Bool = math.is_finite(f)
+    println("{isnan} {isinf} {isfin}")
+
+    // Constants: values, which a method could not express at all and
+    // which a module could not hold until it learned to carry one.
+    let circle: Float = math.pi * 2.0 * 2.0
+    println("{circle} {math.e} {math.is_infinite(math.inf)} {math.is_nan(math.nan)}")
+
+    // An untyped literal still adapts to Float, exactly as it does at
+    // any other Float parameter — Go's math.Sqrt(9) rule.
+    println("{math.sqrt(9)}")
 
     // Generic code reaches these through an Ord bound only for `cmp`;
     // the arithmetic ones are not trait methods, so they stay on the

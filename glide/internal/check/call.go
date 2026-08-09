@@ -190,6 +190,14 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call, want types.Type) types.Type
 		sig := set[f.Name]
 		if sig == nil {
 			c.inferArgs(x)
+			if t, isValue := moduleValues[mod.Name][f.Name]; isValue {
+				// Calling a constant. Naming what it *is* beats "no
+				// such function", which sends the reader looking for a
+				// spelling mistake that is not there.
+				c.errf(x.Span, "%s.%s is a %s constant, not a function — drop the parens",
+					mod.Name, f.Name, t)
+				return t
+			}
 			c.errf(x.Span, "module %s has no function %q", mod.Name, f.Name)
 			return types.Unknown
 		}

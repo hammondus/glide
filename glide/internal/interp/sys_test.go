@@ -332,6 +332,8 @@ fn main() {
 // out rather than wrapping.
 func TestArithmeticMethods(t *testing.T) {
 	out, err := runProg(t, `
+import math
+
 fn main() {
     println("{(0 - 7).abs()} {7.abs()} {0.abs()}")
     println("{5.min(3)} {5.max(3)} {2.pow(10)} {2.pow(0)} {2.pow(1)}")
@@ -344,16 +346,17 @@ fn main() {
     println("{u.min(3)} {u.max(3)} {u.pow(1)}")
 
     let f = 0.0 - 2.5
-    println("{f.abs()} {f.floor()} {f.ceil()} {f.round()} {f.trunc()}")
-    println("{(2.5).round()} {(3.5).round()} {(0.0 - 2.5).round()}")
-    println("{(9.0).sqrt()} {(2.0).pow(10.0)} {(2.0).pow(0.5)}")
+    println("{f.abs()} {math.floor(f)} {math.ceil(f)} {math.round(f)} {math.trunc(f)}")
+    println("{math.round(2.5)} {math.round(3.5)} {math.round(0.0 - 2.5)}")
+    println("{math.sqrt(9.0)} {(2.0).pow(10.0)} {(2.0).pow(0.5)}")
 
     // Classification, and the total order min/max inherits from cmp:
     // NaN sorts after every number, so it loses min and wins max.
-    let nan = (0.0 - 1.0).sqrt()
-    let inf = 1.0 / 0.0
-    println("{nan.is_nan()} {inf.is_infinite()} {(1.0).is_finite()} {nan.is_finite()}")
-    println("{nan.min(1.0)} {nan.max(1.0)}")
+    println("{math.is_nan(math.nan)} {math.is_infinite(math.inf)} {math.is_finite(1.0)} {math.is_finite(math.nan)}")
+    println("{math.nan.min(1.0)} {math.nan.max(1.0)}")
+
+    // Constants, and the one thing a module could not hold before.
+    println("{math.pi} {math.e} {math.nan == math.nan}")
 }`)
 	if err != nil {
 		t.Fatal(err)
@@ -368,6 +371,7 @@ fn main() {
 		"3 1024 1.4142135623730951",
 		"true true true false",
 		"1 NaN",
+		"3.141592653589793 2.718281828459045 false",
 		"",
 	}, "\n")
 	if out != want {
