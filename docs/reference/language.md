@@ -303,5 +303,9 @@ patterns in function signatures, ref/binding modes.
   a cancelled task. `scope(timeout: 5.s) { … }` evaluates to
   `Result<T, Timeout>`; body `?` propagates through the scope, so
   body errors never nest inside it. `s.deadline()` reads the
-  effective deadline.
+  effective deadline. Channels: `let (tx, rx) = channel()`
+  (rendezvous) / `channel(cap: n)` (buffered; no unbounded); mpmc,
+  both halves clone; `tx.send(v)` (panics if closed), `tx.close()`
+  (idempotent; only `tx` has it), `rx.recv() -> Option<T>` (`None` =
+  closed-and-drained), `for v in rx` consumes until closed.
 - Comptime (const eval, derive, reflection): ○.

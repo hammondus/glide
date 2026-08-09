@@ -712,6 +712,20 @@ workload is conceded.
 - **2015** — Rust's `Mutex<T>` (wrapping the *data*, not sitting
   beside it) proves the best non-borrow-checker race mitigation:
   unguarded access doesn't compile.
+- **Channel ergonomics across three generations** — Go (2009) ships
+  mpmc channels + `select` and they become the language's crown
+  jewel, but with four famous runtime landmines: send-on-closed
+  panics, double-close panics, receive-from-nil blocks forever, and
+  anyone holding the channel can close it (the `sync.Once`-guarded
+  close is a standard Go idiom precisely because the language
+  doesn't help). Rust std (2015) ships `mpsc` with the halves split
+  (`Sender`/`Receiver` as distinct types) — proving the split works —
+  but picks unbounded-by-default (the classic slow-consumer memory
+  leak) and single-consumer; the ecosystem migrates wholesale to
+  crossbeam's mpmc, and `std::sync::mpsc` is quietly regarded as a
+  mistake frozen by stability promises. Kotlin/Swift reuse the same
+  lessons in their channel/AsyncStream APIs: close is sender-side,
+  end-of-stream is a value (`null`/`nil`), not an exception.
 - **What cancellation *is*** — nobody made it a first-class thing.
   Trio (2018) delivers it as a `Cancelled` exception raised at
   checkpoints, with documentation begging users to always re-raise
@@ -766,6 +780,14 @@ the leak that Trio and Kotlin both paper over with "always rethrow"
 conventions. `scope(timeout:)` is clock-driven cancellation
 evaluating to `Result<T, Timeout>`, composing with `?`-conversion so
 timeouts stay non-viral where Go needed `ctx` in every signature.
+For channels (ratified 2026-08-09): Go's mpmc semantics with Rust's
+halves — `let (tx, rx) = channel()`, rendezvous default, bounded
+only; `rx.recv() -> Option<T>` (`None` = closed-and-drained, so
+`for v in rx` is Go's `range ch`); `rx` can't close (type-shaped
+away), `tx.close()` is idempotent (ships what Go users hand-roll
+with `sync.Once`), send-on-closed stays a panic — it's a sender
+coordination bug, and shutdown flows down the scope tree via
+cancellation, not up via send failures.
 
 ## Comptime, not macros
 

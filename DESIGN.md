@@ -982,6 +982,37 @@ Go's model, with its defects designed out:
   half are distinct types; the sender closes; misuse is a compile-shape
   error, not runtime roulette. Sends transfer ownership (the sent value
   is dead to the sender) — kills the both-sides-mutate race at the root.
+- **Channel surface** (ratified 2026-08-09): `let (tx, rx) =
+  channel()` — unbuffered rendezvous default (backpressure by
+  construction); `channel(cap: 64)` buffers; **no unbounded channels**
+  (Rust std made unbounded the default and it's the classic
+  slow-consumer leak — want unbounded, build it visibly). The tuple
+  construction *is* the halves doctrine: no whole-channel value
+  exists, so who-sends/who-receives is structural. `tx.send(v)`;
+  `rx.recv() -> Option<T>` with `None` = closed-and-drained — same
+  shape as the generator protocol, so **`for v in rx` works** (this
+  doesn't touch "channels are not the iterator protocol": that bans
+  implementing iterators *with* a thread+channel; consuming an
+  existing stream is the legitimate direction). Both halves clone;
+  semantics are **mpmc** (worker pools sharing one `rx` are
+  bread-and-butter; Rust's ecosystem abandoning std mpsc for
+  crossbeam's mpmc is the evidence). Go's three channel panics,
+  dispatched: receiver-closes → unrepresentable (`rx` has no
+  `close`); double-close → gone (`tx.close()` is **idempotent** — no
+  deterministic drop in a GC'd language, so close must be safe from a
+  defer racing another; Go users hand-roll this with `sync.Once`);
+  send-on-closed → **still a panic** (a coordination bug between
+  senders; `Result`-returning send would tax every correct program to
+  launder a bug into a value — and shutdown flows *down* the scope
+  tree via cancellation, not *up* via send failures, so Rust's
+  Err-on-receiver-gone pattern isn't needed); nil-channel-blocks →
+  free (no nil). Ownership-transfer-on-send stays ratified but
+  dormant in M2 — the checker enforces it; the tree-walker won't
+  half-enforce. Accepted costs: send-on-closed remains runtime (full
+  static prevention needs affine senders — ownership machinery we
+  sacrificed); idempotent close hides sloppy double-close where Go
+  would panic; no unbounded channel means porting buffer-hungry Go
+  code takes an explicit decision.
 - **Races: honest mitigation, no false promise** (no borrow checker —
   recorded sacrifice). Ownership-transfer makes the default pattern
   race-free; **`Mutex<T>` wraps the data it guards** (Rust's best
