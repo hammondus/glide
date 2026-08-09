@@ -1,0 +1,46 @@
+// The last three M4 holes: a generator that yields the wrong type, a
+// spawned closure capturing a mutable binding, and a call whose type
+// parameter nothing determines. All three ran to completion through
+// M4c's earlier landings.
+type Box<T> = struct { items: List<T> }
+
+impl Box<T> {
+    fn new() -> Box<T> { Box{ items: [] } }
+    fn add(mut self, v: T) { self.items.push(v) }
+}
+
+fn counter() -> Iterator<Int> {
+    yield 1
+    yield "not an int"          // error: expected Int, found String
+}
+
+fn strings() -> Iterator<String> {
+    yield "a"
+}
+
+fn delegating() -> Iterator<Int> {
+    yield from strings()        // error: expected Iterator<Int>, found Iterator<String>
+}
+
+fn not_an_iterator() -> Int {   // error: this function yields, so it returns Iterator<T>
+    yield 1
+}
+
+fn main() {
+    for v in counter() { println(v) }
+    for v in delegating() { println(v) }
+    println(not_an_iterator())
+
+    // A spawned closure may not capture a mutable binding: the parent
+    // may still be writing it, which is the data-race archetype.
+    let mut total = 0
+    scope s {
+        s.spawn(|| { total = total + 1 })   // error: cannot capture the mutable binding "total"
+    }
+    println(total)
+
+    // Nothing on this line says what a Box *of* — `new` takes no
+    // arguments, so the binding is the only place T could come from.
+    let mut c = Box.new()       // error: cannot tell what T is in Box<T>
+    c.add(1)
+}

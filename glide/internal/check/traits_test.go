@@ -370,3 +370,82 @@ func TestClosureReturnMismatchReportsOnce(t *testing.T) {
 		t.Errorf("the signature mismatch should not also fire: %q", got)
 	}
 }
+
+// A generator's declared Iterator<T> now types its yields. `yield "s"`
+// in an Iterator<Int> passed through M4b and every M4c landing before
+// this one.
+func TestGeneratorElementTypes(t *testing.T) {
+	for _, tc := range []struct{ name, src, want string }{
+		{"wrong yield", "fn g() -> Iterator<Int> { yield 1\n yield \"no\" }\nfn main() {}", "expected Int, found String"},
+		{"wrong delegation", "fn a() -> Iterator<String> { yield \"x\" }\nfn b() -> Iterator<Int> { yield from a() }\nfn main() {}",
+			"expected Iterator<Int>, found Iterator<String>"},
+		{"not an iterator at all", "fn g() -> Int { yield 1 }\nfn main() {}", "yields, so it returns Iterator<T>"},
+	} {
+		if got := frontendErr(t, tc.src); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: want %q, got %q", tc.name, tc.want, got)
+		}
+	}
+	for _, tc := range []struct{ name, src string }{
+		{"matching yields", "fn g() -> Iterator<Int> { yield 1\n yield 2 }\nfn main() {}"},
+		{"delegation of the same type", "fn a() -> Iterator<Int> { yield 1 }\nfn b() -> Iterator<Int> { yield from a()\n yield 2 }\nfn main() {}"},
+		// The T -> T? coercion applies inside a yield like anywhere else.
+		{"coercion in a yield", "fn g() -> Iterator<Int?> { yield 1\n yield None }\nfn main() {}"},
+	} {
+		if got := frontendErr(t, tc.src); got != "" {
+			t.Errorf("%s: %s", tc.name, got)
+		}
+	}
+}
+
+// DESIGN.md: a closure crossing a task boundary must not capture a
+// `mut` binding — the parent going on to write it is the data-race
+// archetype, and it is statically visible because mut-ness is known
+// and spawn is a known boundary.
+func TestSpawnCannotCaptureMut(t *testing.T) {
+	got := frontendErr(t, "fn main() {\n    let mut total = 0\n    scope s {\n        s.spawn(|| { total = total + 1 })\n    }\n    println(total)\n}")
+	if !strings.Contains(got, `cannot capture the mutable binding "total"`) {
+		t.Fatalf("want the capture diagnostic: %q", got)
+	}
+	// The rule is about mut-ness, which is what makes it cheap: an
+	// immutable capture crosses freely.
+	if got := frontendErr(t, "fn main() {\n    let base = 10\n    scope s {\n        let t = s.spawn(|| base * 2)\n        println(t.join())\n    }\n}"); got != "" {
+		t.Errorf("an immutable capture must cross freely: %s", got)
+	}
+	// The freeze idiom: mut for setup, frozen before it crosses.
+	if got := frontendErr(t, "fn main() {\n    let mut b = []\n    b.push(1)\n    let frozen = b\n    scope s {\n        let t = s.spawn(|| frozen.len())\n        println(t.join())\n    }\n}"); got != "" {
+		t.Errorf("the freeze idiom must work: %s", got)
+	}
+	// A closure that is not spawned may capture whatever it likes.
+	if got := frontendErr(t, "fn main() {\n    let mut n = 0\n    let bump = || { n = n + 1 }\n    bump()\n}"); got != "" {
+		t.Errorf("the rule is about task boundaries, not closures: %s", got)
+	}
+}
+
+// A call whose type parameter nothing determines used to erase to
+// Unknown in silence, so `Box.new()` then `add(1)` then `add("s")`
+// both passed. Rust answers the same call with "type annotations
+// needed", and so does this — inferring T from a *later* statement
+// needs a constraint store this checker deliberately lacks.
+func TestUndeterminedTypeParameter(t *testing.T) {
+	const decl = "type Box<T> = struct { items: List<T> }\n" +
+		"impl Box<T> {\n" +
+		"    fn new() -> Box<T> { Box{ items: [] } }\n" +
+		"    fn of(v: T) -> Box<T> { Box{ items: [v] } }\n" +
+		"    fn add(mut self, v: T) { self.items.push(v) }\n" +
+		"}\n"
+	if got := frontendErr(t, decl+"fn main() {\n    let mut c = Box.new()\n    c.add(1)\n}"); !strings.Contains(got, "cannot tell what T is in Box<T>") {
+		t.Errorf("want the annotation diagnostic: %q", got)
+	}
+	// The binding's annotation determines it — and then the element
+	// type is actually enforced, which erasure had been hiding.
+	if got := frontendErr(t, decl+"fn main() {\n    let mut c: Box<Int> = Box.new()\n    c.add(1)\n}"); got != "" {
+		t.Errorf("an annotated binding should be accepted: %s", got)
+	}
+	if got := frontendErr(t, decl+"fn main() {\n    let mut c: Box<Int> = Box.new()\n    c.add(\"mixed\")\n}"); !strings.Contains(got, "expected Int, found String") {
+		t.Errorf("the annotated element type must be enforced: %q", got)
+	}
+	// An argument determines it just as well.
+	if got := frontendErr(t, decl+"fn main() {\n    let c = Box.of(1)\n    println(c)\n}"); got != "" {
+		t.Errorf("an argument-determined parameter needs no annotation: %s", got)
+	}
+}

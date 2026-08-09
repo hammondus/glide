@@ -238,7 +238,7 @@ One compile-time restriction, designed and not yet enforced:
 
 ```glide
 let mut counter = 0
-s.spawn(|| { counter += 1 })     // ○ will be a compile error
+s.spawn(|| { counter += 1 })     // a compile error as of M4c
 ```
 
 This is the data-race archetype and it is statically visible: mut-ness
@@ -429,7 +429,7 @@ genuinely want to ignore it, `let _ = t.join()`.
 **Capturing a `mut` binding in a spawned closure.**
 
 ```glide
-// Bad — the data-race archetype; will be a compile error
+// A compile error: the data-race archetype
 let mut count = 0
 s.spawn(|| { count += 1 })
 

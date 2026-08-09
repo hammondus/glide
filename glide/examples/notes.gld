@@ -91,8 +91,13 @@ fn run() -> Result<String, Error> {
     r.get(`/notes/{id}`, |req| get_note(db, req))
     r.post(`/notes`, |req| create_note(db, req))
 
+    // Freeze before the router crosses a task boundary: a spawned
+    // closure may not capture a `mut` binding, and this line is where
+    // the routes stop changing anyway.
+    let router = r
+
     scope s {
-        _ = s.spawn(|| http.serve("127.0.0.1:17640", r))
+        _ = s.spawn(|| http.serve("127.0.0.1:17640", router))
         _ = s.spawn(|| sweeper(db))
         time.sleep(80.ms)
 

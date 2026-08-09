@@ -45,12 +45,15 @@ fn insert_node<T: Ord>(at: Node<T>?, value: T) -> Node<T> {
 }
 
 test "in-order traversal is sorted" (xs: List<Int>) {
-    let mut t = Tree.new()
+    // Annotated because nothing on this line says what a Tree *of*:
+    // `Tree.new()` takes no arguments, so the binding is the only
+    // place T can come from.
+    let mut t: Tree<Int> = Tree.new()
     for x in xs { t.insert(x) }
     expect(t.iter().collect() == xs.sorted())
 }
 
 bench "insert 10k" {
-    let mut t = Tree.new()
+    let mut t: Tree<Int> = Tree.new()
     for x in 0..10_000 { t.insert(x) }
 }

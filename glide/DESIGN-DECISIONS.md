@@ -517,6 +517,48 @@ or it is a bug.
   to end instead — every numeric primitive is *run* as a conversion,
   and `Bool`/`String` are asserted not to be.
 
+- **The spawn-captures-mut rule is enforced at the call, not in the
+  closure.** `dotCall` arms a `spawned` map before checking a
+  `s.spawn(…)` argument, and `ident` records any name whose lookup
+  crossed a function boundary to reach a `mut` binding. Doing it the
+  other way — flagging inside `closure()` — would need the closure to
+  know why it was being checked, which it has no business knowing.
+
+  `lookup` split into `lookupCrossing`, which reports whether the
+  binding was found past a `fnBound` scope. That distinction was
+  already in the loop; it just was not returned.
+
+  The rule cost 2 of 43 existing spawn sites and both were worth it:
+  `examples/notes.gld` froze a router that was `mut` only for setup,
+  and `TestScopeWaitsForChildren` had a child pushing to a captured
+  `mut` list — a genuine race that passed only because the interpreter
+  holds one lock. It now sends over a channel, which is the doctrinal
+  answer and tests the same rule.
+
+- **A generator's yields are checked against its declared element
+  type.** `c.yields` holds the T of the enclosing `Iterator<T>`, set
+  in `fnBody` where the generator exemption from the tail-value rule
+  already lived. `yield e` checks e against T; `yield from e` checks
+  against `Iterator<T>`, because delegation takes an iterator rather
+  than an element. A `yield`ing function declaring anything but an
+  Iterator is an error — `yield` produces an iterator and saying
+  otherwise is not a shape the language has.
+
+- **The expected type seeds a call's type-parameter binding.**
+  `checkArgs` bound parameters from arguments alone, so `Box.new()`
+  had nothing to bind from. `let c: Box<Int> = Box.new()` *appeared*
+  to work — erase turned T into Unknown, and the annotation won on the
+  wildcard — which is why the element type went unchecked whenever no
+  annotation was there to win. Threading `want` through `dotCall` into
+  `checkArgsWanting` makes the binding real, and makes "nothing
+  determines T here" a diagnosable condition rather than the default.
+
+  `requireBound` walks the *return type* for free variables rather
+  than iterating `sig.TypeParams`: an associated function takes its
+  parameters from the impl header (`impl Box<T> { fn new() -> Box<T> }`),
+  so its own list is empty and the T belongs to the Named. That is the
+  same condition `erase` keys on, caught one step earlier.
+
 - **`ast.TypeFunc` reuses `Elems` for parameters.** A written function
   type needed somewhere to put them, and `Elems` already meant "a list
   of types with no names" for tuples. A third slice would have been a
@@ -757,12 +799,17 @@ rather than a wrong answer** — the checker stays quiet where it could
 speak, but nothing computes the wrong value. Still open, in the
 order they are worth doing:
 
-1. The cheaper leftovers: the spawn-captures-mut ban, generator
-   element types (a `yield`ing function is exempt from the tail-value
-   check, so `yield "s"` in an `Iterator<Int>` passes), and call-site
-   inference for *nullary* associated functions (`Box.new()` erases
-   its parameter, so a later `add(1)` then `add("s")` passes;
-   `Box.new(1)` already infers).
+Nothing. **M4 is done.**
+
+The one deferred item is the arithmetic operator traits (`Add`,
+`Mul`), which are designed and unbuilt because nothing yet needs
+them — the same admission rule the universe traits use.
+
+Next is bootstrap step 3 (`../DESIGN.md`): the compiler frontend
+written in Glide, run on the interpreter. The conformance corpus is
+what proves that replacement faithful, so it is worth widening
+deliberately before it becomes load-bearing rather than discovering
+gaps when the Glide frontend disagrees with this one.
 
 **Two lexer gaps found while testing the conversions**, both small
 and both out of scope for the commit that found them: there are no

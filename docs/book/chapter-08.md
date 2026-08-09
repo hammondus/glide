@@ -353,13 +353,18 @@ allocate a non-escaping closure.
 
 #### Task boundaries have an extra rule ○
 
-There is one compile-time restriction, designed and not yet enforced:
+There is one compile-time restriction, and as of M4c it is enforced:
 
 > **Closures crossing task boundaries must not capture `mut` bindings.**
 
 ```glide
 let mut counter = 0
-s.spawn(|| { counter += 1 })     // ○ will be a compile error
+s.spawn(|| { counter += 1 })
+```
+
+```
+error: a spawned closure cannot capture the mutable binding "counter"
+       — the parent may still be writing it
 ```
 
 This is the data-race archetype, and it is statically visible:
@@ -702,11 +707,11 @@ Adapters are for *transforming* sequences. When you are just doing
 something n times, the loop is clearer and cheaper, and it lets you
 `break`.
 
-**Freeze before spawning.** Even though the compile-time rule is ○,
-adopt the idiom now:
+**Freeze before spawning.** The compile-time rule enforces this, but
+the idiom is worth understanding rather than just obeying:
 
 ```glide
-// Bad — will be a compile error when the rule lands
+// A compile error: the parent may still be writing count
 let mut count = 0
 s.spawn(|| { count += 1 })
 

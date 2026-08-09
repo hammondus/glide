@@ -418,15 +418,17 @@ coming to Glide today: annotations are ignored.
 
 ```glide
 fn main() {
-    let x: Int = "not an int"     // no error today
+    let x: Int = "not an int"
     println(x)
 }
 ```
 
-This runs and prints `not an int`. It will be a compile error in the
-checker era. Write annotations anyway — they are documentation and they
-are what the checker will read — but do not expect them to protect you
-yet.
+```
+error: line 2: expected Int, found String
+```
+
+This ran and printed `not an int` through M3. As of M4 every
+annotation is checked, in every tier, with no way to skip it.
 
 **Running a file with no `main`.** Library files parse fine but
 `glide run` needs an entry point:

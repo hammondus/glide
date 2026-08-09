@@ -135,7 +135,7 @@ compression, persistent collections, `Mutex<T>` — per
 
 | Surface | Signature | Notes | Status |
 |---|---|---|---|
-| `s.spawn(f)` | `(fn() -> T) -> Task<T>` | scope handles only; error if the scope has ended | ✓ |
+| `s.spawn(f)` | `(fn() -> T) -> Task<T>` | scope handles only; error if the scope has ended. The closure **may not capture a `mut` binding** ✓ — the parent may still be writing it, which is the data-race archetype. Freeze first (`let frozen = building`) or send it over a channel. Immutable captures cross freely | ✓ |
 | `t.join()` | `() -> T` | blocks (cancellation point); returns exactly what the closure returned | ✓ |
 | `channel()` | `() -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous | ✓ |
 | `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ✓ |

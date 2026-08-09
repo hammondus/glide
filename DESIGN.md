@@ -7,11 +7,11 @@ tree-walking interpreter runs the whole ratified surface and
 type-checks it first, in both tiers, with no way to opt out (see
 `glide/DESIGN-DECISIONS.md`). M4c has landed sized numerics, explicit
 numeric conversion, generic bound checking, trait conformance and the
-`Ord` operator trait, boxed `Option`, and match exhaustiveness.
-Remaining checker work: generator element types, the spawn-captures-mut
-ban, and the arithmetic operator traits — all of them missing
-*diagnostics*, with no remaining case where a program computes the
-wrong value.
+`Ord` operator trait, boxed `Option`, match exhaustiveness, generator
+element types, the spawn-captures-mut ban, and undetermined type
+parameters. **M4 is done.** The only checker work left is the
+arithmetic operator traits (`Add`, `Mul`), deferred for want of a
+forcing need.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee
@@ -214,6 +214,14 @@ map/filter culture. Decisions:
   idiom (`let snapshot = counter`) or `.clone()` to cross. Cheap rule,
   whole race class → compile error; race detector backstops what
   escapes via reference-typed immutable captures.
+
+  **Enforced as of M4c**, and the cost came in at 2 of 43 existing
+  spawn sites — one a router that was `mut` only for setup (the freeze
+  idiom, exactly as designed), and one a test whose own comment read
+  "the child mutates through the captured binding", which is the
+  archetype verbatim and worked only because the interpreter holds one
+  lock. Finding a latent race in the test suite on the day the rule
+  landed is the argument for the rule.
 - Big lambda → named function is cut-paste (same type, no migration);
   the formatter nudges by refusing to make big lambdas pretty.
 
@@ -388,6 +396,21 @@ Mechanics:
   Consequence: every primitive type name is reserved, since `u8` now
   means something in expression position. A local `let u8 = 5` still
   shadows it, as in Go, and the conversion is then simply gone.
+- **A call whose type parameter nothing determines is an error.**
+  `let c = Box.new()` — where `new` takes no arguments — used to erase
+  T to Unknown in silence, so a later `c.add(1)` and `c.add("s")` both
+  passed. The answer is Rust's: *type annotations needed*. Inferring T
+  from a **later** statement would need a constraint store this design
+  deliberately does not have (no cross-function unification, no occurs
+  check — mandatory signatures are what buy that), and an annotation
+  costs one line while saying what the erasure was hiding.
+
+  The expected type now seeds the binding, so `let c: Box<Int> =
+  Box.new()` determines T properly. That case *appeared* to work
+  before, by erasing to `Box<?>` and letting the annotation win on the
+  Unknown wildcard — which is why the element type went unchecked when
+  no annotation was there to win.
+
 - **A function type is writable: `fn(A, B) -> C`.** The type existed
   inside the checker from M4b — a closure handed to `sort_by` is
   checked against the parameter's signature — but `parseType` had no

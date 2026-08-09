@@ -1,6 +1,8 @@
 package check
 
 import (
+	"sort"
+
 	"glide/internal/ast"
 	"glide/internal/source"
 	"glide/internal/types"
@@ -18,7 +20,7 @@ func (c *checker) call(x *ast.Call, want types.Type) types.Type {
 	}
 	switch fn := x.Fn.(type) {
 	case *ast.Field:
-		return c.dotCall(fn, x)
+		return c.dotCall(fn, x, want)
 	case *ast.DotName:
 		// `.Green(1)` — a variant constructor resolved in the
 		// expected type.
@@ -176,7 +178,7 @@ func (c *checker) specialForm(name string, x *ast.Call, want types.Type) (types.
 // dotCall handles `recv.name(args)`: module functions, associated
 // functions, variant constructors, distinct unwrapping, user methods
 // and builtin methods.
-func (c *checker) dotCall(f *ast.Field, x *ast.Call) types.Type {
+func (c *checker) dotCall(f *ast.Field, x *ast.Call, want types.Type) types.Type {
 	recv := c.infer(f.X)
 
 	if mod, ok := recv.(*types.Module); ok {
@@ -214,7 +216,13 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call) types.Type {
 			c.errf(x.Span, "%s.%s is a method; call it on a value", n.Name, f.Name)
 			return types.Unknown
 		}
-		return c.checkArgs(sig, x, x.Span)
+		// The expectation binds the type parameters an associated
+		// function's arguments cannot: `Box.new()` takes nothing, so
+		// `let c: Box<Int> = Box.new()` is the only thing that can say
+		// what T is. Before M4c this leaned on erase turning T into
+		// Unknown and the annotation winning by wildcard — which
+		// happened to work and said nothing when it did not.
+		return c.checkArgsWanting(sig, x, x.Span, want)
 	}
 
 	// value() unwraps a distinct type — the one built-in escape
@@ -228,6 +236,14 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call) types.Type {
 		return types.Base(n)
 	}
 
+	// `s.spawn(|| …)` is a task boundary. Checking the closure with
+	// `spawned` armed collects the mut bindings it captures, and the
+	// rule is enforced once the argument has been typed — the
+	// diagnostic wants to point at the capture, which is only known
+	// after the body is walked.
+	if app, ok := recv.(*types.App); ok && app.C == types.Scope && f.Name == "spawn" {
+		return c.spawnCall(x)
+	}
 	sig, modelled := c.methodOf(recv, f.Name)
 	if sig == nil {
 		c.inferArgs(x)
@@ -259,6 +275,31 @@ func (c *checker) dotCall(f *ast.Field, x *ast.Call) types.Type {
 		c.requireMutRoot(f.X, x.Span)
 	}
 	return c.checkArgs(sig, x, x.Span)
+}
+
+// spawnCall checks `s.spawn(f)` with the mut-capture rule armed.
+// DESIGN.md: a closure crossing a task boundary must not capture a
+// `mut` binding, because the parent going on to mutate it is the
+// data-race archetype — and unlike most races this one is statically
+// visible, since mut-ness is known and spawn is a known boundary.
+func (c *checker) spawnCall(x *ast.Call) types.Type {
+	saved := c.spawned
+	c.spawned = map[string]source.Span{}
+	sig := ctorMethods[types.Scope]["spawn"]
+	ret := c.checkArgs(sig, x, x.Span)
+	names := make([]string, 0, len(c.spawned))
+	for name := range c.spawned {
+		names = append(names, name)
+	}
+	sort.Strings(names) // stable diagnostics, not map order
+	for _, name := range names {
+		c.errf(c.spawned[name],
+			"a spawned closure cannot capture the mutable binding %q — the parent may still be writing it. "+
+				"Freeze it first (`let %s_now = %s`) or send it over a channel",
+			name, name, name)
+	}
+	c.spawned = saved
+	return ret
 }
 
 // methodOf finds a method on a receiver. modelled reports whether the
@@ -343,8 +384,17 @@ func (c *checker) variantCall(name string, owner *types.Named, x *ast.Call) type
 // arguments to their parameters, defaults where an argument is
 // absent, and type-parameter inference from what was passed.
 func (c *checker) checkArgs(sig *types.Func, x *ast.Call, at source.Span) types.Type {
+	return c.checkArgsWanting(sig, x, at, nil)
+}
+
+// checkArgsWanting is checkArgs with the call's own expected type
+// available to seed the type-parameter binding.
+func (c *checker) checkArgsWanting(sig *types.Func, x *ast.Call, at source.Span, want types.Type) types.Type {
 	slots := c.argSlots(sig, x, at)
 	bind := map[string]types.Type{}
+	if want != nil {
+		unify(sig.Ret, want, bind)
+	}
 	for i, prm := range sig.Params {
 		if i >= len(slots) || slots[i] == nil {
 			continue
@@ -370,7 +420,112 @@ func (c *checker) checkArgs(sig *types.Func, x *ast.Call, at source.Span) types.
 	// type parameter is. This is the half the *caller* sees; the body
 	// was already checked once against the bounds at its declaration.
 	c.checkBounds(sig, bind, at)
-	return c.erase(types.Subst(sig.Ret, bind))
+	ret := types.Subst(sig.Ret, bind)
+	c.requireBound(sig, bind, ret, at)
+	return c.erase(ret)
+}
+
+// requireBound reports a call whose type parameters the arguments
+// could not determine and no expectation supplied — `Box.new()`, where
+// nothing says what a Box of. Erasing to Unknown silently was the M4b
+// behaviour, and it means a later `add(1)` then `add("s")` both pass.
+//
+// Rust's answer to the same call is "type annotations needed", and it
+// is the right one here for the same reason: the alternative is
+// inferring T from a *later* statement, which needs a constraint store
+// this checker deliberately does not have (DESIGN.md: no
+// cross-function unification, no occurs check). An annotation costs
+// one line and says what the erasure was hiding.
+func (c *checker) requireBound(sig *types.Func, bind map[string]types.Type, ret types.Type, at source.Span) {
+	if !hasVar(ret) {
+		return
+	}
+	// Walked off the *return type* rather than sig.TypeParams: an
+	// associated function takes its parameters from the impl header
+	// (`impl Box<T> { fn new() -> Box<T> }`), so its own TypeParams
+	// list is empty and the T is the Named's. This is the same
+	// condition `erase` keys on, one step earlier — the free variables
+	// it is about to replace with Unknown.
+	loose := freeVars(ret, bind, c.tparams)
+	if len(loose) == 0 {
+		return
+	}
+	sort.Strings(loose)
+	c.errf(at, "cannot tell what %s is in %s here — annotate the binding", list(loose), ret)
+}
+
+// freeVars collects the type parameters in t that neither the call
+// bound nor the enclosing declaration has in scope — the ones erase
+// would silently turn into Unknown.
+func freeVars(t types.Type, bind map[string]types.Type, inScope map[string]*types.Var) []string {
+	seen := map[string]bool{}
+	var walk func(types.Type)
+	walk = func(t types.Type) {
+		switch x := t.(type) {
+		case *types.Var:
+			if _, bound := bind[x.Name]; bound {
+				return
+			}
+			if _, lexical := inScope[x.Name]; lexical {
+				return
+			}
+			seen[x.Name] = true
+		case *types.App:
+			for _, a := range x.Args {
+				walk(a)
+			}
+		case *types.Named:
+			for _, a := range x.Args {
+				walk(a)
+			}
+		case *types.Tuple:
+			for _, e := range x.Elems {
+				walk(e)
+			}
+		case *types.Func:
+			for _, p := range x.Params {
+				walk(p.Type)
+			}
+			walk(x.Ret)
+		}
+	}
+	walk(t)
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	return out
+}
+
+// mentions reports whether a type parameter appears anywhere in t.
+func mentions(t types.Type, name string) bool {
+	switch x := t.(type) {
+	case *types.Var:
+		return x.Name == name
+	case *types.App:
+		return mentionsAny(x.Args, name)
+	case *types.Named:
+		return mentionsAny(x.Args, name)
+	case *types.Tuple:
+		return mentionsAny(x.Elems, name)
+	case *types.Func:
+		for _, p := range x.Params {
+			if mentions(p.Type, name) {
+				return true
+			}
+		}
+		return mentions(x.Ret, name)
+	}
+	return false
+}
+
+func mentionsAny(ts []types.Type, name string) bool {
+	for _, t := range ts {
+		if mentions(t, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // erase replaces type parameters the call site could not bind with

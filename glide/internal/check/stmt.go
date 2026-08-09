@@ -75,11 +75,22 @@ func (c *checker) stmt(s ast.Stmt) {
 		c.forStmt(st)
 
 	case *ast.YieldStmt:
-		// A generator's element type is not modelled yet (see
-		// fnBody); inferring the operand still types its
-		// subexpressions, which is the useful half.
-		if st.E != nil {
-			c.infer(st.E)
+		switch {
+		case st.E == nil:
+			// `yield` with no value: only meaningful for Iterator<()>.
+			if c.yields != nil && !types.AssignableTo(types.Unit, c.yields) {
+				c.errf(st.Span, "this generator yields %s, so `yield` needs a value", c.yields)
+			}
+		case st.From:
+			// `yield from it` delegates, so the operand is an iterator
+			// of the same element type, not an element.
+			want := types.Type(nil)
+			if c.yields != nil {
+				want = types.Apply(types.Iterator, c.yields)
+			}
+			c.checkExpr(st.E, want)
+		default:
+			c.checkExpr(st.E, c.yields)
 		}
 
 	case *ast.FnStmt:

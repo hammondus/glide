@@ -48,18 +48,27 @@ fn main() {
 }
 
 // Rule 1: scope exit waits for children even when nobody joins.
+//
+// This test used to have the child push to a captured `mut` list,
+// which is the data-race archetype and worked only because the
+// interpreter holds one lock. M4c made that a compile error, and the
+// rewrite is the doctrinal one: the child sends, the parent receives
+// after the scope. If exit did not wait, the channel would be empty.
 func TestScopeWaitsForChildren(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let mut log = []
+    let (tx, rx) = channel(cap: 4)
     scope s {
-        _ = s.spawn(|| log.push("child"))
+        _ = s.spawn(|| {
+            tx.send("child")
+            tx.close()
+        })
     }
+    let mut log = []
+    for v in rx { log.push(v) }
     log.push("after")
     println(log)
 }`)
-	// The child mutates through the captured binding; the scope must
-	// have joined it before "after" is pushed.
 	if err != nil {
 		t.Fatal(err)
 	}

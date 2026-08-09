@@ -64,8 +64,11 @@ fn run() -> String {
     let mut r = http.router()
     r.get(`+"`"+`/hello/{name}`+"`"+`, |req| http.text("hi " + (req.path_param("name") ?? "?")))
     r.post("/echo", |req| http.text(req.body()))
+    // A spawned closure cannot capture a mut binding; freeze the
+    // router first, which is also where the routes stop changing.
+    let router = r
     scope s {
-        _ = s.spawn(|| http.serve("127.0.0.1:17641", r))
+        _ = s.spawn(|| http.serve("127.0.0.1:17641", router))
         time.sleep(80.ms)
         let g = match http.get("http://127.0.0.1:17641/hello/craig") {
             Ok(resp) => "{resp.status()} {resp.body()}"
@@ -102,8 +105,11 @@ import time
 fn run() -> String {
     let mut r = http.router()
     r.get("/boom", |req| Err("kaput"))
+    // A spawned closure cannot capture a mut binding; freeze the
+    // router first, which is also where the routes stop changing.
+    let router = r
     scope s {
-        _ = s.spawn(|| http.serve("127.0.0.1:17642", r))
+        _ = s.spawn(|| http.serve("127.0.0.1:17642", router))
         time.sleep(80.ms)
         return match http.get("http://127.0.0.1:17642/boom") {
             Ok(resp) => "{resp.status()} {resp.body().trim()}"

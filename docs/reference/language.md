@@ -317,7 +317,11 @@ Angle brackets, never square. **No turbofish, ever.**
   x + 1` is. Where an annotation contradicts an expectation, the
   conflict is reported once at the annotation.
 - Generators: any `fn` whose body contains `yield` returns an
-  Iterator when called ✓; `yield from` delegates ✓.
+  Iterator when called ✓; `yield from` delegates ✓. The declared
+  `Iterator<T>` **types the yields** ✓ — `yield "s"` in an
+  `Iterator<Int>` is a compile error, `yield from` takes an
+  `Iterator<T>` rather than a `T`, and a `yield`ing function that
+  declares anything but an Iterator is an error.
 - `return` / `return expr` ✓; tail-value rule: a no-arrow function
   whose tail is a meaningful value is an error — discard with `_ =` ✓.
 
@@ -367,8 +371,9 @@ patterns in function signatures, ref/binding modes.
   type; `.Shorthand` against the expected type; `mut` paths;
   integer-literal range against a sized type; and every name being
   defined. What is *not* yet checked, and stays dynamic until M4c:
-  a generator's element type ○. Generic bounds, trait conformance and
-  match exhaustiveness are checked as of M4c ✓.
+  everything listed here ✓ as of M4c — generic bounds, trait
+  conformance, match exhaustiveness, generator element types, the
+  spawn-captures-mut ban and undetermined type parameters included.
 - No null; no zero values; mandatory initialisation. ✓ (by
   construction in M2)
 - Errors are values; `?` propagates; panics are for bugs, kill the

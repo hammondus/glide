@@ -44,11 +44,14 @@ recorded sacrifice unless new evidence turns up.
   *against* when it exists (e.g. Rust removing green threads).
 - Breaking changes are free — sole user, no compatibility promise. Never
   argue "but that would break existing code" at this stage.
-- Plan before code. Current phase: **M4c**. Landed so far: sized
-  numerics in the runtime, explicit numeric conversion, generic bound
-  checking, trait conformance, `Ord` (ordering operators), boxed
-  `Option`, and match exhaustiveness. Remaining: generator element
-  types, the spawn-captures-mut ban, arithmetic operator traits. M4a (representation) and M4b (the checker
+- Plan before code. **M4 is done**: every annotation is checked, and
+  no remaining case computes the wrong value. M4c landed sized
+  numerics, explicit numeric conversion, generic bounds, trait
+  conformance, `Ord`, boxed `Option`, match exhaustiveness, generator
+  element types, the spawn-captures-mut ban and undetermined type
+  parameters. Deferred: arithmetic operator traits (`Add`, `Mul`),
+  for want of a forcing need. Next is bootstrap step 3 — the compiler
+  frontend written in Glide, run on the interpreter. M4a (representation) and M4b (the checker
   core, `internal/types` + `internal/check`) have landed: every
   program is type-checked before it runs, in every tier, with no
   `--no-check` and no plan for one. The checker reports only what it

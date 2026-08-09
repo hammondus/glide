@@ -70,6 +70,20 @@ type checker struct {
 	scope *scope
 	ret   types.Type // enclosing function's declared return type
 
+	// spawned is non-nil while a closure handed to `spawn` is being
+	// checked, and collects the `mut` bindings it captures. DESIGN.md:
+	// a closure crossing a task boundary must not capture one — the
+	// parent going on to mutate it is the data-race archetype, and it
+	// is statically visible because mut-ness is known and spawn is a
+	// known boundary.
+	spawned map[string]source.Span
+
+	// yields is the element type of the enclosing generator: the T of
+	// its declared Iterator<T>. nil outside a generator, and nil
+	// inside one whose declared return the checker could not read as
+	// an Iterator — in which case yields are inferred and not asserted.
+	yields types.Type
+
 	// selfT is what `Self` means in the declaration being resolved:
 	// the concrete type inside an impl, and the trait's own type
 	// variable inside a trait. nil outside both, where `Self` is
@@ -311,12 +325,19 @@ func (c *checker) fnBody(fd *ast.FuncDecl, sig *types.Func, self types.Type) {
 		// synthesised and then compared, which is the difference
 		// between the two directions of a bidirectional checker.
 		//
-		// Generators are exempt: their declared type describes what
-		// they yield, and typing that is later work.
+		// A generator is exempt from the tail-value rule — its declared
+		// type describes what it *yields*, not what its body evaluates
+		// to — but its yields are checked against that element type.
+		savedYields := c.yields
+		c.yields = nil
 		want := sig.Ret
-		if c.scope.generator || want == types.Unit {
+		if c.scope.generator {
+			c.yields = c.elementOf(sig.Ret, fd)
+			want = nil
+		} else if want == types.Unit {
 			want = nil
 		}
+		defer func() { c.yields = savedYields }()
 		tail := c.block(fd.Body, want)
 		if want != nil && !types.IsOpaque(tail) && !types.IsNever(tail) &&
 			!types.AssignableTo(tail, want) {
@@ -350,9 +371,19 @@ func (c *checker) declare(name string, t types.Type, mut bool, at source.Span) {
 }
 
 func (c *checker) lookup(name string) *local {
+	b, _ := c.lookupCrossing(name)
+	return b
+}
+
+// lookupCrossing is lookup plus whether the binding was found on the
+// far side of a function boundary — that is, whether reading the name
+// here is a *capture*. Used to enforce the rule that a closure crossing
+// a task boundary may not capture a `mut` binding.
+func (c *checker) lookupCrossing(name string) (*local, bool) {
+	crossed := false
 	for s := c.scope; s != nil; s = s.parent {
 		if b, ok := s.vars[name]; ok {
-			return b
+			return b, crossed
 		}
 		if s.fnBound {
 			// A closure captures, so lookup continues past a closure
@@ -361,9 +392,25 @@ func (c *checker) lookup(name string) *local {
 			// distinction threaded through. Left to the evaluator on
 			// purpose — see DESIGN.md's open question on whether the
 			// dynamic checks stay.
+			crossed = true
 			continue
 		}
 	}
+	return nil, crossed
+}
+
+// elementOf reads a generator's declared return as `Iterator<T>` and
+// returns the T. A generator that declares anything else is an error:
+// `yield` produces an iterator, and saying otherwise is not a shape
+// the language has.
+func (c *checker) elementOf(ret types.Type, fd *ast.FuncDecl) types.Type {
+	if types.IsOpaque(ret) {
+		return nil
+	}
+	if app, ok := ret.(*types.App); ok && app.C == types.Iterator {
+		return app.Elem()
+	}
+	c.errf(fd.Span, "this function yields, so it returns Iterator<T> — it declares %s", ret)
 	return nil
 }
 

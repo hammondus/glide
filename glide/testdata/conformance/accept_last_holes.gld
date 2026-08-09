@@ -1,0 +1,61 @@
+// The three rules from the other side: what must keep working.
+type Box<T> = struct { items: List<T> }
+
+impl Box<T> {
+    fn new() -> Box<T> { Box{ items: [] } }
+    fn of(v: T) -> Box<T> { Box{ items: [v] } }
+    fn add(mut self, v: T) { self.items.push(v) }
+    fn len(self) -> Int { self.items.len() }
+}
+
+fn evens() -> Iterator<Int> {
+    yield 2
+    yield 4
+}
+
+// yield from delegates, so the operand is an iterator of the same
+// element type rather than an element.
+fn more() -> Iterator<Int> {
+    yield from evens()
+    yield 6
+}
+
+// The T -> T? coercion applies inside a yield like anywhere else.
+fn maybes() -> Iterator<Int?> {
+    yield 1
+    yield None
+}
+
+fn main() {
+    for v in more() { print("{v} ") }
+    println("")
+    for v in maybes() { print("{v} ") }
+    println("")
+
+    // An *immutable* capture crosses a task boundary freely — the rule
+    // is about mut-ness, which is what makes it cheap and static.
+    let base = 10
+    scope s {
+        let t = s.spawn(|| base * 2)
+        println(t.join())
+    }
+
+    // The freeze idiom: mut for setup, frozen before it crosses.
+    let mut building = []
+    building.push(1)
+    building.push(2)
+    let frozen = building
+    scope s2 {
+        let t = s2.spawn(|| frozen.len())
+        println(t.join())
+    }
+
+    // A type parameter the *arguments* determine needs no annotation.
+    let from_arg = Box.of(1)
+    println(from_arg.len())
+
+    // Nor does one the binding's own annotation determines.
+    let mut annotated: Box<Int> = Box.new()
+    annotated.add(7)
+    println(annotated.len())
+}

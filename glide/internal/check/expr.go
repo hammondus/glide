@@ -297,7 +297,12 @@ func (c *checker) ident(x *ast.IdentExpr, want types.Type) types.Type {
 		}
 		return types.Opt(types.Unknown)
 	}
-	if b := c.lookup(x.Name); b != nil {
+	if b, crossed := c.lookupCrossing(x.Name); b != nil {
+		if c.spawned != nil && crossed && b.mut {
+			if _, seen := c.spawned[x.Name]; !seen {
+				c.spawned[x.Name] = x.Span
+			}
+		}
 		return b.t
 	}
 	if t, ok := c.consts[x.Name]; ok {
