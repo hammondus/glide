@@ -1,0 +1,16 @@
+// An annotated closure is checked — which is the point, since an
+// unannotated one that nothing constrains is not.
+fn main() {
+    let inc = |x: Int| x + 1
+    println(inc("no"))              // error: expected Int, found String
+
+    let bad = |x: Int| x.nope()     // error: Int has no method "nope"
+    println(bad(1))
+
+    // Annotation and expectation disagree. Reported once, at the
+    // annotation, and the expectation carries on — so this does not
+    // also produce a signature mismatch at the call.
+    let mut xs = [3, 1, 2]
+    xs.sort_by(|a: String, b| a.cmp(b))   // error: annotated String
+    println(xs)
+}

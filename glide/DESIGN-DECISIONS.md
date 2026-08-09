@@ -517,6 +517,29 @@ or it is a bug.
   to end instead — every numeric primitive is *run* as a conversion,
   and `Bool`/`String` are asserted not to be.
 
+- **Closure parameters carry an `ast.Param`, not a bare name.** The
+  node held `Params []string`, so there was nowhere for an annotation
+  to live. Reusing `Param` rather than a parallel `[]*TypeExpr` keeps
+  one shape for "a named thing that may have a type"; `Default` is
+  simply never set, because a closure parameter cannot have one. The
+  evaluator still wants names only, and maps them at closure
+  construction — annotations are the checker's business.
+
+- **Every closure had a zero span.** `parseClosure` built
+  `&ast.Closure{}` and never set it, so *any* diagnostic pointing at a
+  closure printed with no position: "expected fn(a: Int, b: Int) ->
+  Int, found fn(a: Int) -> Int" with nothing to say where. Pre-existing
+  since M4a and found only because annotating a closure gave the
+  checker more to say about one. The span now runs from the opening
+  `|` to the end of the body.
+
+- **A conflicting annotation reports once and the expectation wins.**
+  `xs.sort_by(|a: String, b| …)` first reported the annotation
+  conflict *and* a signature mismatch at the call. Continuing with the
+  expectation instead of the annotation is the same rule `checkExpr`
+  uses when an assignment fails — return what was wanted, so one
+  mistake is one diagnostic rather than a cascade through the body.
+
 - **Exhaustiveness recurses, because top-level-only rejects real
   code.** The first version judged coverage at the top level only and
   rejected `examples/links.gld`:
@@ -723,6 +746,14 @@ order they are worth doing:
    inference for *nullary* associated functions (`Box.new()` erases
    its parameter, so a later `add(1)` then `add("s")` passes;
    `Box.new(1)` already infers).
+
+**A function type cannot be written.** `fn(A) -> B` exists inside the
+checker — a closure passed to `sort_by` is checked against the
+parameter's signature — but `parseType` has no case for it, so
+`fn apply(f: fn(Int) -> Int, x: Int)` is a parse error. The reference
+claimed ✓ until M4c and now says ○; `docs/book/chapter-08.md` has
+always described it accurately. Same defect class as the closure
+annotations that just landed: documented, and unparseable.
 
 **Two lexer gaps found while testing the conversions**, both small
 and both out of scope for the commit that found them: there are no

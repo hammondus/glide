@@ -59,9 +59,11 @@ type (
 
 	ListV struct{ Elems []Value }
 
-	// MapV preserves insertion order (keys slice) so programs and the
-	// test suite are deterministic. Provisional semantics — see
-	// DESIGN-DECISIONS.md.
+	// MapV preserves insertion order (keys slice). That is a
+	// *specified* language property as of M4c, not an implementation
+	// convenience: the compiled tier has to reproduce it, and cannot
+	// emit a bare Go map. Deleting a key drops it from the order;
+	// re-inserting appends.
 	MapV struct {
 		keys []Value
 		m    map[Value]Value

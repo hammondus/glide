@@ -123,8 +123,12 @@ empty literal gives inference nothing to work with. Non-empty literals
 use `["key": value, …]` — the bracket family, shared with lists,
 because both are collections.
 
-**Maps preserve insertion order.** Iteration, `entries()`, and Debug
-output are all in the order keys were first inserted:
+**Maps preserve insertion order, and that is specified.** Iteration,
+`entries()`, `json.encode` and Debug output are all in the order keys
+were first inserted — not as an accident of this interpreter, but as a
+property the compiled tier has to reproduce. Deleting a key drops it
+from the order; re-inserting appends. (Go randomises instead, which is
+why so much Go code sorts its keys before printing.)
 
 ```glide
 for (k, v) in m {

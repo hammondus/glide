@@ -380,6 +380,35 @@ resolution swamps) but now painlessly: defaults + named args cover
 overloading's legitimate 90%. Swift's external/internal name split
 declined — one name, already documentation.
 
+## Map iteration order: specified, not incidental
+
+- **1990s–2000s** — hash maps iterate in whatever order the table
+  happens to be in. Everyone's code accidentally depends on it, and
+  everyone's code breaks when the table grows.
+- **2012** — Go *randomises* map iteration deliberately, to stop that
+  dependence forming. The intent is sound and the residue is that
+  every Go program wanting stable output grows a `sort.Strings` over
+  its keys, and that JSON emitted from a Go map is key-sorted rather
+  than authored-order.
+- **2016 → 2017** — CPython's compact dict makes insertion order a
+  side effect, and one release later (3.7) the language *guarantees*
+  it, because so much code already relied on the accident. PHP 7 and
+  Ruby had guaranteed it for years. JavaScript's own `Map` is
+  insertion-ordered by spec, and `Object` keys have a specified
+  (weirder) order.
+- **The counter-case is Rust and C++**, whose hash maps make no
+  promise at all — and both ship an ordered alternative (`BTreeMap`,
+  `std::map`) for when you need one.
+
+**Glide takes** insertion order, **specified** — the majority position
+among scripting languages, and the one that keeps output reproducible
+without a sort at every boundary. The cost lands on the compiled tier,
+which cannot emit a bare Go map and must carry the order alongside.
+Paid knowingly: the alternative is Go's, where the language is fast and
+every program that wants determinism pays for it separately and
+sometimes forgets. Deletion drops a key from the order and re-insertion
+appends, which is Python's rule and the only one simple to state.
+
 ## Match exhaustiveness: report only when certain
 
 - **1978** — ML ships pattern matching with a compiler warning for

@@ -491,3 +491,42 @@ fn main() {
 		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
 	}
 }
+
+// Map iteration order is insertion order, and that is a *specified*
+// language property as of M4c rather than an implementation
+// convenience — the compiled tier has to reproduce it. Pinned here
+// because "whatever the interpreter happened to do first" is exactly
+// what DESIGN.md's implementation-path section forbids.
+func TestMapIterationOrderIsInsertionOrder(t *testing.T) {
+	out, err := runProg(t, `
+import json
+
+fn main() {
+    // Deliberately not alphabetical, and not in hash order either.
+    let mut m: Map<String, Int> = [:]
+    m["zebra"] = 1
+    m["apple"] = 2
+    m["mango"] = 3
+    for e in m.entries() { print("{e.0} ") }
+    println("")
+
+    // Overwriting a key keeps its original position.
+    m["zebra"] = 9
+    for e in m.entries() { print("{e.0} ") }
+    println("")
+
+    // json.encode emits object keys in the same order, which is why
+    // the property is load-bearing rather than cosmetic.
+    println(json.encode(m))
+    println(m)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "zebra apple mango \nzebra apple mango \n" +
+		`{"zebra":9,"apple":2,"mango":3}` + "\n" +
+		`["zebra": 9, "apple": 2, "mango": 3]` + "\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}

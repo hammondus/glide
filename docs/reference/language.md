@@ -128,12 +128,12 @@ Type annotations are written but unchecked in M2.
 | `Int` | i64 on every target (the M2 value is Go int64) | ✓ |
 | `Float` | f64 | ✓ |
 | `Bool`, `String`, `()` | | ✓ |
-| `List<T>`, `Map<K, V>` | Map preserves insertion order | ✓ |
+| `List<T>`, `Map<K, V>` | **Map iteration is insertion order, and that is specified** — not incidental, and the compiled tier must reproduce it. Deleting a key drops it from the order; re-inserting appends. `json.encode` emits object keys in this order | ✓ |
 | `(A, B)` tuples | fields `.0`, `.1`. Two members minimum: `(T)` is a parse error, since a 1-tuple has no constructor and parenthesising a type buys nothing | ✓ |
 | `T?` = `Option<T>` | **boxed**: every `T?` is `None` or `Some(v)`, never a bare `v`. `Option<Option<T>>` is representable and `Some(None)` differs from `None`; spell it long-form (`Option<Int?>`) since `T??` cannot lex. Implicit `T -> T?` still applies. `Some(x)` renders as `Some(x)`, matching `None` | ✓ |
 | `Result<T, E>` | `Ok(v)` / `Err(e)` | ✓ |
 | `Range` | value of `lo..hi` | ✓ |
-| `fn(A) -> B` | one function type for named fns, closures, method values | ✓ for named fns and closures (a closure passed to `filter`/`sort_by`/`map` is checked against the parameter's signature); method values unapplied (`x.method`) ○ |
+| `fn(A) -> B` | one function type for named fns, closures, method values | The *type* exists inside the checker — a closure passed to `filter`/`sort_by`/`map` is checked against the parameter's signature ✓ — but it cannot yet be **written** in an annotation: `fn apply(f: fn(Int) -> Int, …)` is a parse error ○. Method values unapplied (`x.method`) ○ |
 | `i8…i64`, `u8…u64`, `f32` | sized numerics | ✓ — declared, checked, and represented at their own width. Literal range is enforced exactly at both ends (`let x: u8 = 300` and `let x: u64 = -1` are compile errors; `let x: u64 = 18446744073709551615`, `let x: i8 = -128` and `let x: Int = -9223372036854775808` are not), no implicit conversions between widths (`u8 + u16` is a compile error), and arithmetic **traps at the declared width** — `let x: u8 = 250` then `x + 10` is a positioned runtime error, not 260. The width lives on the value, not on the checker's annotation, so it survives type erasure: `+` inside `fn double<T>(v: T) -> T` traps at 8 bits when called with a `u8`. Conversion is **explicit and only explicit**: `u8(n)`, `Int(c)`, `Float(k)` — the type's own name applied to a value, Go's spelling. Out of range **traps** (`u8(300)` where 300 is a constant is a compile error; where it is a value it is a positioned runtime error) rather than truncating silently as Go does, and `n.wrapping_u8()` is the truncating form. Conversion is defined between the integer widths, the floats and `Rune`, and nowhere else — `String(65)` and `Bool(1)` are errors. Float→integer truncates toward zero. Every primitive type name is **reserved**, since `u8` now means something in expression position; a local `let u8 = 5` still shadows it, as in Go ✓ |
 | `i128`, `u128` | 128-bit integers | ○ — ratified, deferred past M4 (Go has no native 128-bit integer; see `glide/DESIGN-DECISIONS.md`) |
 | `Rune` | own type; `==`/ordering with other Runes only; Display prints the character, Debug quotes it | ✓ |
@@ -309,6 +309,13 @@ Angle brackets, never square. **No turbofish, ever.**
 - Closures: `|x| expr`, `|x| { … }`, `||` for no args ✓. Capture by
   reference, by *binding* (a redeclare doesn't retarget) ✓. Closures
   may reuse outer names (function boundary resets the shadow rule) ✓.
+- **Parameter annotations are optional**: `|x: Int| x + 1`, and any
+  subset may be annotated (`|a: Int, b| a + b`) ✓. Rarely needed — a
+  closure passed to a typed slot takes its parameter types from the
+  slot — but a closure nothing constrains has no other way to be
+  checked, so `let f = |x| x + 1` is unchecked where `let f = |x: Int|
+  x + 1` is. Where an annotation contradicts an expectation, the
+  conflict is reported once at the annotation.
 - Generators: any `fn` whose body contains `yield` returns an
   Iterator when called ✓; `yield from` delegates ✓.
 - `return` / `return expr` ✓; tail-value rule: a no-arrow function

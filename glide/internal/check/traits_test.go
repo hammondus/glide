@@ -276,3 +276,52 @@ func TestExhaustivenessDoesNotCascade(t *testing.T) {
 		t.Errorf("exhaustiveness should not pile on: %q", got)
 	}
 }
+
+// Closure parameter annotations. The book always said they existed;
+// no grammar did, so `|x: Int| …` was a parse error. They are rarely
+// needed — a closure in a typed slot learns its parameters from the
+// slot — but a closure nothing constrains had no way to be checked,
+// which is the hole they close.
+func TestClosureParameterAnnotations(t *testing.T) {
+	// The motivating case: unconstrained, and now checked.
+	if got := frontendErr(t, "fn main() {\n    let f = |x: Int| x + 1\n    println(f(\"no\"))\n}"); !strings.Contains(got, "expected Int, found String") {
+		t.Errorf("an annotated closure should check its call sites: %q", got)
+	}
+	if got := frontendErr(t, "fn main() {\n    let f = |x: Int| x.nope()\n    println(f(1))\n}"); !strings.Contains(got, `Int has no method "nope"`) {
+		t.Errorf("an annotated closure should check its body: %q", got)
+	}
+	// Unannotated in a typed slot: unchanged, and still checked.
+	if got := frontendErr(t, "fn main() {\n    let mut xs = [3, 1, 2]\n    xs.sort_by(|a, b| a.cmp(b))\n}"); got != "" {
+		t.Errorf("the common unannotated case must keep working: %s", got)
+	}
+	// Annotated and agreeing with the slot.
+	if got := frontendErr(t, "fn main() {\n    let mut xs = [3, 1, 2]\n    xs.sort_by(|a: Int, b: Int| a.cmp(b))\n}"); got != "" {
+		t.Errorf("an agreeing annotation should be accepted: %s", got)
+	}
+	// Partially annotated.
+	if got := frontendErr(t, "fn main() {\n    let g = |a: Int, b| a + b\n    println(g(1, 2))\n}"); got != "" {
+		t.Errorf("a partial annotation should be accepted: %s", got)
+	}
+}
+
+// A wrong annotation is one diagnostic, at the annotation — not that
+// plus a signature mismatch at the call plus a cascade through the
+// body.
+func TestClosureAnnotationConflictReportsOnce(t *testing.T) {
+	got := frontendErr(t, "fn main() {\n    let mut xs = [3, 1, 2]\n    xs.sort_by(|a: String, b| a.cmp(b))\n}")
+	if !strings.Contains(got, "annotated String") {
+		t.Fatalf("want the annotation conflict: %q", got)
+	}
+	if strings.Contains(got, "expected fn(") {
+		t.Errorf("the signature mismatch should not also fire: %q", got)
+	}
+}
+
+// Every closure had a zero span, so any diagnostic pointing at one
+// printed with no position at all.
+func TestClosureDiagnosticsHaveAPosition(t *testing.T) {
+	got := frontendErr(t, "fn main() {\n    let mut xs = [3, 1, 2]\n    xs.sort_by(|a| 1)\n}")
+	if !strings.Contains(got, "test.gld:3:") {
+		t.Errorf("a closure diagnostic needs a position: %q", got)
+	}
+}

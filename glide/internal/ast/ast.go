@@ -551,9 +551,14 @@ type Try struct {
 	source.Span
 }
 
+// Closure: `|x| …`, `|x: Int, y| …`, `|| …`. Params reuses Param so an
+// annotation has somewhere to live; Type is nil on an unannotated
+// parameter, which is the common case — a closure usually learns its
+// parameter types from the slot it is passed to. Default is never set:
+// a closure parameter cannot have one.
 type Closure struct {
 	source.Span
-	Params    []string
+	Params    []Param
 	BodyExpr  Expr // one of BodyExpr / BodyBlock is set
 	BodyBlock *Block
 }

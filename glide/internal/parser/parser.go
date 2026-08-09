@@ -1804,6 +1804,11 @@ func (p *parser) listElem() (ast.Expr, error) {
 
 func (p *parser) parseClosure() (ast.Expr, error) {
 	c := &ast.Closure{}
+	// The span runs from the opening `|` to the end of the body. It
+	// was never set at all before, so every diagnostic that pointed at
+	// a closure — "this closure must return X", a signature
+	// mismatch — printed with no position.
+	open := p.cur().Span
 	if p.cur().Kind == lexer.OrOr {
 		p.next() // || — zero-parameter closure
 	} else {
@@ -1813,7 +1818,20 @@ func (p *parser) parseClosure() (ast.Expr, error) {
 			if err != nil {
 				return nil, err
 			}
-			c.Params = append(c.Params, t.Text)
+			prm := ast.Param{Name: t.Text, Span: t.Span}
+			// Optional annotation. Rarely needed — a closure passed to
+			// a typed slot learns its parameters from it — but a
+			// closure nothing constrains has no other way to be
+			// checked, and `let f = |x| x + 1` was silent before.
+			if p.accept(lexer.Colon) {
+				ty, err := p.parseType()
+				if err != nil {
+					return nil, err
+				}
+				prm.Type = ty
+				prm.Span = t.Span.To(ty.Span)
+			}
+			c.Params = append(c.Params, prm)
 			if !p.accept(lexer.Comma) {
 				break
 			}
@@ -1832,6 +1850,7 @@ func (p *parser) parseClosure() (ast.Expr, error) {
 			return nil, err
 		}
 		c.BodyBlock = b
+		c.Span = open.To(b.Span)
 		return c, nil
 	}
 	e, err := p.parseExpr()
@@ -1839,6 +1858,7 @@ func (p *parser) parseClosure() (ast.Expr, error) {
 		return nil, err
 	}
 	c.BodyExpr = e
+	c.Span = open.To(exprSpan(e))
 	return c, nil
 }
 

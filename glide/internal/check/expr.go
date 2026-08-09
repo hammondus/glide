@@ -942,13 +942,28 @@ func (c *checker) closure(x *ast.Closure, want types.Type) types.Type {
 	c.pushFn()
 	defer c.pop()
 	params := make([]types.Param, len(x.Params))
-	for i, name := range x.Params {
+	for i, prm := range x.Params {
 		t := types.Type(types.Unknown)
 		if sig != nil && i < len(sig.Params) {
 			t = sig.Params[i].Type
 		}
-		params[i] = types.Param{Name: name, Type: t}
-		c.declare(name, t, false, x.Span)
+		// An annotation types a closure nothing else constrains, which
+		// is the only way such a closure gets checked at all. Where
+		// both are present and disagree, the conflict is reported once
+		// and the *expectation* carries on — same rule checkExpr uses,
+		// so one wrong annotation does not also produce a signature
+		// mismatch at the call and a cascade through the body.
+		if prm.Type != nil {
+			declared := c.resolve(prm.Type)
+			switch {
+			case types.IsUnknown(t):
+				t = declared
+			case !types.Compatible(t, declared):
+				c.errf(prm.Span, "this closure is called with %s here, but the parameter is annotated %s", t, declared)
+			}
+		}
+		params[i] = types.Param{Name: prm.Name, Type: t}
+		c.declare(prm.Name, t, false, prm.Span)
 	}
 	var retWant types.Type
 	if sig != nil {

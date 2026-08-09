@@ -45,13 +45,16 @@ let now    = || "tick"                // no parameters
 Parameter types are **inferred from context** — a closure passed to
 `xs.map(…)` gets its parameter type from the list's element type.
 
-Annotations on closure parameters are ○: no grammar for them exists
-today, so `|x: Int| -> Int { x * 2 }` is a parse error, not merely
-noise. Whether the grammar arrives with M4 is an open question in
-`DESIGN.md`, and it turns on a case this chapter's own first example
-raises: `let double = |x| x * 2` has no context to infer `x` from. A
-language that requires a signature on every `fn` has a hard time
-justifying a closure with no inferable parameter type — so either that
+Annotations on closure parameters are ✓ as of M4c: `|x: Int| x * 2`,
+and any subset may be annotated (`|a: Int, b| a + b`). The open
+question in `DESIGN.md` turned on a case this chapter's own first
+example raises — `let double = |x| x * 2` has no context to infer `x`
+from — and that case decided it. A closure in a typed slot needs no
+annotation and rarely gets one; a closure nothing constrains had no
+way to be checked at all, and `let f = |x| x + 1` followed by
+`f("no")` passed in silence. So the grammar arrived rather than the
+claim being deleted. Where an annotation contradicts the slot's own
+type, the conflict is reported once at the annotation. So either that
 binding needs an annotation, or it needs to be a `fn`.
 
 So far this is just a function you did not name. The interesting part
@@ -580,8 +583,10 @@ for row in rows {
 In a comparator `|a, b|` is fine and conventional. In a domain
 pipeline, `|n| n.title` beats `|x| x.title`.
 
-**Annotating closure parameters out of habit.** `|x: Int| x * 2` is
-legal and adds nothing. The types come from context; that is the point.
+**Annotating closure parameters out of habit.** In a typed slot,
+`|x: Int| x * 2` adds nothing — the types come from context, and that
+is the point. Reach for the annotation when there *is* no context:
+a closure bound to a `let` and called later is unchecked without one.
 
 **Forgetting that a closure keeps its captures alive.** This is
 correct behaviour and occasionally a memory issue: a long-lived closure

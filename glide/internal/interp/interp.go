@@ -1096,7 +1096,13 @@ func (in *Interp) evalRaw(e ast.Expr, env *Env) (Value, *sig) {
 		// must not retarget closures that captured the old one.
 		// Binding cells are shared, so mutation through a captured
 		// `mut` variable stays visible both ways.
-		return &ClosureV{Params: ex.Params, BodyExpr: ex.BodyExpr, BodyBlock: ex.BodyBlock, Env: env.capture()}, nil
+		// Annotations are the checker's business; the evaluator needs
+		// only the names.
+		names := make([]string, len(ex.Params))
+		for i, prm := range ex.Params {
+			names[i] = prm.Name
+		}
+		return &ClosureV{Params: names, BodyExpr: ex.BodyExpr, BodyBlock: ex.BodyBlock, Env: env.capture()}, nil
 	case *ast.Try:
 		v, sg := in.eval(ex.X, env)
 		if sg != nil {

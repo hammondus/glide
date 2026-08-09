@@ -51,7 +51,7 @@ Anywhere a name can be bound:
 - `if let PATTERN = expr { … } else { … }`
 - `for PATTERN in iterable { … }`
 - `match` arms
-- closure parameters (plain names only)
+- closure parameters (plain names, optionally annotated: `|x: Int|`)
 
 ```glide
 let (host, port) = ("localhost", 8080)

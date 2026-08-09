@@ -388,6 +388,53 @@ Mechanics:
   Consequence: every primitive type name is reserved, since `u8` now
   means something in expression position. A local `let u8 = 5` still
   shadows it, as in Go, and the conversion is then simply gone.
+- **Closure parameters may be annotated: `|x: Int| …`.** *Resolves an
+  M4 open question* that had the book and the parser disagreeing —
+  the book said annotations existed and were rarely needed, and no
+  grammar for them did.
+
+  "Rarely needed" was right and "unnecessary" was not. A closure
+  handed to a typed slot learns its parameters from the slot, which is
+  the common case; a closure nothing constrains learns nothing, and
+  `let f = |x| x + 1` followed by `f("no")` passed in silence. An
+  annotation is the only way such a closure is checked at all, which
+  is why the grammar arrives rather than the claim being deleted.
+
+  Where an annotation and an expectation disagree, the conflict is
+  reported once at the annotation and the *expectation* carries on —
+  the same rule the checker uses everywhere, so one wrong annotation
+  does not also produce a signature mismatch at the call and a
+  cascade through the body.
+
+- **Map iteration order is insertion order, specified.** *Promoted
+  from provisional interpreter behaviour*, which is the one option
+  DESIGN.md's own implementation-path section forbids: anything two
+  backends could implement differently gets specified or gets
+  *deliberately* declared unspecified, and never "whatever the
+  interpreter happened to do first".
+
+  Specified rather than unspecified, for three reasons. The language
+  already depends on it in two places — `json.encode` emits object
+  keys in map order, and `docs/reference/` has shipped it as a
+  guaranteed property since M1. Deterministic output is worth more to
+  a scripting tier than a map's constant factor: golden files, diffs
+  and test output all stop being reproducible without it. And the
+  house rule is that the safe spelling is the default and the fast one
+  has a name you type — Go inverted that here, and the result is that
+  every Go program which wants stable output grows a `sort.Strings`
+  over its keys.
+
+  Accepted cost, and it is real: the compiled tier cannot emit a bare
+  Go `map`. It has to carry an insertion-ordered structure — roughly
+  a keys slice beside the map — which costs memory and an append per
+  new key. Taken knowingly. Randomising, Go-style, was the
+  alternative, and it buys back that cost by making every ordered
+  traversal the programmer's problem.
+
+  Deletion order is part of it: removing a key removes it from the
+  order, and re-inserting puts it at the end. That is Python's rule
+  since 3.7 and it is the only one that is simple to state.
+
 - **No truthiness.** Conditions take `Bool` only. `if x != 0` costs five
   characters and removes an ambiguity class. JS's version is scar tissue
   (`"0"` truthy, `[] == false`, `document.all`); even Python's principled
@@ -2224,17 +2271,6 @@ scripting tail wagging the compiled dog. Decided:
   assumptions. Lean: keep them, as assertions rather than diagnostics —
   a checker bug should surface as a loud interpreter panic, not as
   undefined behaviour.
-- **Closure parameter annotations.** The book says they are allowed and
-  rarely needed; no grammar for them exists (the parser takes bare
-  identifiers), and bidirectional checking infers them from context
-  anyway. Either the grammar arrives in M4 or the documentation changes
-  — pick one rather than letting the discrepancy persist.
-- **Map iteration order** is currently recorded as *provisional*
-  interpreter behaviour (insertion-ordered). With two backends it has to
-  become a language decision: specified (insertion order, and the
-  transpiler must reproduce it) or deliberately unspecified (and then
-  the interpreter should randomise, Go-style, so programs cannot come to
-  depend on it). Silence is the one option that guarantees drift.
 - **A REPL.** A scripting tier eventually wants one, and static checking
   plus an interactive prompt is solved but not free (GHCi, F#
   Interactive) — it needs incremental checking and a story for

@@ -1,0 +1,36 @@
+// Closure parameter annotations. The book has always said they are
+// allowed and rarely needed; no grammar existed, so `|x: Int| …` was a
+// parse error until M4c. "Rarely needed" is right — a closure handed to
+// a typed slot learns its parameters from it — but a closure nothing
+// constrains had no way to be checked at all, and `let f = |x| x + 1`
+// then `f("no")` passed in silence.
+fn main() {
+    // Annotated: the body is checked and so are the call sites.
+    let inc = |x: Int| x + 1
+    println(inc(1))
+
+    // Unannotated, in a typed slot: the slot supplies the types, which
+    // is the common case and the reason annotations are rare.
+    let mut xs = [3, 1, 2]
+    xs.sort_by(|a, b| a.cmp(b))
+    println(xs)
+
+    // Annotated *and* in a typed slot, agreeing.
+    let mut ys = [3, 1, 2]
+    ys.sort_by(|a: Int, b: Int| b.cmp(a))
+    println(ys)
+
+    // Partial annotation: one parameter typed, one inferred.
+    let combine = |a: Int, b| a + b
+    println(combine(20, 22))
+
+    // Zero parameters is still `||`.
+    let always = || 7
+    println(always())
+
+    // A block body works the same way.
+    let describe = |n: Int| {
+        if n > 0 { "positive" } else { "not" }
+    }
+    println(describe(3))
+}
