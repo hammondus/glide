@@ -1319,7 +1319,7 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 	case lexer.KwScope:
 		return p.parseScope()
 	case lexer.KwSelect:
-		return nil, p.errf("select is designed but not yet implemented (it arrives with channels)")
+		return p.parseSelect()
 	case lexer.Pipe, lexer.OrOr:
 		return p.parseClosure()
 	case lexer.LParen:
@@ -1424,6 +1424,101 @@ func (p *parser) parseScope() (ast.Expr, error) {
 	}
 	sc.Body = body
 	return sc, nil
+}
+
+// parseSelect: match's clothes on Go's engine. Arms, line-separated:
+//
+//	pat = rx.recv() [if guard] => expr
+//	tx.send(v)      [if guard] => expr
+//	else                       => expr
+//
+// The op must literally be a .recv()/.send(v) call — select waits on
+// channel operations, not arbitrary expressions.
+func (p *parser) parseSelect() (ast.Expr, error) {
+	line := p.next().Line // select
+	if _, err := p.expect(lexer.LBrace, "select"); err != nil {
+		return nil, err
+	}
+	sel := &ast.SelectExpr{Line: line}
+	seenElse := false
+	return structsOK(p, func() (ast.Expr, error) {
+		for {
+			p.skipSemis()
+			if p.accept(lexer.RBrace) {
+				if len(sel.Arms) == 0 {
+					return nil, p.errf("select needs at least one arm (a zero-arm select would block forever)")
+				}
+				return sel, nil
+			}
+			armLine := p.cur().Line
+			arm := ast.SelectArm{Line: armLine}
+			if p.accept(lexer.KwElse) {
+				if seenElse {
+					return nil, p.errf("select has two else arms")
+				}
+				seenElse = true
+				arm.Else = true
+			} else {
+				// A pattern followed by `=` marks a recv arm; anything
+				// else re-parses as the operation expression (send).
+				save := p.pos
+				if q, err := p.parsePattern(); err == nil && p.cur().Kind == lexer.Assign {
+					p.next() // =
+					arm.Pat = q
+				} else {
+					p.pos = save
+				}
+				op, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				call, ok := op.(*ast.Call)
+				var fld *ast.Field
+				if ok {
+					fld, ok = call.Fn.(*ast.Field)
+				}
+				if !ok {
+					return nil, p.errf("a select arm waits on rx.recv() or tx.send(v)")
+				}
+				switch fld.Name {
+				case "recv":
+					if arm.Pat == nil {
+						return nil, p.errf("a recv arm binds its value: `pat = rx.recv() => …`")
+					}
+					if len(call.Args) != 0 {
+						return nil, p.errf("recv takes no arguments")
+					}
+					arm.Ch = fld.X
+				case "send":
+					if arm.Pat != nil {
+						return nil, p.errf("send returns nothing; a send arm has no pattern")
+					}
+					if len(call.Args) != 1 {
+						return nil, p.errf("send takes exactly one value")
+					}
+					arm.Ch, arm.SendVal = fld.X, call.Args[0]
+				default:
+					return nil, p.errf("a select arm waits on rx.recv() or tx.send(v), not %q", fld.Name)
+				}
+				if p.accept(lexer.KwIf) {
+					arm.Guard, err = p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+			if _, err := p.expect(lexer.FatArrow, "select arm"); err != nil {
+				return nil, err
+			}
+			p.skipSemis() // body may start on the next line
+			body, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			arm.Body = body
+			sel.Arms = append(sel.Arms, arm)
+		}
+	})
 }
 
 func (p *parser) parseListOrMap() (ast.Expr, error) {

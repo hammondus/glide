@@ -299,6 +299,23 @@ type ScopeExpr struct {
 	Line     int
 }
 
+// SelectExpr waits on multiple channel operations; arms wear match's
+// syntax. Exactly one of the arm shapes holds per arm:
+// recv (Pat + Ch), send (Ch + SendVal), or else (Else).
+type SelectExpr struct {
+	Arms []SelectArm
+	Line int
+}
+type SelectArm struct {
+	Pat     Pattern // recv arms: pattern over the Option<T>
+	Ch      Expr    // the channel-half expression (nil for else)
+	SendVal Expr    // send arms: the value expression
+	Else    bool
+	Guard   Expr // nil = always enabled; evaluated once at entry
+	Body    Expr
+	Line    int
+}
+
 type IdentExpr struct {
 	Name string
 	Line int
@@ -436,6 +453,7 @@ func (*UnitLit) expr()    {}
 func (*StrLit) expr()     {}
 func (*BlockExpr) expr()  {}
 func (*ScopeExpr) expr()  {}
+func (*SelectExpr) expr() {}
 func (*IdentExpr) expr()  {}
 func (*TupleLit) expr()   {}
 func (*ListLit) expr()    {}

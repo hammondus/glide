@@ -305,7 +305,7 @@ func TestScopeParseErrors(t *testing.T) {
 	cases := []struct{ src, want string }{
 		{`fn main() { scope(retries: 3) { } }`, "unknown scope config"},
 		{`fn main() { scope S { } }`, "lowercase"},
-		{`fn main() { select { } }`, "not yet implemented"},
+		{`fn main() { select { } }`, "at least one arm"},
 	}
 	for _, c := range cases {
 		_, err := parser.ParseFile(c.src)
@@ -582,5 +582,210 @@ fn main() {
 }`)
 	if err == nil || !strings.Contains(err.Error(), "(cap: n)") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// select: recv patterns, the Some/None split on one channel, and
+// select-as-expression.
+func TestSelectRecvSplit(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel(cap: 2)
+    tx.send(41)
+    tx.close()
+    let mut open = true
+    let mut total = 0
+    for open {
+        total += select {
+            Some(v) = rx.recv() => v + 1
+            None = rx.recv() => {
+                open = false
+                0
+            }
+        }
+    }
+    println(total)
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "42\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// else = non-blocking: nothing ready takes the else arm.
+func TestSelectElse(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel()
+    let v = select {
+        Some(v) = rx.recv() => v
+        else => -1
+    }
+    println(v)
+    tx.close()
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "-1\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// A send arm fires when buffer space exists.
+func TestSelectSend(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel(cap: 1)
+    let did = select {
+        tx.send(9) => "sent"
+        else => "full"
+    }
+    if let Some(v) = rx.recv() {
+        println("{did} {v}")
+    }
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "sent 9\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// Guards disable arms at entry — the nil-channel trick, replaced.
+func TestSelectGuard(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel(cap: 1)
+    tx.send(5)
+    let v = select {
+        Some(a) = rx.recv() if false => a
+        else => -1
+    }
+    println(v)
+    let w = select {
+        Some(b) = rx.recv() if true => b
+        else => -1
+    }
+    println(w)
+    tx.close()
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "-1\n5\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// All arms disabled and no else is a loud error, not a silent hang.
+func TestSelectAllDisabled(t *testing.T) {
+	_, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel()
+    _ = select {
+        Some(v) = rx.recv() if false => v
+    }
+    tx.close()
+}`)
+	if err == nil || !strings.Contains(err.Error(), "no enabled arms") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A blocked select is a cancellation point: sibling panic unwinds it.
+func TestSelectCancelled(t *testing.T) {
+	_, err := runProg(t, `
+fn main() {
+    let (_, rx) = channel()
+    scope s {
+        _ = s.spawn(|| select {
+            Some(v) = rx.recv() => v
+            None = rx.recv() => 0
+        })
+        _ = s.spawn(|| boom())
+    }
+}
+fn boom() -> Int { [][0] }`)
+	if err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("want the panic, not a hang; got %v", err)
+	}
+}
+
+// An unmatched ready recv is a runtime error naming the consumed
+// value (the recorded sharpest edge until the checker).
+func TestSelectUnmatchedRecv(t *testing.T) {
+	_, err := runProg(t, `
+fn main() {
+    let (tx, rx) = channel(cap: 1)
+    tx.close()
+    _ = select {
+        Some(v) = rx.recv() => v
+    }
+}`)
+	if err == nil || !strings.Contains(err.Error(), "no arm pattern matches") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Parse errors: arm shape rules.
+func TestSelectParseErrors(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`fn main() { select { } }`, "at least one arm"},
+		{`fn main() { select { else => 1
+else => 2 } }`, "two else"},
+		{`fn main() { select { rx.recv() => 1 } }`, "binds its value"},
+		{`fn main() { select { x = tx.send(1) => 1 } }`, "no pattern"},
+		{`fn main() { select { foo() => 1 } }`, "waits on rx.recv() or tx.send"},
+		{`fn main() { select { x = rx.frob() => 1 } }`, "not \"frob\""},
+	}
+	for _, c := range cases {
+		_, err := parser.ParseFile(c.src)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("src %q: got %v, want %q", c.src, err, c.want)
+		}
+	}
+}
+
+// The classic fan-in: two producers, one select loop draining both.
+func TestSelectFanIn(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let (atx, arx) = channel()
+    let (btx, brx) = channel()
+    scope s {
+        _ = s.spawn(|| {
+            for i in 1..=3 { atx.send(i) }
+            atx.close()
+        })
+        _ = s.spawn(|| {
+            for i in 1..=3 { btx.send(i * 100) }
+            btx.close()
+        })
+        let mut a_open = true
+        let mut b_open = true
+        let mut total = 0
+        for a_open || b_open {
+            select {
+                Some(v) = arx.recv() if a_open => { total += v }
+                None = arx.recv() if a_open => { a_open = false }
+                Some(w) = brx.recv() if b_open => { total += w }
+                None = brx.recv() if b_open => { b_open = false }
+            }
+        }
+        println(total)
+    }
+}`)
+	// A drained channel keeps delivering None, so each channel's arms
+	// are guard-disabled once it closes — the pattern Go spells by
+	// nil-ing the channel variable.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "606\n" {
+		t.Fatalf("got %q", out)
 	}
 }

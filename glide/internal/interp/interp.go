@@ -1045,6 +1045,8 @@ func (in *Interp) eval(e ast.Expr, env *Env) (Value, *sig) {
 		return in.evalBlock(ex.Body, newEnv(env, false))
 	case *ast.ScopeExpr:
 		return in.evalScope(ex, env)
+	case *ast.SelectExpr:
+		return in.evalSelect(ex, env)
 	case *ast.If:
 		return in.evalIf(ex, env)
 	case *ast.Closure:

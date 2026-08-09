@@ -59,7 +59,7 @@ Reserved words; none can be used as an identifier.
 | `trait` | trait declaration: bodied methods are defaults, inherited by any type declaring `impl Trait for Type` unless overridden; body-less methods are required signatures (unverified until the checker); all trait methods take `self`. Two traits supplying the same unoverridden default is an error at the call, naming both | ✓ |
 | `const` | module-level `const name = expr` (lowercase — it's a binding): evaluated once at load, declaration order, immutable | ✓ (M2 shim: initializers are restricted to pure expressions — no fn/module calls; full comptime evaluation arrives with the compiler ○) |
 | `scope` | structured-concurrency scope, an expression: `scope [(config)] [handle] { body }`. `s.spawn(f) -> Task`, `t.join()` returns what the closure returned; exit joins all children on every path, early exit cancels first; unjoined `Err` fails the scope at normal exit (first spawned wins, `?`-conversion applies); child panic cancels siblings and re-panics at exit; cancellation is uncatchable, runs `defer`+`errdefer`, delivered at blocking ops (`join`, generator handoffs; channel ops and `sleep` when they land) | ✓ (`timeout:`/`deadline:` config parses but needs the time types ○) |
-| `select` | wait on multiple channel ops | ○ (parses to a clear error; arrives with channels) |
+| `select` | an expression; arms line-separated like match: `pat = rx.recv() => expr`, `tx.send(v) => expr`, `else => expr` (non-blocking), optional `if cond` guard per arm (evaluated once at entry; false removes the arm — the nil-channel trick, replaced). Same channel may appear in several recv arms (`Some`/`None` split); the delivered value tries their patterns in order, no match → runtime error. Operands evaluate once at entry; uniformly random among ready; blocking select is a cancellation point (no `ctx.Done` arm exists or is needed). All arms disabled with no `else` → runtime error; zero arms → parse error | ✓ |
 
 Contextual keywords — only special at top level, followed by a string
 literal; otherwise ordinary identifiers (`let test = …` is legal):
@@ -288,10 +288,10 @@ patterns in function signatures, ref/binding modes.
   the dev tier, so `+` `-` `*` `/` (MinInt/-1) and unary `-` on
   MinInt trap with a line-numbered error ✓; release-tier wrapping
   and the explicit `wrapping_*` ops arrive with the compiler ○.
-- Structured concurrency: `scope`/`spawn`/`join`, cancellation, and
-  channels run in the interpreter ✓ (see the keyword table and
-  stdlib Concurrency). `select` and the time types (so
-  `scope(timeout:)`) are ○ — landing next.
+- Structured concurrency: `scope`/`spawn`/`join`, cancellation,
+  channels, and `select` run in the interpreter ✓ (see the keyword
+  table and stdlib Concurrency). The time types (so
+  `scope(timeout:)`, `sleep`, `after`) are ○ — landing next.
   M2 implementation note: tasks interleave exactly at blocking
   operations (one interpreter lock, released while blocked), which
   coincides with the ratified cancellation-point rule; release

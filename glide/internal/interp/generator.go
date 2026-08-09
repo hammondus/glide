@@ -88,6 +88,12 @@ func exprYields(e ast.Expr) bool {
 		return blockYields(ex.Body)
 	case *ast.ScopeExpr:
 		return blockYields(ex.Body)
+	case *ast.SelectExpr:
+		for i := range ex.Arms {
+			if exprYields(ex.Arms[i].Body) {
+				return true
+			}
+		}
 	case *ast.Match:
 		for i := range ex.Arms {
 			if exprYields(ex.Arms[i].Body) {

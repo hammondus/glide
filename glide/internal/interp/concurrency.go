@@ -2,6 +2,7 @@ package interp
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 
 	"glide/internal/ast"
@@ -282,6 +283,154 @@ func (in *Interp) chanRecv(r *ReceiverV) Value {
 		return NoneV{}
 	}
 	return v
+}
+
+// evalSelect: operands and guards evaluate once at entry, in arm
+// order; one reflect case per distinct (channel, direction); uniform
+// random among ready (reflect.Select is Go's select); a ready op's
+// arms are tried in declaration order — no pattern matching is a
+// runtime error, match's dynamic-exhaustiveness bargain. Blocking
+// select is a cancellation point. There is no ctx.Done arm: the
+// scope cancels a blocked select.
+func (in *Interp) evalSelect(ex *ast.SelectExpr, env *Env) (Value, *sig) {
+	type group struct {
+		st   *chanState
+		recv bool
+		arms []int // indices into ex.Arms, declaration order
+		send Value // first send arm's value (one case per group)
+	}
+	var groups []*group
+	var elseArm = -1
+	for i := range ex.Arms {
+		arm := &ex.Arms[i]
+		if arm.Else {
+			elseArm = i
+			continue
+		}
+		if arm.Guard != nil {
+			g, sg := in.eval(arm.Guard, env)
+			if sg != nil {
+				return UnitV{}, sg
+			}
+			gb, isBool := g.(BoolV)
+			if !isBool {
+				panic(rtErr{arm.Line, fmt.Sprintf("select arm guard must be Bool, got %s", typeName(g))})
+			}
+			if !bool(gb) {
+				continue // disabled: out of the ready set entirely
+			}
+		}
+		ch, sg := in.eval(arm.Ch, env)
+		if sg != nil {
+			return UnitV{}, sg
+		}
+		var st *chanState
+		isRecv := arm.Pat != nil
+		if isRecv {
+			rx, ok := ch.(*ReceiverV)
+			if !ok {
+				panic(rtErr{arm.Line, fmt.Sprintf("recv arm needs a Receiver, got %s", typeName(ch))})
+			}
+			st = rx.st
+		} else {
+			tx, ok := ch.(*SenderV)
+			if !ok {
+				panic(rtErr{arm.Line, fmt.Sprintf("send arm needs a Sender, got %s", typeName(ch))})
+			}
+			st = tx.st
+		}
+		var sendVal Value
+		if !isRecv {
+			v, sg := in.eval(arm.SendVal, env)
+			if sg != nil {
+				return UnitV{}, sg
+			}
+			sendVal = v
+		}
+		// Recv arms on the same channel share one case (the delivered
+		// value is tried against their patterns in order). Send arms
+		// never merge — each sends its own value.
+		grouped := false
+		if isRecv {
+			for _, g := range groups {
+				if g.st == st && g.recv {
+					g.arms = append(g.arms, i)
+					grouped = true
+					break
+				}
+			}
+		}
+		if !grouped {
+			groups = append(groups, &group{st: st, recv: isRecv, arms: []int{i}, send: sendVal})
+		}
+	}
+	if len(groups) == 0 {
+		if elseArm >= 0 {
+			return in.eval(ex.Arms[elseArm].Body, newEnv(env, false))
+		}
+		panic(rtErr{ex.Line, "select has no enabled arms and no else — it would block forever"})
+	}
+
+	cases := make([]reflect.SelectCase, 0, len(groups)+2)
+	for _, g := range groups {
+		if g.recv {
+			cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(g.st.ch)})
+		} else {
+			cases = append(cases, reflect.SelectCase{Dir: reflect.SelectSend, Chan: reflect.ValueOf(g.st.ch), Send: reflect.ValueOf(&g.send).Elem()})
+		}
+	}
+	cancelIdx := -1
+	if c := in.cur.cancel; c != nil {
+		cancelIdx = len(cases)
+		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(c)})
+	}
+	if elseArm >= 0 {
+		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectDefault})
+	}
+
+	var chosen int
+	var recvVal reflect.Value
+	var recvOK, wasClosed bool
+	in.unblock(func() {
+		defer func() {
+			if p := recover(); p != nil {
+				wasClosed = true // reflect.Select: "send on closed channel"
+			}
+		}()
+		chosen, recvVal, recvOK = reflect.Select(cases)
+	})
+	if wasClosed {
+		panic(rtErr{ex.Line, "send on a closed channel in select (only senders close — coordinate them)"})
+	}
+	if cancelIdx >= 0 && chosen == cancelIdx {
+		panic(cancelUnwind{})
+	}
+	if chosen >= len(groups) {
+		return in.eval(ex.Arms[elseArm].Body, newEnv(env, false))
+	}
+
+	g := groups[chosen]
+	if !g.recv {
+		first := &ex.Arms[g.arms[0]]
+		return in.eval(first.Body, newEnv(env, false))
+	}
+	var v Value = NoneV{}
+	if recvOK {
+		v = recvVal.Interface().(Value)
+	}
+	for _, ai := range g.arms {
+		arm := &ex.Arms[ai]
+		binds, ok := match(arm.Pat, v)
+		if !ok {
+			continue
+		}
+		armEnv := newEnv(env, false)
+		for _, b := range binds {
+			armEnv.declare(b.name, b.val, b.mut, arm.Line)
+		}
+		return in.eval(arm.Body, armEnv)
+	}
+	panic(rtErr{ex.Line, fmt.Sprintf("select received %s but no arm pattern matches it (the value is consumed — cover the closed case with `None = rx.recv()`)", render(v, true))})
 }
 
 // joinTask blocks until the child finishes and returns exactly what
