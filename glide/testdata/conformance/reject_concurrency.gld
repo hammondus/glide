@@ -1,0 +1,25 @@
+// The concurrency surface's own diagnostics: scope configuration,
+// channel construction, and the halves of a channel.
+import time
+
+fn main() {
+    // A timeout is a Duration, which is why durations have suffixes:
+    // `5.s` cannot be confused with a bare 5 of unknown unit.
+    scope(timeout: 5) s {           // error: must be a Duration
+        println(1)
+    }
+
+    scope(deadline: 5.s) d {        // error: must be an Instant
+        println(2)
+    }
+
+    let (tx, rx) = channel(size: 4) // error: channel takes no arguments or (cap: n)
+    tx.close()
+
+    // The split is structural: each half has only its own operations.
+    let (tx2, rx2) = channel(cap: 1)
+    rx2.close()                     // error: only the sender half closes a channel
+    tx2.recv()                      // error: only the receiver half receives
+
+    println(time.nope())            // error: module time has no function "nope"
+}

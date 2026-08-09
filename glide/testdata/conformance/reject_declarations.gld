@@ -1,0 +1,39 @@
+// The declaration table's own rules — the ones that need no type
+// information at all, which is why they run before the checker.
+// Unlike a parse error, these do not stop at the first: the table
+// reports every collision it finds, because that is what an editor
+// and the checker both need.
+import nosuchmodule                 // error: unknown module "nosuchmodule"
+
+fn dup() -> Int { 1 }
+fn dup() -> Int { 2 }               // error: function "dup" declared twice
+
+fn println(v: Int) -> Int { 1 }     // error: "println" is a builtin and cannot be redeclared
+
+type Twice = struct { a: Int }
+type Twice = struct { b: Int }      // error: type "Twice" declared twice
+
+type Int = struct { n: Bool }       // error: "Int" is a builtin and cannot be redeclared
+
+type A = Red | Green
+type B = Red | Blue                 // error: variant "Red" already declared by type A
+
+trait T { fn one(self) -> Int }
+trait T { fn two(self) -> Int }     // error: trait "T" declared twice
+
+type Host = struct { n: Int }
+impl Host {
+    fn m(self) -> Int { 1 }
+    fn m(self) -> Int { 2 }         // error: method Host.m declared twice
+}
+
+impl Ghost { fn q(self) -> Int { 1 } }   // error: impl for unknown type "Ghost"
+
+const c = 1
+const c = 2                         // error: const "c" declared twice
+
+const u8 = 3                        // error: "u8" is a builtin and cannot be redeclared
+
+fn main() {
+    println(1)
+}

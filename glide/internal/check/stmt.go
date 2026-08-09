@@ -75,12 +75,10 @@ func (c *checker) stmt(s ast.Stmt) {
 		c.forStmt(st)
 
 	case *ast.YieldStmt:
+		// st.E is never nil: the parser requires an expression after
+		// `yield`, so a valueless yield is a parse error and `yield ()`
+		// is how an Iterator<()> is written.
 		switch {
-		case st.E == nil:
-			// `yield` with no value: only meaningful for Iterator<()>.
-			if c.yields != nil && !types.AssignableTo(types.Unit, c.yields) {
-				c.errf(st.Span, "this generator yields %s, so `yield` needs a value", c.yields)
-			}
 		case st.From:
 			// `yield from it` delegates, so the operand is an iterator
 			// of the same element type, not an element.

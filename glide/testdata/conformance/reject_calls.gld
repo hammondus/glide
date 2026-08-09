@@ -1,0 +1,53 @@
+// Calls: what is callable, arity, named arguments, and the
+// associated-function/method split.
+type Point = struct { x: Int, y: Int }
+
+impl Point {
+    fn origin() -> Point { Point{ x: 0, y: 0 } }
+    fn shifted(self, by: Int) -> Point { Point{ x: self.x + by, y: self.y } }
+}
+
+fn named(a: Int, b: Int) -> Int { a + b }
+
+// A default keeps the arity check quiet, so an unknown parameter name
+// is the only thing left to report.
+fn defaulted(a: Int = 1) -> Int { a }
+
+// Two slots, the second defaulted: the arity is fine and the second
+// parameter is never missing, so a doubly-filled first slot is the
+// only thing left to report.
+fn twice_over(a: Int, b: Int = 9) -> Int { a + b }
+
+type Code = distinct String
+
+fn main() {
+    let n = 5
+    println(n(1))                       // error: Int is not callable
+
+    println(named(1))                   // error: is missing its "b" argument
+    println(named(1, 2, 3))             // error: takes 2 argument(s), got 3
+    println(defaulted(zz: 3))           // error: has no parameter "zz"
+
+    // A positional and a named argument reaching the same parameter.
+    // The parser catches two *named* arguments sharing a name; this is
+    // the case only the checker can see, since it needs the signature
+    // to know which slot the positional one filled.
+    println(twice_over(1, a: 2))        // error: parameter "a" is given twice
+
+    let f = |a| a
+    println(f(a: 1))                    // error: named arguments work on declared functions
+
+    // An associated function is called on the type; a method on a value.
+    let p = Point.origin()
+    println(p.origin())                 // error: is an associated function
+    println(Point.shifted(1))           // error: is a method; call it on a value
+    println(Point.nope())               // error: has no associated function "nope"
+
+    // distinct construction takes exactly one value of the base type.
+    println(Code("a", "b"))             // error: wraps exactly one String
+    println(Code(1))                    // error: wraps String, got untyped integer
+
+    println(Some(1, 2))                 // error: Some takes exactly one argument
+    println(Ok(1, 2))                   // error: Ok takes exactly one argument
+    println(p.x.value())                // error: Int has no method "value"
+}

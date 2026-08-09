@@ -517,6 +517,30 @@ or it is a bug.
   to end instead — every numeric primitive is *run* as a conversion,
   and `Bool`/`String` are asserted not to be.
 
+- **Corpus coverage is measured against the checker's own source.**
+  `coverage_test.go` reads every `c.errf` format string out of
+  `internal/check/*.go` and every `bag.Add` out of
+  `internal/program/program.go`, runs every corpus program, and
+  asserts each diagnostic is actually produced by one. Adding a
+  diagnostic without a case fails the test.
+
+  Reading the source rather than keeping a list is the whole point: a
+  hand-maintained inventory of diagnostics is a second thing to keep
+  in step with the first, and it would rot the way stale reference
+  docs do. The corpus went from 44/80 checker diagnostics covered to
+  91/91 across both stages, and from 31 files to 37.
+
+  Two diagnostics are `exempt` with reasons — genuinely unreachable
+  from Glide source, reached only if the checker itself is wrong.
+  Writing a case for a third is how the checker's dead
+  `yield`-with-no-value branch was found: the parser requires an
+  expression after `yield`, so `st.E == nil` could not arise. Deleted.
+
+  The parser's own 46 diagnostics are *not* measured, and the reason
+  is recorded rather than hidden: a parse error aborts at the first
+  one, so each needs its own file, and 46 one-line files would cost
+  more to read than they buy.
+
 - **The spawn-captures-mut rule is enforced at the call, not in the
   closure.** `dotCall` arms a `spawned` map before checking a
   `s.spawn(…)` argument, and `ident` records any name whose lookup
@@ -806,10 +830,11 @@ The one deferred item is the arithmetic operator traits (`Add`,
 them — the same admission rule the universe traits use.
 
 Next is bootstrap step 3 (`../DESIGN.md`): the compiler frontend
-written in Glide, run on the interpreter. The conformance corpus is
-what proves that replacement faithful, so it is worth widening
-deliberately before it becomes load-bearing rather than discovering
-gaps when the Glide frontend disagrees with this one.
+written in Glide, run on the interpreter. The conformance corpus was
+widened first, since it is what proves that replacement faithful —
+**every one of the 91 diagnostics the checker and the declaration
+table can emit is now triggered by a corpus program**, asserted by
+`internal/check/coverage_test.go` rather than assumed.
 
 **Two lexer gaps found while testing the conversions**, both small
 and both out of scope for the commit that found them: there are no

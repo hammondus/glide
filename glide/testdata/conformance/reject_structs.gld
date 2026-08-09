@@ -1,0 +1,45 @@
+// Struct and variant construction: mandatory initialisation, field
+// existence, and the two shapes `..base` does not have.
+type User = struct { name: String, age: Int }
+type Shape = Circle(Int) | Labelled{ text: String, size: Int }
+type Colour = Red | Green
+
+fn main() {
+    let u = User{ name: "amy" }         // error: missing field "age"
+    println(u.nickname)                 // error: User has no field "nickname"
+
+    // No zero values: every field is named, or `..base` supplies it.
+    let v = User{ name: "bo", age: 1 }
+    let w = User{ nope: 2, ..v }        // error: User has no field "nope"
+    println(w.age)
+
+    // `..base` is a struct feature.
+    let s = Shape.Circle(1)
+    let t = Labelled{ text: "x", size: 1, ..s }   // error: ..base
+    println(t.size)
+
+    let bad = User{ name: "cy", age: 1, ..s }     // error: ..base must be a User
+    println(bad.age)
+
+    // A named-field variant is constructed with braces, not parens.
+    let l = Shape.Labelled("x", 1)      // error: has named fields
+    println(l)
+
+    // A capitalised name in a pattern names a variant.
+    match Colour.Red {
+        Purple => println("no")         // error: Purple is not a constructor
+        _      => println("other")
+    }
+
+    // A named-field variant needs every field, same as a struct.
+    let partial: Shape = .Labelled{ text: "x" }  // error: is missing field "size"
+    println(partial)
+
+    // A shorthand whose owner is known reports against that type.
+    let unknown: Shape = .Nowhere               // error: Shape has no variant "Nowhere"
+    println(unknown)
+
+    // With no expected type to resolve in, the shorthand falls back to
+    // the file-wide variant index — and reports against that instead.
+    println(.Nowhere)                           // error: no variant named "Nowhere" in scope
+}

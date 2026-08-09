@@ -1,0 +1,12 @@
+// The remaining single-purpose diagnostics, each of which was
+// reachable but untested before the corpus widening.
+fn takes_bool(b: Bool) -> Int { 1 }
+
+fn main() {
+    // `_` is a discard, not a name.
+    let _ = 1
+    println(_)                      // error: _ discards; it cannot be read
+
+    // A conversion takes one positional value.
+    println(u8(v: 1))               // error: a conversion takes one positional value
+}

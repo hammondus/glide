@@ -1,0 +1,17 @@
+// Type expressions as *written*: unknown names, arity of type
+// arguments, and the two names that take none.
+type Pair<A, B> = struct { a: A, b: B }
+
+fn wrong_name(x: Nope) -> Int { 1 }             // error: unknown type "Nope"
+fn too_few(p: Pair<Int>) -> Int { 1 }           // error: takes 2 type argument(s), got 1
+fn primitive_args(n: Int<String>) -> Int { 1 }  // error: Int takes no type arguments
+fn param_args<T>(v: T<Int>) -> Int { 1 }        // error: type parameter T takes no type arguments
+
+trait Greet {
+    // `Self` is the receiver's type; it is not itself generic.
+    fn hello(self, other: Self<Int>) -> String  // error: Self takes no type arguments
+}
+
+fn main() {
+    println(1)
+}

@@ -1,0 +1,43 @@
+// Indexing, tuple fields, and the operand rules for `??`, `if let`,
+// and the boolean operators.
+type P = struct { x: Int }
+type Colour = Red | Green
+type Code = distinct String
+
+fn main() {
+    let n = 5
+    println(n[0])                   // error: Int cannot be indexed
+
+    // Strings are UTF-8 bytes, so `s[i]` would be a byte or a rune
+    // depending on what you meant. Glide makes you say which.
+    let s = "hi"
+    println(s[0])                   // error: strings have no index operator
+
+    let t = (1, "a")
+    println(t.5)                    // error: has 2 elements; .5 is out of range
+    println(n.0)                    // error: .0 requires a tuple
+
+    // ?? takes an Option or a Result, not any value.
+    println(n ?? 1)                 // error: ?? needs an Option or a Result
+
+    // `if let name = …` is the Option-unwrapping form.
+    if let v = n { println(v) }     // error: unwraps an Option
+
+    // && and || take Bool and nothing else — there is no truthiness.
+    println(n && true)              // error: && requires Bool
+    if n { println("no") }          // error: if condition must be Bool
+
+    // A map literal's keys must agree with each other.
+    let m = [1: "a", "two": "b"]    // error: map keys are Int, but this one is String
+    println(m)
+
+    // value() unwraps a distinct type and takes nothing.
+    let id = Code("x")
+    println(id.value(1))            // error: value takes no arguments
+
+    // Brace construction on a type that is not a struct.
+    let c = Colour{ x: 1 }          // error: Colour is not a struct type
+    println(c)
+
+    for v in n { println(v) }       // error: Int is not iterable
+}
