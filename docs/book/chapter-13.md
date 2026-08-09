@@ -100,13 +100,16 @@ fn area(s: Shape) -> Float {
 ```
 
 Each arm tests the variant *and* extracts its payload in one step. Miss
-a variant and it is an error (dynamically today, statically in the
-checker era):
+a variant and the program does not compile:
 
 ```
-error: line 3: no match arm matched Blue
-       (exhaustiveness checking arrives with the compiler)
+error: line 2: match is not exhaustive: Blue not handled
 ```
+
+Coverage recurses one constructor deep, so `Err(A)` handled without
+`Err(B)` reports `Err(B) not handled` rather than shrugging at `Err`.
+A guarded arm covers nothing — it may not fire — and a type with too
+many values to enumerate (`Int`, `String`, a struct) needs a `_`.
 
 #### Named-field payloads
 

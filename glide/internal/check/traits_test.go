@@ -199,3 +199,80 @@ func TestUniverseTraitsAreReserved(t *testing.T) {
 		t.Errorf("want unknown trait, got %q", got)
 	}
 }
+
+// Exhaustiveness under-approximates: it reports only when a case is
+// *definitely* unhandled. These are the shapes where it must stay
+// silent, and they matter more than the ones it catches — the first
+// version of this analysis rejected examples/links.gld.
+func TestExhaustivenessNeverRejectsWorkingCode(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"every variant", "type C = Red | Green\nfn f(c: C) -> Int { match c { Red => 1  Green => 2 } }\nfn main() {}"},
+		{"wildcard", "type C = Red | Green\nfn f(c: C) -> Int { match c { Red => 1  _ => 2 } }\nfn main() {}"},
+		{"bare binding is a catch-all", "type C = Red | Green\nfn f(c: C) -> Int { match c { seen => 1 } }\nfn main() {}"},
+		// The links.gld shape: three Err arms cover Err together, none
+		// of them alone. A top-level-only analysis rejects this.
+		{"nested arms cover together", "type E = A | B\nfn f(r: Result<Int, E>) -> Int { match r { Ok(n) => n  Err(A) => 0  Err(B) => 1 } }\nfn main() {}"},
+		{"guard then total", "type C = Red | Green\nfn f(c: C, h: Bool) -> Int { match c { Red if h => 1  Red => 2  Green => 3 } }\nfn main() {}"},
+		{"struct has one case", "type U = struct { n: Int }\nfn f(u: U) -> Int { match u { U{ n } => n } }\nfn main() {}"},
+		{"distinct has one case", "type Id = distinct Int\nfn f(i: Id) -> Int { match i { Id(n) => n } }\nfn main() {}"},
+		{"multi-arg variant", "type P = Pair(Int, Int) | Nil\nfn f(p: P) -> Int { match p { Pair(a, b) => a + b  Nil => 0 } }\nfn main() {}"},
+		{"opaque type parameter", "fn f<T>(v: T) -> Int { match v { _ => 1 } }\nfn main() {}"},
+	} {
+		if got := frontendErr(t, tc.src); got != "" {
+			t.Errorf("%s: should be accepted, got %s", tc.name, got)
+		}
+	}
+}
+
+func TestExhaustivenessCatchesMissingCases(t *testing.T) {
+	for _, tc := range []struct{ name, src, want string }{
+		{"missing variant", "type C = Red | Green | Blue\nfn f(c: C) -> Int { match c { Red => 1  Green => 2 } }\nfn main() {}",
+			"not exhaustive: Blue not handled"},
+		{"two missing, listed", "type C = Red | Green | Blue\nfn f(c: C) -> Int { match c { Red => 1 } }\nfn main() {}",
+			"Blue and Green not handled"},
+		// A guard may not fire, so the only Red arm being guarded
+		// leaves Red unhandled.
+		{"guarded covers nothing", "type C = Red | Green\nfn f(c: C, h: Bool) -> Int { match c { Red if h => 1  Green => 2 } }\nfn main() {}",
+			"Red not handled"},
+		{"Option", "fn f(o: Int?) -> Int { match o { Some(n) => n } }\nfn main() {}", "None not handled"},
+		{"Result", "fn f(r: Result<Int, Error>) -> Int { match r { Ok(n) => n } }\nfn main() {}", "Err not handled"},
+		{"Bool", "fn f(b: Bool) -> Int { match b { true => 1 } }\nfn main() {}", "false not handled"},
+		// Recursion is what names the case *inside* the constructor.
+		{"nested", "type E = A | B\nfn f(r: Result<Int, E>) -> Int { match r { Ok(n) => n  Err(A) => 0 } }\nfn main() {}",
+			"Err(B) not handled"},
+		{"infinite type needs _", "fn f(s: String) -> Int { match s { \"GET\" => 1 } }\nfn main() {}",
+			"needs a `_` arm"},
+	} {
+		if got := frontendErr(t, tc.src); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: want %q, got %q", tc.name, tc.want, got)
+		}
+	}
+}
+
+func TestUnreachableArms(t *testing.T) {
+	for _, name := range []string{
+		"type C = Red | Green\nfn f(c: C) -> Int { match c { _ => 1  Red => 2 } }\nfn main() {}",
+		"type C = Red | Green\nfn f(c: C) -> Int { match c { Red => 1  Red => 2  Green => 3 } }\nfn main() {}",
+	} {
+		if got := frontendErr(t, name); !strings.Contains(got, "this arm cannot run") {
+			t.Errorf("want an unreachable-arm diagnostic, got %q", got)
+		}
+	}
+	// A guard makes the arm below it reachable, not dead.
+	if got := frontendErr(t, "type C = Red | Green\nfn f(c: C, h: Bool) -> Int { match c { Red if h => 1  Red => 2  Green => 3 } }\nfn main() {}"); got != "" {
+		t.Errorf("an unguarded arm after a guarded one is reachable: %s", got)
+	}
+}
+
+// One mistake, one diagnostic. A typo'd constructor already reports
+// what is wrong; adding "and by the way it is not exhaustive" makes
+// the second error vanish when the first is fixed.
+func TestExhaustivenessDoesNotCascade(t *testing.T) {
+	got := frontendErr(t, "type C = Red | Green\nfn main() {\n    match C.Red {\n        Rd => println(\"typo\")\n    }\n}")
+	if !strings.Contains(got, "not a constructor") {
+		t.Fatalf("want the constructor error: %q", got)
+	}
+	if strings.Contains(got, "not exhaustive") {
+		t.Errorf("exhaustiveness should not pile on: %q", got)
+	}
+}

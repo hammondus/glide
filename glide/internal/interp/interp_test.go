@@ -762,12 +762,19 @@ fn main() {
 	}
 }
 
-func TestMatchTypeMismatchFallsThrough(t *testing.T) {
-	// Dynamically typed until the checker era: a literal of the wrong
-	// type simply doesn't match, and the fall-through panic reports it.
-	_, err := runProg(t, "fn main() {\n _ = match \"GET\" {\n  1 => \"?\"\n }\n}")
-	if err == nil || !strings.Contains(err.Error(), "no match arm matched") {
-		t.Fatalf("want fall-through panic, got %v", err)
+func TestMatchOnAnInfiniteTypeNeedsAWildcard(t *testing.T) {
+	// This was a *runtime* fall-through until M4c — the comment here
+	// used to say "dynamically typed until the checker era". A String
+	// has too many values to enumerate, so the checker now demands a
+	// catch-all before the program runs.
+	_, err := runProg(t, "fn main() {\n _ = match \"GET\" {\n  \"GET\" => 1\n }\n}")
+	if err == nil || !strings.Contains(err.Error(), "needs a `_` arm") {
+		t.Fatalf("want a static non-exhaustive error, got %v", err)
+	}
+	// With the catch-all it checks and runs.
+	out, err := runProg(t, "fn main() {\n println(match \"GET\" {\n  \"GET\" => 1\n  _ => 0\n })\n}")
+	if err != nil || out != "1\n" {
+		t.Fatalf("out=%q err=%v", out, err)
 	}
 }
 

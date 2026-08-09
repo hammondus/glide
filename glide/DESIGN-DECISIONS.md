@@ -517,6 +517,52 @@ or it is a bug.
   to end instead — every numeric primitive is *run* as a conversion,
   and `Bool`/`String` are asserted not to be.
 
+- **Exhaustiveness recurses, because top-level-only rejects real
+  code.** The first version judged coverage at the top level only and
+  rejected `examples/links.gld`:
+
+      match r {
+          Ok(resp)              => …
+          Err(BadInput{ msg })  => …
+          Err(NotFound{ code }) => …
+          Err(Store{ cause })   => …
+      }
+
+  Those three Err arms cover Err *together* and none of them alone.
+  So a case is covered when some arm matches it irrefutably, or when
+  the sub-patterns collected under it are exhaustive over its payload
+  type. Recursion is capped at four levels — a self-referential type
+  would otherwise descend forever — and at the cap everything counts
+  as covered.
+
+  Everything the analysis cannot model counts as covered, in both
+  directions: a multi-argument variant, a struct pattern with a
+  refutable field, a literal arm set. That is the checker's standing
+  rule applied here, and it is what makes the analysis safe to be an
+  *error* rather than a warning.
+
+- **A struct and a distinct type have exactly one case: themselves.**
+  Treating them as un-enumerable (the obvious first reading, since
+  neither has variants) demanded a `_` arm on
+  `match u { User{ name, role, age } => … }` — a wildcard nothing
+  could ever reach. `casesOf` deliberately does *not* go through
+  `types.Base`, because a distinct type's cases are its own and not
+  its base type's: `match id { NoteId(n) => … }` is total.
+
+- **Exhaustiveness is skipped when the match already errored.** A
+  typo'd constructor reports "Rd is not a constructor"; adding "and
+  Red and Green are not handled" makes one mistake into two
+  diagnostics, the second of which vanishes when the first is fixed.
+  `match` records `bag.Len()` before its arms and only checks
+  coverage if the count did not move.
+
+- **The runtime's fall-through check stays, as an assertion.** Its
+  message lost the "(exhaustiveness checking arrives with the
+  compiler)" tail, which was wrong twice over — the checker does it,
+  and it does it now. Reaching that panic means a match the *checker*
+  could not judge, which is the belt to its braces, per DESIGN.md's
+  open question on the dynamically-enforced rules.
+
 - **The universe traits are written in Glide, not built in Go.**
   `internal/check/prelude.go` holds ~6 lines of Glide source, parsed
   once. They *are* Glide declarations, so spelling them as Glide is
@@ -662,23 +708,21 @@ or it is a bug.
 ## Remaining in M4c
 
 Sized numerics, explicit conversion, bound checking, trait conformance,
-the `Ord` operator trait and boxed `Option` are **done** (see the
-decisions above). Arithmetic operator traits (`Add`, `Mul`) are not,
-and nothing yet needs them.
+the `Ord` operator trait, boxed `Option` and match exhaustiveness are
+**done** (see the decisions above). Arithmetic operator traits (`Add`,
+`Mul`) are not, and nothing yet needs them.
 
 With boxing landed, **every remaining M4 gap is a missing diagnostic
 rather than a wrong answer** — the checker stays quiet where it could
 speak, but nothing computes the wrong value. Still open, in the
 order they are worth doing:
 
-1. The cheaper leftovers: static match exhaustiveness (the runtime
-   catches it, and its message still says "exhaustiveness checking
-   arrives with the compiler" — now the checker's job), the
-   spawn-captures-mut ban, generator element types (a `yield`ing
-   function is exempt from the tail-value check, so `yield "s"` in an
-   `Iterator<Int>` passes), and call-site inference for *nullary*
-   associated functions (`Box.new()` erases its parameter, so a later
-   `add(1)` then `add("s")` passes; `Box.new(1)` already infers).
+1. The cheaper leftovers: the spawn-captures-mut ban, generator
+   element types (a `yield`ing function is exempt from the tail-value
+   check, so `yield "s"` in an `Iterator<Int>` passes), and call-site
+   inference for *nullary* associated functions (`Box.new()` erases
+   its parameter, so a later `add(1)` then `add("s")` passes;
+   `Box.new(1)` already infers).
 
 **Two lexer gaps found while testing the conversions**, both small
 and both out of scope for the commit that found them: there are no

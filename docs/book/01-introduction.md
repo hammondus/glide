@@ -683,7 +683,7 @@ A `_ =>` arm is legal but spends this guarantee — write it only when
 
 **Arms take guards.** `Some(n) if n.value < limit => …` — an extra
 condition after the pattern. A guard that fails falls through to the
-next arm. (Guards are opaque to the exhaustiveness checker: it
+next arm. (A guarded arm covers nothing for exhaustiveness: it
 assumes any guard can fail, so a guarded arm never completes
 coverage — the compiler demands the unguarded case rather than
 trusting your predicate.)

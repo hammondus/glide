@@ -40,11 +40,12 @@ sin this project's `CLAUDE.md` names explicitly.
 
 Type annotations are *checked* as of M4b: every program is
 type-checked before it runs, in every tier, and there is no flag to
-skip it. The checker reports only what it is certain of, so the rules
-it does not yet cover — generic bounds, trait conformance, match
-exhaustiveness — are still enforced dynamically and still fail late.
-That list is M4c, and it shrinks; chapters written before M4b landed
-may still describe a rule as runtime-only.
+skip it. M4c added generic bounds, trait conformance, `Ord`, sized
+numerics, explicit numeric conversion, boxed `Option` and match
+exhaustiveness. The checker still reports only what it is certain of,
+so what it does not yet cover passes in silence and is caught at
+runtime instead; chapters written before a rule landed may still
+describe it as runtime-only.
 
 ## The chapter anatomy
 

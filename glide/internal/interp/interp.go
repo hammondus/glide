@@ -1418,7 +1418,13 @@ func (in *Interp) evalMatch(ex *ast.Match, env *Env) (Value, *sig) {
 		}
 		return in.eval(arm.Body, armEnv)
 	}
-	panic(rtErr{ex.Span, fmt.Sprintf("no match arm matched %s (exhaustiveness checking arrives with the compiler)", render(x, true))})
+	// The checker rejects a match it can prove incomplete, so reaching
+	// here means one it could not judge — a literal arm set, a nested
+	// pattern past the analysis depth. Kept as the belt to the
+	// checker's braces, per DESIGN.md's open question on the
+	// dynamically-enforced rules: the runtime keeps its copy as an
+	// assertion so a gap surfaces loudly rather than as a wrong value.
+	panic(rtErr{ex.Span, fmt.Sprintf("no match arm matched %s", render(x, true))})
 }
 
 func (in *Interp) evalCondMatch(ex *ast.CondMatch, env *Env) (Value, *sig) {

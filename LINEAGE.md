@@ -380,6 +380,37 @@ resolution swamps) but now painlessly: defaults + named args cover
 overloading's legitimate 90%. Swift's external/internal name split
 declined — one name, already documentation.
 
+## Match exhaustiveness: report only when certain
+
+- **1978** — ML ships pattern matching with a compiler warning for
+  non-exhaustive matches, and the warning is *the* reason ML-family
+  code refactors safely: add a variant, and every match that needs
+  updating names itself.
+- **1992** — Maranget and others formalise the algorithm (usefulness
+  of a pattern row against a matrix), which is what Rust, OCaml and
+  Haskell all still use. It decides nested patterns exactly, at real
+  implementation cost.
+- **2009** — Go's `switch` on a type or value warns about nothing. A
+  missing case is silence, and `default: panic("unreachable")` is the
+  folk workaround; `exhaustive` linters exist precisely because the
+  language will not.
+- **2015 → 2018** — Rust makes it an error rather than a warning, and
+  TypeScript reaches the same place from the other side with the
+  `never` type: assigning the fall-through to `never` fails to compile
+  when a case is added. Two very different type systems converging on
+  "the compiler tells you where to go" is the strongest evidence
+  available.
+
+**Glide takes** exhaustiveness as an **error**, not a warning — a
+warning is a thing you scroll past — with two deliberate
+simplifications. Guards cover nothing, because a guard may not fire
+(Rust's rule too, and the one people are surprised by exactly once).
+And coverage recurses only a few levels rather than running Maranget's
+matrix: a case the analysis cannot judge counts as *covered*, so the
+checker under-approximates and cannot reject a working program. That
+is the same rule the rest of this checker runs on, and it is what let
+exhaustiveness land without a flag day.
+
 ## Traits: declared conformance, structural satisfaction
 
 - **1989** — Wadler & Blott's "How to make ad-hoc polymorphism less

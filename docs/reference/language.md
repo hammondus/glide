@@ -17,8 +17,8 @@ The checker reports only what it is certain of — anything it does not
 yet model is treated as unknown and passes in silence — so a ✓ row
 means "checked or enforced", and the rows still marked ○ are the ones
 where the *evaluator* is the only thing standing between you and the
-mistake. Generic bound checking, trait conformance and `Ord` landed
-in **M4c**; match exhaustiveness is what remains.
+mistake. Generic bound checking, trait conformance, `Ord`, boxed
+`Option` and match exhaustiveness all landed in **M4c**.
 
 ## Source files
 
@@ -292,7 +292,15 @@ Angle brackets, never square. **No turbofish, ever.**
   unlabeled break/continue still target the nearest loop.
 - `match subject { pattern [if guard] => expr … }` ✓ — arms are
   single expressions (use a block expression for multi-statement
-  arms); exhaustiveness checked dynamically on sum types ✓.
+  arms). **Exhaustiveness is checked statically** ✓: a sum type, an
+  `Option`, a `Result` or a `Bool` with a case unhandled is a compile
+  error naming it, and coverage recurses one constructor deep so
+  `Err(A)` without `Err(B)` reports `Err(B) not handled`. A type with
+  too many values to enumerate (Int, String, a struct) needs a `_`
+  arm. An arm that cannot run — after a catch-all, or a duplicate
+  constructor — is an error too ✓. Anything the analysis cannot judge
+  passes in silence, and the runtime keeps its own fall-through check
+  as an assertion.
   Multi-value arms (`1, 2 =>`) ✓ — Go-style value alternatives; none
   may bind a name (parse error). Literal / range / string patterns ✓
   (see Patterns). Subjectless `match { cond => … }` ✓ — arms are
@@ -318,7 +326,7 @@ arms, closure params (plain names only).
 | Constructor | `Some(x)`, `None`, `Circle(r)`, `Ok(v)` | ✓ |
 | Tuple | `(a, b)` (≥2 elements) | ✓ |
 | List | `[]`, `[x]`, `[first, ..rest]`, `[.._]` — exact unless `..` | ✓ |
-| Guard | `n if n < 0 =>` (match arms; opaque to exhaustiveness) | ✓ |
+| Guard | `n if n < 0 =>` (match arms). A guarded arm **covers nothing** for exhaustiveness — it may not fire — so a sum type whose only arm for a case is guarded is not exhaustive | ✓ |
 | Struct | `User{ name, .. }` — shorthand binds; `field: pat` nests (`role: "admin"`, `age: 0..18`); `mut name` shorthand. Without `..` every field must be mentioned — partial-without-`..` is an error, not a no-match | ✓ |
 | Literal / range | `1`, `-1`, `true`, `"GET"` (equality; plain literals only, no interpolation), `1..10` half-open / `90..=100` inclusive — Int and Rune (`'a'..='z'`) | ✓ |
 
@@ -352,8 +360,8 @@ patterns in function signatures, ref/binding modes.
   type; `.Shorthand` against the expected type; `mut` paths;
   integer-literal range against a sized type; and every name being
   defined. What is *not* yet checked, and stays dynamic until M4c:
-  match exhaustiveness and a generator's element type. ○ Generic
-  bounds and trait conformance are checked as of M4c ✓.
+  a generator's element type ○. Generic bounds, trait conformance and
+  match exhaustiveness are checked as of M4c ✓.
 - No null; no zero values; mandatory initialisation. ✓ (by
   construction in M2)
 - Errors are values; `?` propagates; panics are for bugs, kill the

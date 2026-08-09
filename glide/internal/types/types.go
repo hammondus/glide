@@ -386,6 +386,14 @@ func (n *Named) Field(name string) (Field, bool) {
 	return Field{}, false
 }
 
+// AllVariants is every arm this sum type declares, read through the
+// declaration for the reason decl() gives. Callers that need one arm
+// substituted for this instance want Variant instead.
+func (n *Named) AllVariants() []*Variant { return n.decl().Variants }
+
+// AllFields is every field this struct declares, unsubstituted.
+func (n *Named) AllFields() []Field { return n.decl().Fields }
+
 // Variant looks up a sum-type arm by name, substituted for this
 // instance.
 func (n *Named) Variant(name string) (*Variant, bool) {

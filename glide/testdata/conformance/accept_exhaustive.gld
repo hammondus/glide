@@ -1,0 +1,95 @@
+// The other half of exhaustiveness, and the half that matters more:
+// every shape here is complete, and a checker that rejected any of
+// them would be worse than none. Most checker bugs are false
+// positives, and the first attempt at this analysis rejected
+// examples/links.gld.
+type Colour = Red | Green | Blue
+type ApiError = A | B
+type Pair = P(Int, Int) | Nil
+type User = struct { name: String, role: String, age: Int }
+type Id = distinct Int
+
+fn all_arms(c: Colour) -> String {
+    match c {
+        Red   => "r"
+        Green => "g"
+        Blue  => "b"
+    }
+}
+
+fn wildcard(c: Colour) -> String {
+    match c {
+        Red => "r"
+        _   => "other"
+    }
+}
+
+// A bare binding is a catch-all too — it matches anything and names it.
+fn binding(c: Colour) -> String {
+    match c {
+        seen => "got one"
+    }
+}
+
+// The links.gld shape: three Err arms that together cover Err, and
+// individually cover none of it.
+fn nested(r: Result<Int, ApiError>) -> Int {
+    match r {
+        Ok(n)  => n
+        Err(A) => 0
+        Err(B) => 1
+    }
+}
+
+// A guarded arm covers nothing, but an unguarded one below it does.
+fn guard_then_total(c: Colour, hot: Bool) -> String {
+    match c {
+        Red if hot => "hot"
+        Red        => "cold"
+        Green      => "g"
+        Blue       => "b"
+    }
+}
+
+// A struct has one case: itself. All-binding fields match it always.
+fn on_struct(u: User) -> String {
+    match u {
+        User{ name, role, age } => "{name} {role} {age}"
+    }
+}
+
+// So does a distinct type — its cases are its own, not its base's.
+fn on_distinct(i: Id) -> Int {
+    match i {
+        Id(n) => n
+    }
+}
+
+// Multi-argument variants are not analysed inside, so a bare arm for
+// each is enough.
+fn multi(p: Pair) -> Int {
+    match p {
+        P(a, b) => a + b
+        Nil     => 0
+    }
+}
+
+// An unbounded type parameter is opaque: nothing is known about its
+// cases, so nothing is said about them.
+fn opaque<T>(v: T) -> Int {
+    match v {
+        _ => 1
+    }
+}
+
+fn main() {
+    println(all_arms(.Blue))
+    println(wildcard(.Green))
+    println(binding(.Red))
+    println(nested(Err(.A)))
+    println(guard_then_total(.Red, false))
+    println(on_struct(User{ name: "amy", role: "admin", age: 44 }))
+    println(on_distinct(Id(7)))
+    println(multi(.P(2, 3)))
+    println(opaque("anything"))
+}

@@ -111,8 +111,7 @@ fn f(c: Color) -> String {
 ```
 
 ```
-error: line 3: no match arm matched Blue
-       (exhaustiveness checking arrives with the compiler)
+error: line 2: match is not exhaustive: Blue not handled
 ```
 
 #### Every pattern form

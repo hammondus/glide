@@ -1,0 +1,86 @@
+// Match exhaustiveness. Every case here ran to completion and then
+// panicked at the first unhandled value through M4b — the arm you
+// forgot was found by your users, not your compiler.
+type Colour = Red | Green | Blue
+type ApiError = A | B
+
+fn missing_one(c: Colour) -> String {
+    match c {                   // error: match is not exhaustive: Blue not handled
+        Red   => "r"
+        Green => "g"
+    }
+}
+
+fn missing_two(c: Colour) -> String {
+    match c {                   // error: Blue and Green not handled
+        Red => "r"
+    }
+}
+
+// A guard may not fire, so a guarded arm covers nothing. The only Red
+// arm here is conditional, which leaves Red unhandled.
+fn guarded(c: Colour, hot: Bool) -> String {
+    match c {                   // error: match is not exhaustive: Red not handled
+        Red if hot => "hot"
+        Green      => "g"
+        Blue       => "b"
+    }
+}
+
+fn option_arm(o: Int?) -> Int {
+    match o {                   // error: match is not exhaustive: None not handled
+        Some(n) => n
+    }
+}
+
+fn bool_arm(b: Bool) -> Int {
+    match b {                   // error: match is not exhaustive: false not handled
+        true => 1
+    }
+}
+
+// Coverage recurses: these Err arms handle A and not B, and naming
+// the missing case inside its constructor is the whole point of
+// recursing rather than stopping at Ok/Err.
+fn nested(r: Result<Int, ApiError>) -> Int {
+    match r {                   // error: match is not exhaustive: Err(B) not handled
+        Ok(n)  => n
+        Err(A) => 0
+    }
+}
+
+// An infinite type can only be covered by a catch-all.
+fn infinite(s: String) -> Int {
+    match s {                   // error: needs a `_` arm
+        "GET" => 1
+    }
+}
+
+// Unreachable arms: a catch-all above, and a duplicate.
+fn dead_after_wildcard(c: Colour) -> String {
+    match c {
+        _   => "any"
+        Red => "r"              // error: this arm cannot run
+    }
+}
+
+fn duplicate(c: Colour) -> String {
+    match c {
+        Red   => "r"
+        Red   => "again"        // error: this arm cannot run
+        Green => "g"
+        Blue  => "b"
+    }
+}
+
+fn main() {
+    println(missing_one(.Red))
+    println(missing_two(.Red))
+    println(guarded(.Red, true))
+    println(option_arm(1))
+    println(bool_arm(true))
+    println(nested(Ok(1)))
+    println(infinite("GET"))
+    println(dead_after_wildcard(.Red))
+    println(duplicate(.Red))
+}

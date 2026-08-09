@@ -1033,6 +1033,7 @@ func (c *checker) ifLet(x *ast.IfLet, want types.Type) types.Type {
 
 func (c *checker) match(x *ast.Match, want types.Type) types.Type {
 	scrut := c.infer(x.X)
+	before := c.bag.Len()
 	result := types.Type(types.Unknown)
 	for i := range x.Arms {
 		arm := &x.Arms[i]
@@ -1046,6 +1047,14 @@ func (c *checker) match(x *ast.Match, want types.Type) types.Type {
 		t := c.typeOf(arm.Body, want)
 		c.pop()
 		result = c.joinArms(result, t, want, arm.Span)
+	}
+	// Exhaustiveness only for a match that is otherwise sound. A
+	// typo'd constructor already reported "Rd is not a constructor";
+	// adding "Red and Green not handled" turns one mistake into two
+	// diagnostics, the second of which disappears when the first is
+	// fixed.
+	if c.bag.Len() == before {
+		c.checkExhaustive(x, scrut)
 	}
 	return result
 }

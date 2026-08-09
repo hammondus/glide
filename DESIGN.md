@@ -7,10 +7,11 @@ tree-walking interpreter runs the whole ratified surface and
 type-checks it first, in both tiers, with no way to opt out (see
 `glide/DESIGN-DECISIONS.md`). M4c has landed sized numerics, explicit
 numeric conversion, generic bound checking, trait conformance and the
-`Ord` operator trait, and boxed `Option`. Remaining checker work: match
-exhaustiveness, generator element types, and the arithmetic operator
-traits — all of them missing *diagnostics*, with no remaining case
-where a program computes the wrong value.
+`Ord` operator trait, boxed `Option`, and match exhaustiveness.
+Remaining checker work: generator element types, the spawn-captures-mut
+ban, and the arithmetic operator traits — all of them missing
+*diagnostics*, with no remaining case where a program computes the
+wrong value.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee

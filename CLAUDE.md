@@ -46,8 +46,9 @@ recorded sacrifice unless new evidence turns up.
   argue "but that would break existing code" at this stage.
 - Plan before code. Current phase: **M4c**. Landed so far: sized
   numerics in the runtime, explicit numeric conversion, generic bound
-  checking, trait conformance, `Ord` (ordering operators), and boxed
-  `Option`. Remaining: match exhaustiveness. M4a (representation) and M4b (the checker
+  checking, trait conformance, `Ord` (ordering operators), boxed
+  `Option`, and match exhaustiveness. Remaining: generator element
+  types, the spawn-captures-mut ban, arithmetic operator traits. M4a (representation) and M4b (the checker
   core, `internal/types` + `internal/check`) have landed: every
   program is type-checked before it runs, in every tier, with no
   `--no-check` and no plan for one. The checker reports only what it

@@ -260,11 +260,11 @@ in `DESIGN.md` are marked "forced by the interpreter", meaning the
 design changed because writing the evaluator revealed a problem.
 
 Running as of M4c: the type checker, sized numerics, explicit numeric
-conversion, generic bound checking and trait conformance. Not yet
-running: comptime and `derive`, operator traits (so `a < b` on a
-`T: Ord` is unchecked), match exhaustiveness, `unsafe`, `embed`, and
-most of the designed standard library. Chapter 35 covers the path from
-here to a compiler.
+conversion, generic bound checking, trait conformance, `Ord`, boxed
+`Option` and match exhaustiveness. Not yet running: comptime and
+`derive`, the arithmetic operator traits, `unsafe`, `embed`, and most
+of the designed standard library. Chapter 35 covers the path from here
+to a compiler.
 
 You will see this reflected in every chapter. Sections marked ✓ have
 been run. Sections marked ○ are read from the design document. Where a
