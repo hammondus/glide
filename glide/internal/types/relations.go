@@ -374,9 +374,9 @@ func Unwrap(t Type) (Type, bool) {
 func Base(t Type) Type {
 	for {
 		n, ok := t.(*Named)
-		if !ok || n.Base == nil {
+		if !ok || n.decl().Base == nil {
 			return t
 		}
-		t = Subst(n.Base, n.binding())
+		t = Subst(n.decl().Base, n.binding())
 	}
 }

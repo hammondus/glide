@@ -306,14 +306,41 @@ type Named struct {
 	Fields   []Field    // struct
 	Variants []*Variant // sum
 	Base     Type       // distinct
+
+	// proto points at the uninstantiated declaration; nil when this
+	// *is* it. Fields, Variants and Base are read through it — see
+	// decl() for why a copy cannot be trusted to carry them.
+	proto *Named
 }
 
 // Instantiate binds the declaration's type parameters. The result
-// shares Fields/Variants with n and substitutes on lookup.
+// shares Fields/Variants with the declaration and substitutes on
+// lookup.
 func (n *Named) Instantiate(args []Type) *Named {
 	out := *n
 	out.Args = args
+	out.proto = n.decl()
 	return &out
+}
+
+// decl is the uninstantiated declaration this instance came from.
+//
+// It exists because Instantiate is a *shallow* copy, and a
+// self-referential type is resolved while its own field list is still
+// being built: `type Node = struct { next: Node?, v: Int }` resolves
+// the inner `Node` when Fields is still empty, so the copy would carry
+// an empty — and permanently stale — slice header. Reading through to
+// the declaration means every instance sees the finished list however
+// early it was taken.
+//
+// tree.gld escaped this only by luck: its self-reference is the second
+// field, and it is always reached through a function signature
+// (resolved after every declaration is complete) rather than directly.
+func (n *Named) decl() *Named {
+	if n.proto != nil {
+		return n.proto
+	}
+	return n
 }
 
 // binding maps this instance's type parameters to its arguments; nil
@@ -345,12 +372,12 @@ func (n *Named) String() string {
 // IsDistinct reports whether n is a nominal wrapper. Distinct types
 // share no operators with their base and never convert implicitly —
 // that is the whole point of declaring one.
-func (n *Named) IsDistinct() bool { return n.Base != nil }
+func (n *Named) IsDistinct() bool { return n.decl().Base != nil }
 
 // Field looks up a struct field by name, with this instance's type
 // arguments substituted in.
 func (n *Named) Field(name string) (Field, bool) {
-	for _, f := range n.Fields {
+	for _, f := range n.decl().Fields {
 		if f.Name == name {
 			f.Type = Subst(f.Type, n.binding())
 			return f, true
@@ -362,7 +389,7 @@ func (n *Named) Field(name string) (Field, bool) {
 // Variant looks up a sum-type arm by name, substituted for this
 // instance.
 func (n *Named) Variant(name string) (*Variant, bool) {
-	for _, v := range n.Variants {
+	for _, v := range n.decl().Variants {
 		if v.Name != name {
 			continue
 		}
