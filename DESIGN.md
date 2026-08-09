@@ -2391,6 +2391,43 @@ scripting tail wagging the compiled dog. Decided:
 
 ## Open questions (decide before/while building)
 
+- **Should `Error` be boxed?** (raised 2026-08-09, deferred by the
+  dogfood rule.) `Error` is *erased* today: it accepts any value and an
+  `Error` slot holds whatever it was given. That is what makes
+  `Err("config is empty")` and free `?`-propagation work, and it is
+  documented as deliberate. It has two consequences that were not:
+
+  1. **`Error` can carry no methods.** `let e: Error = "x"` then
+     `e.message()` dispatches on the *dynamic* type and reports
+     `String has no method "message"`. So `message()`, and the
+     `cause() -> Error?` accessor DESIGN.md's Errors section already
+     names, cannot be added without the answer depending on how the
+     error was made. That is a trap, not a gap.
+  2. **Erasure leaks.** `match f() { Err(NotFound(id)) => … }` matches a
+     concrete variant straight out of an `Error` slot. It works, and it
+     is not designed to — the designed route is `find<ConfigError>()`,
+     which does not exist yet.
+  3. **Two errors print differently.** `println(r)` on a program-made
+     error shows `Err("port out of range")` — quoted, because the slot
+     holds a String and `render` quotes strings inside containers —
+     while a host error shows `Err(open /x: no such file)`. Unwrapping
+     with `match` and interpolating hides it, which is what real code
+     does, so this is a wart rather than a bug. It is still the
+     erasure showing through.
+
+  Boxing fixes both and is the same lesson M4c learned boxing `Option`,
+  but it removes (2) and so has to land together with `find`. Note
+  `err.find<ConfigError>()` **does not parse** — `e.find<T>()` reads as
+  a field access followed by `<`, the turbofish problem. The way out is
+  probably `e.find(ConfigError)`, passing the type as a value: Glide
+  already has types-as-values (`Tree.new()`), it checks through
+  `types.Meta`, and it avoids inventing generic-call syntax for one
+  method.
+
+  Deferred because `Err("msg")` covers the everyday case today, and
+  the forcing evidence is a real program that wants a cause chain or a
+  typed boundary — not a hypothetical one.
+
 - **The or-block residue test** (`or |e| { … }` deferred): the
   construct was declined in favour of its parts — `?`-conversion
   covers wrap-and-propagate, `??` on Result covers fallback, `match`

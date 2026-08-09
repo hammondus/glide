@@ -640,3 +640,96 @@ fn main() {
 // ["y", "x"]
 // true
 ```
+
+## Errors
+
+`Error` is the dynamic error type application code returns. Anything is
+assignable to it, so raising one needs no ceremony — and `?` propagates
+a callee's error into it with no conversion to write.
+```rust
+fn parse_port(s: String) -> Result<Int, Error> {
+    match s.parse_int() {
+        Some(n) => if n > 0 && n < 65536 { Ok(n) } else { Err("port out of range: {n}") }
+        None    => Err("not a number: {s}")
+    }
+}
+
+fn main() {
+    println(parse_port("8080"))
+    println(parse_port("99999"))
+    println(parse_port("http"))
+}
+// Ok(8080)
+// Err("port out of range: 99999")
+// Err("not a number: http")
+```
+
+Note the quotes. `Error` is *erased* — the slot holds whatever it was
+given, here a String — so printing the whole `Result` shows it as the
+String it is, while a host error prints bare. Unwrap it and the
+difference goes away, because interpolation is what you actually use:
+```rust
+fn main() {
+    match parse_port("http") {
+        Ok(n)  => println("port {n}")
+        Err(e) => println("failed: {e}")
+    }
+}
+
+fn parse_port(s: String) -> Result<Int, Error> {
+    match s.parse_int() {
+        Some(n) => Ok(n)
+        None    => Err("not a number: {s}")
+    }
+}
+// failed: not a number: http
+```
+
+`context` adds a breadcrumb to an `Err` and passes an `Ok` through, so
+a chain of `?` reads as a trail rather than one bare message. Give
+`main` a `Result` return and `?` becomes the whole error path — no
+`set -e`, no `if err != nil`.
+```rust
+import fs
+
+fn load(path: String) -> Result<Int, Error> {
+    let body = fs.read_string(path).context("reading {path}")?
+    parse_port(body.trim())
+}
+
+fn parse_port(s: String) -> Result<Int, Error> {
+    match s.parse_int() {
+        Some(n) => Ok(n)
+        None    => Err("not a number: {s}")
+    }
+}
+
+fn main() -> Result<(), Error> {
+    println(load("/nonexistent/config"))
+    Ok(())
+}
+// Err(reading /nonexistent/config: open /nonexistent/config: no such file or directory)
+```
+
+A library defines its failure modes as a sum type instead, so callers
+can match them exhaustively and adding a case breaks them at compile
+time. `?` still converts one into an `Error` at any application
+boundary.
+```rust
+type PortErr = NotANumber(String) | OutOfRange(Int)
+
+fn strict(s: String) -> Result<Int, PortErr> {
+    let Some(n) = s.parse_int() else { return Err(.NotANumber(s)) }
+    if n <= 0 || n >= 65536 { return Err(.OutOfRange(n)) }
+    Ok(n)
+}
+
+fn main() {
+    match strict("99999") {
+        Ok(n)              => println("port {n}")
+        Err(NotANumber(s)) => println("not a number: {s}")
+        Err(OutOfRange(n)) => println("out of range: {n}")
+    }
+}
+// out of range: 99999
+```
