@@ -431,6 +431,44 @@ Simula (1967) invented it, the Gang of Four (1994) already advised
 "favor composition", and it's the feature every ecosystem regrets by
 year five; traits + composition are the whole story.
 
+## Operator traits: one `cmp`, and no `Eq`
+
+- **1980s–90s** — C++ operator overloading arrives with no scope
+  limit, and the canonical abuse is in its own stdlib: `<<` for stream
+  output, a bit-shift repurposed as I/O. Haskell goes further and lets
+  users *invent* operators, producing libraries whose type signatures
+  are unreadable without a glossary.
+- **1995 → 2004** — Java's `Comparable`: one `compareTo` returning
+  negative/zero/positive, driving every ordering in the collections
+  library. No operator overloading at all, so `<` never applies to a
+  user type — the trade that makes Java verbose and unambiguous.
+  `Double.compare` (1997) is explicitly a *total* order with NaN last,
+  documented as inconsistent with `==`, because a sort cannot survive
+  a partial one.
+- **2015** — Rust ships `PartialOrd` *and* `Ord`, split to keep floats
+  honest: `f64` is `PartialOrd` only, so it cannot key a `BTreeMap`.
+  Correct, and the single most-complained-about corner of Rust's
+  numeric surface — two traits, four derive combinations, and
+  `sort_by(|a, b| a.partial_cmp(b).unwrap())` as folk idiom. Rust adds
+  `f64::total_cmp` in 2021, which is Java's 1997 answer arriving
+  twenty-four years later.
+- **2014 → 2022** — Swift's `Comparable` and Go's `cmp.Ordered` both
+  take the single-trait route, both post-dating Rust's split and
+  neither copying it.
+
+**Glide takes** the single trait: one `cmp`, all four comparison
+operators, Java/Swift/Go's shape rather than Rust's split, with
+`Float.cmp` a stated total order (NaN last, NaN equal to itself) so
+sorting cannot lose elements. Operator overloading stays scoped to
+arithmetic and comparison, C++'s `<<`-for-IO being the standing
+argument for a fence. **No `Eq`**: `==` is structural and universal
+and cannot be redefined, which is Go's position, because the feature
+`Eq` enables is a type that lies about being equal to itself.
+Ordering is hand-written until `derive` — automatic structural
+ordering would let field *declaration order* silently decide sort
+order, which is the bug Rust's mandatory `#[derive(Ord)]` exists to
+prevent.
+
 ## Numbers: sized ints, signed sizes, honest literals
 
 - **1972** — C's `int` means "whatever the machine likes"; forty

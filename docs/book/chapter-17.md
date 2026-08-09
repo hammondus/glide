@@ -853,8 +853,11 @@ be extended for years.
 - ✓: conformance is verified — a declared `impl Trait for Type` that
   does not satisfy the trait is a compile error, and `Self` is a real
   type.
+- ✓: `Ord` drives `< <= > >=` for types that declare it, and
+  `sorted()` uses the same comparison. `==` deliberately does not go
+  through a trait — equality stays structural and unredefinable.
 - ○: the orphan rule, `any Trait`, trait composition (`trait A: B + C`),
-  and operator traits — `a < b` on a `T: Ord` still passes unchecked.
+  arithmetic operator traits (`Add`, `Mul`), and `derive Ord`.
 
 **Exercises**
 

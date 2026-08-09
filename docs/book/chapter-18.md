@@ -237,10 +237,11 @@ anything it said would be a guess. So the two spellings mean different
 things — `<T>` says "any type, and I will not touch it"; `<T: Ord>`
 says "any ordered type, and here is exactly what I may do".
 
-One piece is still missing, and it is worth knowing which: **operators**
-on a bounded `T`. `a < b` where `T: Ord` passes unchecked, because that
-needs operator traits, which are designed and not yet built. Methods
-are checked; operators wait.
+Operators on a bounded `T` are checked too, as of the `Ord` landing:
+`a < b` where `T: Ord` resolves through the trait, and where `T` is
+bounded by something else it is an error naming the bound. Only the
+*arithmetic* operator traits (`Add`, `Mul`) are still ○ — nothing yet
+needs them.
 
 Note the *interpreter* needs no monomorphisation for any of this: it
 runs generics type-erased and still enforces every rule statically.

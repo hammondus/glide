@@ -36,8 +36,20 @@ an import. Both are reserved: a program cannot redeclare them.
 
 | Trait | Requires | Notes |
 |---|---|---|
-| `Ord` | `cmp(self, other: Self) -> Int` | three-way ordering |
+| `Ord` | `cmp(self, other: Self) -> Int` | three-way ordering; drives `< <= > >=` and `sorted()` |
 | `Iterable<T>` | `iter(self) -> Iterator<T>` | what `for … in` consumes |
+
+**`Ord` drives all four comparison operators** from the one `cmp`, and
+`sorted()` uses the same path, so `a < b` and a sort can never
+disagree. `==` does **not** go through a trait: equality is structural,
+universal, and cannot be redefined.
+
+`Float`'s `cmp` is a **total** order — NaN sorts after every number and
+equals itself, `-0.0` compares equal to `0.0` — so `nan.cmp(nan)` is 0
+while `nan == nan` is `false`. Deliberate, and the same split Java's
+`Double.compare` and Rust's `total_cmp` ship: a sort needs a total
+order, equality has to obey IEEE 754. A partial `cmp` would let sorting
+a list containing NaN silently drop elements.
 
 The set is deliberately two. A universe trait names machinery that
 *already runs*: `Int` and `String` both have `cmp`, and the evaluator

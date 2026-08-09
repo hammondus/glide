@@ -6,9 +6,10 @@ File extension: `.gld`. Status: M1–M3 shipped, and M4 is landing — the
 tree-walking interpreter runs the whole ratified surface and
 type-checks it first, in both tiers, with no way to opt out (see
 `glide/DESIGN-DECISIONS.md`). M4c has landed sized numerics, explicit
-numeric conversion, generic bound checking and trait conformance.
-Remaining checker work: match exhaustiveness, boxed `Option`, generator
-element types, and operator traits.
+numeric conversion, generic bound checking, trait conformance and the
+`Ord` operator trait. Remaining checker work: match exhaustiveness,
+boxed `Option`, generator element types, and the arithmetic operator
+traits.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee
@@ -423,6 +424,57 @@ Mechanics:
   flow), not assignment, no user-invented operators (Haskell's operator
   soup; C++'s `<<`-for-IO). Rust's decade at exactly this scope shows it
   doesn't get abused.
+
+  **`Ord` shipped in M4c; the arithmetic half has not.** Four decisions
+  came with it:
+
+  1. **One `cmp` drives all four of `< <= > >=`.** No `PartialOrd`/`Ord`
+     split — that exists in Rust almost entirely for floats and is its
+     most-complained-about numeric wart (two traits, four derive
+     combinations, `f64` that cannot key a `BTreeMap`). Java, Swift,
+     Kotlin and Go's `cmp.Ordered` all use one.
+
+     Builtins never route through the trait: `1.5 < 2.5` is handled
+     directly, exactly as before. `Ord` is what a *user* type declares
+     to join in. Builtins satisfy it structurally for the generic case,
+     and `Float`'s `cmp` is a stated **total** order — NaN sorts last
+     and equals itself — so `NaN.cmp(NaN)` is 0 while `NaN == NaN` is
+     false. That is Java's `Double.compare` and Rust's `total_cmp`; a
+     partial `cmp` would let sorting a list containing NaN silently
+     lose elements.
+  2. **`==` stays structural and universal. There is no `Eq`.**
+     `P{n:1} == P{n:1}` needs no declaration and never did. Requiring
+     `Eq` would break every existing struct comparison and buy nothing:
+     there is no reference-vs-value equality to disambiguate (Go's
+     problem), no `Hash`/`Eq` consistency contract to enforce, and the
+     main thing `Eq` enables — *redefining* `==` — is the thing this
+     section already bans. Overloaded equality is how a type comes to
+     lie about being equal to itself. Custom equality is a `.equals()`
+     method or a `distinct` type.
+  3. **No `Add`/`Mul` yet.** Same admission rule as the universe
+     traits: answer a forcing need. `Ord` had one — `sorted()` on a
+     struct failed, and `tree.gld` needs `<`. `Add` has none, and
+     shipping it drags in questions with no forcing answer (is
+     `Duration + Duration`, builtin today, retrofitted onto `Add`? is
+     `-` a `Sub`, or `Neg` plus `Add`?).
+  4. **`Ord` is hand-written; never derived automatically.** Automatic
+     structural ordering would make *field declaration order* silently
+     decide sort order, so reordering fields — a refactor everyone
+     believes is safe — silently changes what `sorted()` does. Rust
+     requires `#[derive(Ord)]` for exactly this reason; `derive Ord`
+     joins the comptime-era list beside `Debug`/`Json`/`Enum`.
+
+     Deliberately asymmetric with (2), and the asymmetry is the point:
+     **equality has one obvious meaning** (all fields equal) while
+     **ordering has n!** (which field first). That is why Go gives
+     `==` free and no ordering at all.
+
+  One consequence recorded rather than hidden: `a < b` on an
+  *unbounded* `<T>` is silent, consistent with the method rule.
+  Rust rejects it — a bare `<T>` there supports no operation at all.
+  Glide under-approximates instead, so an unbounded parameter never
+  produces a false positive. Revisit if the silence ever hides a real
+  bug.
 - **Deliberately absent**: platform-sized ints, `f16` (ML niche,
   stdlib-or-never), `complex64/128` (Go shipped them as primitives;
   barely used — a library's job).

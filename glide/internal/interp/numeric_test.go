@@ -310,3 +310,89 @@ fn main() {
 		t.Fatalf("output:\n%q", out)
 	}
 }
+
+// Float's `cmp` is a TOTAL order, which IEEE 754 is not: NaN sorts
+// after every number and equals itself. So `NaN.cmp(NaN)` is 0 while
+// `NaN == NaN` is false. That inconsistency is deliberate — a sort
+// needs a total order, equality has to obey IEEE — and it is what
+// Java's Double.compare and Rust's total_cmp both ship. A partial
+// `cmp` would let sorting a list containing NaN silently lose
+// elements.
+func TestFloatTotalOrder(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    let nan = 0.0 / 0.0
+    let inf = 1.0 / 0.0
+    println(nan.cmp(nan))
+    println(nan.cmp(1.0))
+    println((1.0).cmp(nan))
+    println(nan.cmp(inf))
+    println((0.0).cmp(0.0 - 0.0))
+    println(nan == nan)
+    println([1.0, nan, 0.0 - 1.0].sorted())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"0",            // NaN equals itself under cmp
+		"1",            // NaN sorts after a number
+		"-1",           // and a number before NaN
+		"1",            // NaN even after infinity
+		"0",            // -0.0 and 0.0 compare equal, matching ==
+		"false",        // but == stays IEEE
+		"[-1, 1, NaN]", // so a sort puts NaN last instead of losing it
+	}, "\n") + "\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// `<` on a user type calls its `cmp`, and `sorted()` uses the same
+// path — having those two disagree would be silent and visible only
+// in the output order.
+func TestUserTypeOrderingUsesOneComparison(t *testing.T) {
+	out, err := runProg(t, `
+type P = struct { n: Int }
+impl Ord for P {
+    // Deliberately REVERSED, so the test can tell that the method is
+    // really being called rather than fields being compared.
+    fn cmp(self, other: Self) -> Int { other.n - self.n }
+}
+fn main() {
+    let a = P{ n: 1 }
+    let b = P{ n: 2 }
+    println("{a < b} {a <= b} {a > b} {a >= b}")
+    println([a, b].sorted())
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "false false true true\n[P{ n: 2 }, P{ n: 1 }]\n"
+	if out != want {
+		t.Fatalf("output:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// Equality is untouched by Ord: structural, universal, needing no
+// declaration and offering no way to redefine it.
+func TestEqualityStaysStructural(t *testing.T) {
+	out, err := runProg(t, `
+type P = struct { n: Int }
+impl Ord for P {
+    fn cmp(self, other: Self) -> Int { 0 }   // "everything is equal"
+}
+fn main() {
+    println(P{ n: 1 } == P{ n: 1 })
+    println(P{ n: 1 } == P{ n: 2 })
+    println(P{ n: 1 } <= P{ n: 2 })
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// cmp says "equal" for every pair, and == still disagrees: it never
+	// consulted the trait.
+	if out != "true\nfalse\ntrue\n" {
+		t.Fatalf("output:\n%q", out)
+	}
+}

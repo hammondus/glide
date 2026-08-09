@@ -322,7 +322,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			}
 			return StrV(strings.Repeat(string(r), int(k)))
 		}
-	case IntV, UintV, SizedV:
+	case IntV, UintV, SizedV, FloatV, RuneV:
 		if out, handled := intMethod(r, name, args, at); handled {
 			return out
 		}
@@ -339,7 +339,7 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 			func() {
 				defer func() { sortErr = recover() }()
 				sort.SliceStable(out.Elems, func(i, j int) bool {
-					return naturalLess(out.Elems[i], out.Elems[j], at)
+					return in.less(out.Elems[i], out.Elems[j], at)
 				})
 			}()
 			if sortErr != nil {
@@ -665,45 +665,137 @@ func (in *Interp) methodCall(recv Value, name string, args []Value, at source.Sp
 				if !ok {
 					return acc
 				}
-				acc = binop("+", acc, v, at)
+				acc = in.binop("+", acc, v, at)
 			}
 		}
 	}
 	panic(rtErr{at, fmt.Sprintf("%s has no method %q", typeName(recv), name)})
 }
 
+// userCmp orders two values of the same user type through the `cmp`
+// method Ord requires. Reports ok=false for anything that is not a
+// matching pair of user types, so builtins fall through to the
+// built-in comparisons untouched.
+func (in *Interp) userCmp(l, r Value, at source.Span) (int, bool) {
+	tn := typeName(l)
+	if typeName(r) != tn {
+		return 0, false
+	}
+	switch l.(type) {
+	case *StructV, *VariantV, *DistinctV:
+	default:
+		return 0, false
+	}
+	m := in.findMethod(tn, "cmp", at)
+	if m == nil {
+		return 0, false
+	}
+	res := in.callFuncSelf(m, l, []Value{r})
+	n, ok := res.(IntV)
+	if !ok {
+		panic(rtErr{at, fmt.Sprintf("%s.cmp must return an Int, got %s", tn, typeName(res))})
+	}
+	return int(n), true
+}
+
+func isOrderOp(op string) bool {
+	switch op {
+	case "<", "<=", ">", ">=":
+		return true
+	}
+	return false
+}
+
+// naturalLess is the ordering `sorted()` uses. It is defined as
+// totalCmp so the two can never disagree — `a.cmp(b) < 0` and
+// `sorted()` must agree about every pair, and having written them
+// separately once is how NaN would end up ordered one way by the
+// method and another by the sort.
 func naturalLess(a, b Value, at source.Span) bool {
-	if x, ok := a.(IntV); ok {
+	return builtinCmp(a, b, at) < 0
+}
+
+// less is naturalLess plus user types, so `sorted()` and `<` order a
+// value the same way. Having those two disagree would be the worst
+// kind of bug: silent, and visible only in the output order.
+func (in *Interp) less(a, b Value, at source.Span) bool {
+	if n, ok := in.userCmp(a, b, at); ok {
+		return n < 0
+	}
+	return builtinCmp(a, b, at) < 0
+}
+
+// builtinCmp is the three-way comparison of two builtin values of the
+// same type: negative, zero, positive.
+//
+// Float is a **total** order, which IEEE 754 is not: NaN sorts after
+// every number and equals itself, and -0.0 compares equal to 0.0. So
+// `NaN.cmp(NaN)` is 0 while `NaN == NaN` is false. That inconsistency
+// is deliberate and is what Java's Double.compare and Rust's
+// total_cmp both ship — a sort needs a total order, and equality has
+// to obey IEEE. Making cmp partial instead would mean sorting a list
+// containing NaN could silently lose elements.
+func builtinCmp(a, b Value, at source.Span) int {
+	switch x := a.(type) {
+	case IntV:
 		if y, ok := b.(IntV); ok {
-			return x < y
+			return cmpOrdered(x, y)
 		}
-	}
-	if x, ok := a.(UintV); ok {
+	case UintV:
 		if y, ok := b.(UintV); ok {
-			return x < y
+			return cmpOrdered(x, y)
 		}
-	}
-	if x, ok := a.(SizedV); ok {
+	case SizedV:
 		if y, ok := b.(SizedV); ok && x.Bits == y.Bits && x.Signed == y.Signed {
-			return x.V < y.V
+			return cmpOrdered(x.V, y.V)
 		}
-	}
-	if x, ok := a.(StrV); ok {
+	case StrV:
 		if y, ok := b.(StrV); ok {
-			return x < y
+			return cmpOrdered(x, y)
 		}
-	}
-	if x, ok := a.(FloatV); ok {
-		if y, ok := b.(FloatV); ok {
-			return x < y
-		}
-	}
-	if x, ok := a.(RuneV); ok {
+	case RuneV:
 		if y, ok := b.(RuneV); ok {
-			return x < y
+			return cmpOrdered(x, y)
+		}
+	case FloatV:
+		if y, ok := b.(FloatV); ok {
+			return floatCmp(float64(x), float64(y))
+		}
+	case DurationV:
+		if y, ok := b.(DurationV); ok {
+			return cmpOrdered(x, y)
 		}
 	}
 	panic(rtErr{at, fmt.Sprintf("cannot order %s against %s", typeName(a), typeName(b))})
+}
+
+func cmpOrdered[T int64 | uint64 | string | rune | IntV | UintV | StrV | RuneV | DurationV](a, b T) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// floatCmp is the total order described on builtinCmp: NaN last, NaN
+// equal to itself, -0.0 equal to 0.0.
+func floatCmp(a, b float64) int {
+	an, bn := math.IsNaN(a), math.IsNaN(b)
+	switch {
+	case an && bn:
+		return 0
+	case an:
+		return 1
+	case bn:
+		return -1
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // iterate adapts any iterable to a next() function for `for … in`.

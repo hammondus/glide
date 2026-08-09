@@ -17,8 +17,8 @@ The checker reports only what it is certain of — anything it does not
 yet model is treated as unknown and passes in silence — so a ✓ row
 means "checked or enforced", and the rows still marked ○ are the ones
 where the *evaluator* is the only thing standing between you and the
-mistake. Generic bound checking and trait conformance landed in
-**M4c**; match exhaustiveness is what remains.
+mistake. Generic bound checking, trait conformance and `Ord` landed
+in **M4c**; match exhaustiveness is what remains.
 
 ## Source files
 
@@ -238,9 +238,11 @@ Angle brackets, never square. **No turbofish, ever.**
   fully opaque — the checker genuinely knows nothing about it, so it
   says nothing. That asymmetry is the point: a bound is what turns a
   type parameter from a hole into a surface.
-- Operators on a bounded `T` are still silent ○ — `a < b` where
-  `T: Ord` needs *operator traits*, which are designed and not yet
-  built. Methods are checked; operators wait.
+- **Ordering routes through `Ord`** ✓: `< <= > >=` on a user type
+  require a declared `impl Ord`, and on a `T: Ord` they are checked.
+  `a < b` on a `T` bounded by something else is an error naming the
+  bound. An *unbounded* `<T>` stays silent, consistently with methods.
+  Arithmetic operator traits (`Add`, `Mul`) are still ○.
 - Bounds are inline colon lists only: `<T: Ord + Hash>`. Unconstrained
   is bare `<T>` — no `[T any]` ceremony. **No `where` clause** in v0:
   two ways to write bounds violates house rules ✓ (parsed).

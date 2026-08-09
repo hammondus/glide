@@ -526,6 +526,37 @@ or it is a bug.
   inherited now; a requirement is a demand on the type, not a method
   it acquires.
 
+- **`binop` became a method so ordering could reach `findMethod`.**
+  Seven call sites, mechanically converted. The alternative was to
+  intercept user-type comparisons at the two call sites that can see
+  one and hope the other five never do; putting the dispatch inside
+  `binop` means there is one place to read and no site that can be
+  forgotten.
+
+- **`sorted()` and `<` share one comparison path.** `in.less` tries
+  the user `cmp` and falls back to `builtinCmp`; `binop`'s ordering
+  branch calls the same `userCmp`. Two implementations that are
+  *meant* to agree about every pair would disagree first about NaN and
+  then about someone's reversed `cmp`, and the symptom is output in
+  the wrong order with nothing to grep for.
+
+- **`naturalLess` is now defined as `builtinCmp(...) < 0`** rather
+  than a parallel switch, for the same reason at the builtin level.
+  That is also what made `Float`'s total order a single edit instead
+  of two that drift.
+
+- **A primitive's empty method set is now *known*, not unmodelled.**
+  `builtinMethod` returned `modelled=false` for `Float`, `Rune`,
+  `Bool`, `()` and tuples, which meant conformance saw "cannot judge"
+  and stayed silent — so `Bool` satisfied `Ord` vacuously, `T: Ord`
+  accepted it, and the call died at runtime with `Bool has no method
+  "cmp"`. The tables *are* the whole truth about a primitive, so
+  silence there was a wrong answer rather than caution. `Unknown` and
+  `Never` still report `false`, which is the only correct silence.
+
+  `Float`/`F32`/`Rune` gained a real `cmp` in the same change
+  (`ordMethods`), so their conformance is earned rather than vacuous.
+
 - **A tuple literal's expected element types win, as a list
   literal's already did.** `checkExpr` pushed the expectation into
   each slot and then rebuilt the tuple's type from
@@ -582,28 +613,18 @@ or it is a bug.
 
 ## Remaining in M4c
 
-Sized numerics, explicit conversion, bound checking and trait
-conformance are **done** (see the decisions above). Still open, in the
+Sized numerics, explicit conversion, bound checking, trait conformance
+and the `Ord` operator trait are **done** (see the decisions above).
+Arithmetic operator traits (`Add`, `Mul`) are not, and nothing yet
+needs them. Still open, in the
 order they are worth doing:
 
-1. **Operator traits.** The half of `Ord` that bound checking
-   deliberately did not deliver: `a < b` on a `T: Ord` still passes in
-   silence, because operators consult `IsOpaque` where methods now
-   consult `modelled`. This is why `examples/tree.gld` — the flagship
-   generic in the repo, whose `insert_node<T: Ord>` compares with
-   `<` — is checked everywhere except the line that motivates its
-   bound. It was split out because it carries four unsettled language
-   decisions of its own: does `Ord` drive all of `< <= > >=`; does
-   `==` go through `Eq` or stay structural (it is structural today);
-   do `Add`/`Mul` exist and does `+` on a user type dispatch through
-   them; is `Ord` derived for structs or hand-written. Those belong in
-   their own commit where they are visible.
-2. **Boxed `Option`.** A key present in a `Map<K, V?>` holding `None`
+1. **Boxed `Option`.** A key present in a `Map<K, V?>` holding `None`
    is indistinguishable from an absent key — real data loss, and the
    only remaining *wrong answer* rather than a missing diagnostic. The
    most invasive change left: runtime representation as well as
    checker.
-3. The cheaper leftovers: static match exhaustiveness (the runtime
+2. The cheaper leftovers: static match exhaustiveness (the runtime
    catches it, and its message still says "exhaustiveness checking
    arrives with the compiler" — now the checker's job), the
    spawn-captures-mut ban, generator element types (a `yield`ing

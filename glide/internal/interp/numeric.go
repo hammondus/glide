@@ -322,6 +322,11 @@ var wrappingOps = map[string]string{
 // keeping the two in step is the point of having a single table on
 // each side. It reports handled=false for a name it does not know, so
 // the caller still produces the ordinary "no method" error.
+//
+// Float and Rune arrive here too, for `cmp` alone: they satisfy Ord
+// and nothing else, matching check.ordMethods. The wrapping_* family
+// rejects them below, because wrappingConvert and wrappingBinop have
+// no case for a float and Rune is deliberately not an integer.
 func intMethod(recv Value, name string, args []Value, at source.Span) (Value, bool) {
 	switch name {
 	case "cmp":
@@ -329,13 +334,7 @@ func intMethod(recv Value, name string, args []Value, at source.Span) (Value, bo
 		if typeName(o) != typeName(recv) {
 			panic(rtErr{at, fmt.Sprintf("%s.cmp compares against another %s, got %s", typeName(recv), typeName(recv), typeName(o))})
 		}
-		switch {
-		case naturalLess(recv, o, at):
-			return IntV(-1), true
-		case naturalLess(o, recv, at):
-			return IntV(1), true
-		}
-		return IntV(0), true
+		return IntV(builtinCmp(recv, o, at)), true
 	case "wrapping_add", "wrapping_sub", "wrapping_mul":
 		o := one(name, args, at)
 		out := wrappingBinop(wrappingOps[name], recv, o)

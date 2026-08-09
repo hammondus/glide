@@ -598,7 +598,7 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 			if b == nil {
 				panic(rtErr{st.Span, fmt.Sprintf("assignment to undeclared name %q (declare it with let)", t.Name)})
 			}
-			rhs = binop(strings.TrimSuffix(st.Op, "="), b.v, rhs, st.Span)
+			rhs = in.binop(strings.TrimSuffix(st.Op, "="), b.v, rhs, st.Span)
 		}
 		env.assign(t.Name, rhs, st.Span)
 		return nil
@@ -619,7 +619,7 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 				if !ok {
 					panic(rtErr{st.Span, fmt.Sprintf("%s on a key that is not present; read with ?? or insert with = first", st.Op)})
 				}
-				rhs = binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Span)
+				rhs = in.binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Span)
 			}
 			o.set(k, rhs)
 			return nil
@@ -632,7 +632,7 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 				panic(rtErr{st.Span, fmt.Sprintf("list index %d out of range (len %d)", i, len(o.Elems))})
 			}
 			if st.Op != "=" {
-				rhs = binop(strings.TrimSuffix(st.Op, "="), o.Elems[i], rhs, st.Span)
+				rhs = in.binop(strings.TrimSuffix(st.Op, "="), o.Elems[i], rhs, st.Span)
 			}
 			o.Elems[i] = rhs
 			return nil
@@ -652,7 +652,7 @@ func (in *Interp) evalAssign(st *ast.AssignStmt, env *Env) *sig {
 			panic(rtErr{st.Span, fmt.Sprintf("%s has no field %q", sv.Type, t.Name)})
 		}
 		if st.Op != "=" {
-			rhs = binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Span)
+			rhs = in.binop(strings.TrimSuffix(st.Op, "="), cur, rhs, st.Span)
 		}
 		sv.Fields[t.Name] = rhs
 		return nil
@@ -1641,17 +1641,36 @@ func (in *Interp) evalBinary(ex *ast.Binary, env *Env) (Value, *sig) {
 	if sg != nil {
 		return UnitV{}, sg
 	}
-	return binop(ex.Op, l, r, ex.Span), nil
+	return in.binop(ex.Op, l, r, ex.Span), nil
 }
 
-func binop(op string, l, r Value, at source.Span) Value {
+func (in *Interp) binop(op string, l, r Value, at source.Span) Value {
 	// Equality is structural for every comparable type; ordered
 	// comparisons stay per-type below.
 	switch op {
 	case "==":
+		// Equality stays structural and universal: no Eq trait, no
+		// declaration, no way to redefine it (DESIGN.md). Ord governs
+		// ordering only.
 		return BoolV(eq(l, r, at))
 	case "!=":
 		return BoolV(!eq(l, r, at))
+	}
+	// Ordering a user type goes through its `cmp`, which the checker
+	// has already established exists — `impl Ord for T` is verified,
+	// and `<` on a type that never declared it is a compile error.
+	if isOrderOp(op) {
+		if n, ok := in.userCmp(l, r, at); ok {
+			switch op {
+			case "<":
+				return BoolV(n < 0)
+			case "<=":
+				return BoolV(n <= 0)
+			case ">":
+				return BoolV(n > 0)
+			}
+			return BoolV(n >= 0)
+		}
 	}
 	if li, ok := l.(IntV); ok {
 		if ri, ok := r.(IntV); ok {
@@ -2096,7 +2115,7 @@ func (in *Interp) evalExpect(ex *ast.Call, env *Env) (Value, *sig) {
 			if sg != nil {
 				return UnitV{}, sg
 			}
-			res := binop(b.Op, l, r, b.Span)
+			res := in.binop(b.Op, l, r, b.Span)
 			if res == BoolV(true) {
 				return UnitV{}, nil
 			}

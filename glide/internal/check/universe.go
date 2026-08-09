@@ -130,6 +130,13 @@ var intMethods = func() map[string]*types.Func {
 	return m
 }()
 
+// ordMethods is what a type needs to satisfy Ord, and nothing more.
+// Float and Rune get exactly this: the wrapping_* family is
+// integer-only, and Rune is deliberately not an integer.
+var ordMethods = map[string]*types.Func{
+	"cmp": meth(types.Int, p("other", tvSelf)),
+}
+
 // Duration constructors are suffix *properties* on a number, not
 // calls: `250.ms`, `0.5.s`. They are looked up as fields, which is
 // why they are a set of names rather than signatures.
@@ -318,6 +325,11 @@ func Host() program.Known {
 func builtinMethod(recv types.Type, name string) (fn *types.Func, modelled bool) {
 	switch r := recv.(type) {
 	case *types.Basic:
+		// Unknown and Never are the two the checker must stay quiet
+		// about: one means "not yet known", the other "unreachable".
+		if r.IsUnknown() || r.IsNever() {
+			return nil, false
+		}
 		switch {
 		case r == types.String:
 			return stringMethods[name], true
@@ -326,14 +338,17 @@ func builtinMethod(recv types.Type, name string) (fn *types.Func, modelled bool)
 			// `cmp` or `wrapping_add` is a type you cannot compute
 			// with. Self binds to the receiver — defaulted first, so
 			// an untyped literal's methods are Int's.
-			sig := intMethods[name]
-			if sig == nil {
-				return nil, true
-			}
-			f, _ := types.Subst(sig, map[string]types.Type{"Self": types.Default(r)}).(*types.Func)
-			return f, true
+			return selfBound(intMethods[name], r), true
+		case r.IsFloat() || r.IsRune():
+			return selfBound(ordMethods[name], r), true
 		}
-		return nil, false
+		// Bool and () have no methods, and that is a *known* empty
+		// set rather than an unmodelled one — the tables above are the
+		// whole truth about a primitive. Reporting `false` here was
+		// what let Bool satisfy any trait vacuously: conformance saw
+		// "not modelled" and stayed silent, so `T: Ord` accepted a
+		// Bool and the call died at runtime.
+		return nil, true
 	case *types.App:
 		tab, ok := ctorMethods[r.C]
 		if !ok {
@@ -346,6 +361,16 @@ func builtinMethod(recv types.Type, name string) (fn *types.Func, modelled bool)
 		return instantiate(sig, r), true
 	}
 	return nil, false
+}
+
+// selfBound substitutes a primitive receiver for `Self`, defaulting
+// first so an untyped literal's methods are its default type's.
+func selfBound(sig *types.Func, recv *types.Basic) *types.Func {
+	if sig == nil {
+		return nil
+	}
+	f, _ := types.Subst(sig, map[string]types.Type{"Self": types.Default(recv)}).(*types.Func)
+	return f
 }
 
 // instantiate binds a builtin signature's T/U/K/V from the receiver's

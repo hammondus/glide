@@ -1,0 +1,29 @@
+// Ordering requires a *declared* `impl Ord`. Having a `cmp` is not
+// enough — conformance is declared, and that rule does not weaken
+// just because an operator is doing the asking rather than a bound.
+type HasCmp = struct { n: Int }
+impl HasCmp { fn cmp(self, other: Self) -> Int { self.n - other.n } }
+
+type NoCmp = struct { n: Int }
+
+trait Greet { fn hello(self) -> String }
+
+fn wrong_bound<T: Greet>(a: T, b: T) -> Bool {
+    a < b                   // error: it is bounded by Greet, which is not Ord
+}
+
+// Unbounded stays silent, deliberately and consistently with methods:
+// with no bound the checker knows nothing, so it says nothing. This is
+// stricter in Rust, where a bare <T> supports no operation at all —
+// the difference is recorded in DESIGN.md.
+fn unbounded<T>(a: T, b: T) -> Bool {
+    a < b
+}
+
+fn main() {
+    println(HasCmp{ n: 1 } < HasCmp{ n: 2 })   // error: it does not implement Ord
+    println(NoCmp{ n: 1 } < NoCmp{ n: 2 })     // error: it does not implement Ord
+    println(true < false)                      // error: operator < is not defined for Bool and Bool
+    println(wrong_bound(1, 2))                 // error: Int does not implement Greet
+    println(unbounded(1, 2))
+}

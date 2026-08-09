@@ -95,7 +95,9 @@ working through the book.
 | `Self` as a type; trait defaults checked against `Self: Trait` | ✓ | 17 |
 | Generic bound checking; a bound is the complete method set | ✓ | 18 |
 | Universe traits `Ord`, `Iterable` | ✓ | 17 |
-| Operator traits (`a < b` on a `T: Ord`) | ○ | 18 |
+| `Ord` drives `< <= > >=`; `sorted()` shares the path | ✓ | 17, 18 |
+| `==` structural, no `Eq` trait, not redefinable | ✓ | 5, 17 |
+| Arithmetic operator traits (`Add`, `Mul`), `derive Ord` | ○ | 18 |
 | Trait composition `trait A: B + C` | ○ | 17 |
 | `any Trait` (boxed trait objects) | ○ | 17 |
 | Orphan rule | ○ | 17 |

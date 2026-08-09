@@ -1,0 +1,56 @@
+// Ordering goes through `Ord`: one `cmp` drives all four of
+// `< <= > >=`. No `PartialOrd`/`Ord` split — that exists in Rust
+// almost entirely for floats, and is its most-complained-about
+// numeric wart.
+//
+// `==` is deliberately NOT here. Equality stays structural and
+// universal: no `Eq` trait, no declaration, no way to redefine it.
+// Equality has one obvious meaning (all fields equal); ordering has
+// n! (which field first), which is also why `Ord` is hand-written
+// rather than derived.
+type P = struct { n: Int, tag: String }
+
+impl Ord for P {
+    fn cmp(self, other: Self) -> Int { self.n - other.n }
+}
+
+// A distinct type orders the same way — it inherits no operators from
+// its base (an id is not a quantity), so it declares its own.
+type NoteId = distinct Int
+
+impl Ord for NoteId {
+    fn cmp(self, other: Self) -> Int { self.value() - other.value() }
+}
+
+// The generic that motivated the whole thing: a bound that finally
+// makes `<` mean something inside the body.
+fn biggest<T: Ord>(a: T, b: T) -> T {
+    if a < b { b } else { a }
+}
+
+fn main() {
+    let a = P{ n: 1, tag: "a" }
+    let b = P{ n: 2, tag: "b" }
+
+    // All four operators, from the one cmp.
+    println("{a < b} {a <= b} {a > b} {a >= b}")
+
+    // Equality needs no impl and never did.
+    println(a == a)
+    println(a == b)
+
+    println(biggest(a, b).tag)
+    println(NoteId(3) < NoteId(9))
+
+    // sorted() orders a user type the same way `<` does — they share
+    // one comparison path, so they cannot disagree.
+    println([b, a].sorted())
+
+    // Builtins never route through the trait: they keep the built-in
+    // comparison, and satisfy Ord structurally for the generic case.
+    println(biggest(3, 7))
+    println(biggest("x", "y"))
+    println(biggest(1.5, 2.5))
+    println(biggest('a', 'z'))
+    println([3.0, 1.0, 2.0].sorted())
+}

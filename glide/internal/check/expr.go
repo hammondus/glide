@@ -409,6 +409,13 @@ func (c *checker) binary(x *ast.Binary) types.Type {
 // binaryResult is the operator table. It is shared with compound
 // assignment, so `xs[i] += 1` and `xs[i] + 1` cannot disagree.
 func (c *checker) binaryResult(op string, l, r types.Type, at source.Span) types.Type {
+	// Ordering through the Ord trait, for the receivers the built-in
+	// switch below does not cover. Ahead of the opaque guard because a
+	// *bounded* type parameter is exactly what it must catch, and that
+	// guard would swallow it.
+	if t := c.orderOp(op, l, r, at); t != nil {
+		return t
+	}
 	if types.IsOpaque(l) || types.IsOpaque(r) {
 		if isComparison(op) {
 			return types.Bool
@@ -458,6 +465,54 @@ func (c *checker) binaryResult(op string, l, r types.Type, at source.Span) types
 		return types.Bool
 	}
 	return types.Unknown
+}
+
+// orderOp types `< <= > >=` for user types and type parameters, which
+// order through `Ord`. It returns nil for anything that is not its
+// business, so builtins keep the built-in comparison entirely —
+// `1.5 < 2.5` never routes through a trait, and nothing that runs
+// today changes shape.
+//
+// This is the operator half of bounds, and it is the reason
+// `examples/tree.gld` — whose `insert_node<T: Ord>` compares with
+// `<` — is finally checked on the line that motivates its bound.
+func (c *checker) orderOp(op string, l, r types.Type, at source.Span) types.Type {
+	if !isOrderOp(op) {
+		return nil
+	}
+	switch l.(type) {
+	case *types.Named, *types.Var:
+	default:
+		return nil
+	}
+	// Anything unknown on either side, or a mismatched pair: not this
+	// function's error to report.
+	if types.IsUnknown(l) || types.IsUnknown(r) || !types.Compatible(l, r) {
+		return nil
+	}
+	if v, ok := l.(*types.Var); ok {
+		if len(v.Bounds) == 0 {
+			return nil // unbounded: nothing is known, so nothing is said
+		}
+		if !c.conformsTo(v, "Ord") {
+			c.errf(at, "%s cannot be ordered with %s: it is bounded by %s, which is not Ord",
+				v.Name, op, boundsOf(v))
+		}
+		return types.Bool
+	}
+	if !c.conformsTo(l, "Ord") {
+		c.errf(at, "%s cannot be ordered with %s: it does not implement Ord (add `impl Ord for %s`)",
+			l, op, l)
+	}
+	return types.Bool
+}
+
+func isOrderOp(op string) bool {
+	switch op {
+	case "<", "<=", ">", ">=":
+		return true
+	}
+	return false
 }
 
 func (c *checker) boolOperand(e ast.Expr, op string) {
