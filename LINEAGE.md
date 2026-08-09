@@ -726,6 +726,22 @@ workload is conceded.
   mistake frozen by stability promises. Kotlin/Swift reuse the same
   lessons in their channel/AsyncStream APIs: close is sender-side,
   end-of-stream is a value (`null`/`nil`), not an exception.
+- **Durations and instants** — the languages that conflated them
+  paid: JS has one `Date` (instant pretending to be calendar) and
+  raw-millisecond arithmetic; Python's `datetime` mixes naive and
+  aware objects with runtime surprises. C++ chrono (2011) proved the
+  cure: `time_point` and `duration` as distinct types, meaningless
+  operations unrepresentable. Go (2009) landed the same split
+  (`time.Time`/`time.Duration`) plus the dual wall/monotonic clock
+  (added 1.9, 2017, after real outages from NTP steps during
+  leap-second smearing), but constructs durations by multiplying
+  untyped constants (`5 * time.Second` — and `x * time.Second`
+  where x is already a Duration compiles and is wrong). Kotlin
+  (2020) added `5.seconds` extension properties — suffix
+  construction on numbers — and it wore well immediately. Go stops
+  duration units at hours because days are calendar arithmetic (DST
+  makes 23-hour days); everyone who added `.days` to a duration
+  type (JS libraries, chiefly) regrets the ambiguity.
 - **`select`'s forty-year lineage** — Occam's `ALT` (1983, the first
   CSP language on real hardware) offered guarded alternatives:
   boolean condition + channel input per branch. Rob Pike carried the
@@ -808,7 +824,14 @@ among ready, `else` for non-blocking) wearing match's syntax
 Occam's guards restored (`if cond` disables an arm — replacing
 Go's nil-channel trick) and Go's most common arm, `<-ctx.Done()`,
 designed away entirely: a blocked select is a cancellation point,
-so the scope cancels it.
+so the scope cancels it. For scope headers and time (ratified
+2026-08-09): `scope [(config)] [handle] { }` — Trio's
+config-then-handle shape riding the existing named-args machinery;
+C++ chrono's type split with Kotlin's suffix construction
+(`250.ms`, `2.mins` — `.mins` not `.min`, reserving `a.min(b)` for
+math) and Go's stop-at-hours line; the interpreter wraps Go's
+`time.Duration`/`time.Time`, inheriting the dual-clock semantics
+that took Go eight years and real outages to get right.
 
 ## Comptime, not macros
 

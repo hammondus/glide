@@ -70,6 +70,16 @@ Both halves clone (mpmc). Blocking operations here are cancellation
 points. Send transfers ownership — enforced in the checker era,
 dormant in M2.
 
+Time (all ○ — M3): `Duration` and `Instant` are distinct types.
+Constructors are Int/Float suffix methods `.ns` `.us` `.ms` `.s`
+`.mins` `.h` (`250.ms`, `0.5.s`; no `.days` — calendar arithmetic
+belongs to the future `time` module). Arithmetic: `Duration ±
+Duration`, `Duration * Int`, `Duration / Int`, comparisons;
+`Instant - Instant -> Duration`, `Instant ± Duration -> Instant`,
+comparisons. `time.now() -> Instant`; `time.sleep(d)` (cancellation
+point); `time.after(d) -> Receiver<()>`. Instant `==` compares like
+Go's `Equal` (wall+monotonic aware).
+
 ## Methods, by receiver type
 
 Dispatch is on the value's runtime type. Anything not listed is a

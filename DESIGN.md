@@ -976,6 +976,31 @@ Go's model, with its defects designed out:
   Deferred sub-question: blocking ops inside `defer` during
   cancellation — leaning Trio's answer (cleanup gets a brief grace,
   then blocking ops fail loudly), undecided.
+- **Scope grammar and time types** (ratified 2026-08-09).
+  `scope [(config)] [handle] { body }` — config-then-handle is
+  Trio's shape (`with move_on_after(5) as scope:`); the config
+  parens reuse the named-args machinery, no new syntax class. M3
+  config keys: `timeout: Duration`, `deadline: Instant` (Go's ctx
+  has both because real code wants both); `log:` reserved for the
+  ambient-logging era. Bare `scope { }` parses and is merely
+  pointless. **`Duration` and `Instant`, distinct, never conflated**
+  (what Go and C++ chrono got right): constructors are Int/Float
+  suffix methods `.ns .us .ms .s .mins .h` — `.mins` not `.min`
+  because `a.min(b)` is the obvious future math method on Int, and
+  stop at hours (Go's line — a "day" is calendar arithmetic, DST
+  makes 23-hour days; calendar belongs to the future `time`
+  module). Arithmetic, minimal: `Duration ± Duration`,
+  `Duration * Int`, `Duration / Int`, comparisons;
+  `Instant - Instant -> Duration`, `Instant ± Duration -> Instant`,
+  comparisons. No `Instant + Instant` (the operator fence makes it
+  not exist); no `Duration / Duration` (Go's float-division wart —
+  want a ratio, divide nanosecond counts explicitly). Interpreter
+  wraps Go's `time.Duration`/`time.Time` (dual wall/monotonic
+  semantics come free); `==` on Instant compares as Go's `Equal`,
+  not struct compare. M3 gets exactly three time functions:
+  `time.now() -> Instant`, `time.sleep(d)` (cancellation point),
+  `time.after(d) -> Receiver<()>`; formatting/parsing/calendars/
+  zones are the `time` module's own later design.
 - **Channels: keep them, keep `select` (Go's crown jewel), fix the
   sharp edges.** Send-on-closed, double-close, nil-channel-blocks — all
   symptoms of "anyone can close anything." Sender half and receiver

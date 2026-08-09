@@ -290,6 +290,9 @@ patterns in function signatures, ref/binding modes.
   and the explicit `wrapping_*` ops arrive with the compiler ○.
 - Green threads, channels, structured concurrency scopes: ○ (M3).
   Ratified shape for `scope`/`spawn` (design only, nothing runs yet):
+  `scope [(config)] [handle] { body }` — config keys `timeout:
+  Duration` / `deadline: Instant` via named-args syntax; handle
+  needed only to spawn.
   `s.spawn(f)` returns a `Task`; `t.join()` blocks and returns exactly
   what the closure returned (a `Result`-returning closure yields its
   `Result` — `?` it like any call). Scope exit joins all children on
