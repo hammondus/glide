@@ -463,7 +463,10 @@ func (c *checker) binaryResult(op string, l, r types.Type, at source.Span) types
 		// evaluator reports as "not comparable"; here it is caught
 		// whether or not the line runs.
 		if types.Join(l, r) == nil {
-			c.errf(at, "%s and %s can never be equal", l, r)
+			// Defaulted, so a literal is named by the type it would
+			// become: "untyped integer and String can never be equal"
+			// names a type that appears nowhere in the language.
+			c.errf(at, "%s and %s can never be equal", types.Default(l), types.Default(r))
 		}
 		return types.Bool
 	}

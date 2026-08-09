@@ -1577,6 +1577,42 @@ incident generator). The out-list is discipline too: no GUI, no ORM,
 no ML, ever; protocol clients with living peripheries (SMTP) live on
 the `x/` porch where they can churn at the world's speed.
 
+## Equality: structural, universal, and order-blind for maps
+
+- **1991–2018** — Python's dict goes from unordered, to
+  insertion-ordered as a CPython 3.6 implementation detail, to
+  *guaranteed* insertion-ordered in 3.7. `==` never changes: two dicts
+  are equal when they hold the same pairs, whatever order they were
+  built in. Both properties hold at once, and nobody finds it
+  surprising, because iteration and identity are different questions.
+- **2009** — Go takes the opposite lane on both counts: map iteration
+  is deliberately *randomised* (to stop programs depending on an order
+  that was never promised), and maps are not comparable with `==` at
+  all — `reflect.DeepEqual`, later `maps.Equal`. The non-comparability
+  is a consequence of Go's `==` being defined for a fixed set of kinds
+  rather than structurally.
+- **2015** — Rust derives `PartialEq` for `HashMap`/`BTreeMap` on
+  contents alone; `HashMap` has no order to speak of and `BTreeMap`'s
+  is a total order over keys, so the question of insertion order never
+  arises for either.
+- **Counter-evidence worth naming** — Java's `List.equals` *is*
+  order-sensitive while `Set.equals` is not, and the two live under
+  one `Collection` interface. That is the shape to avoid: the rule has
+  to follow from what the collection *is*, not from which class you
+  happened to get.
+
+**Glide takes** Python's split, and states it: a Map's insertion order
+is a specified iteration property that the compiled tier must
+reproduce, and it is *not* part of the map's identity. A map is a set
+of pairs. `List` stays order-sensitive because a list is a sequence —
+the rule follows from the collection, as Java's does not. `==` remains
+structural and universal with no `Eq` trait to declare, which means
+every hole in it is a bug: `Map`, `Result`, `Error`, `Range` and
+(after boxing) `Option` were all found uncomparable and all fixed. The
+deliberate exceptions are the values with no structure — functions,
+iterators, and the concurrency handles, where `==` could only mean
+identity.
+
 ## Numerics: on the number, or in a module
 
 - **1975–1990** — C settles it for a generation: `math.h` holds

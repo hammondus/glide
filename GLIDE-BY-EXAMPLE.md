@@ -597,3 +597,46 @@ fn main() {
 }
 // error: line 2: sqrt lives in the math module and takes a Float — write math.sqrt(Float(n))
 ```
+
+## Equality
+
+`==` is structural and universal — there is no trait to declare and no
+way to redefine it. It recurses through everything with structure:
+structs, variants, tuples, lists, maps, `Result`, `Option`.
+```rust
+fn main() {
+    println([[1], [2, 3]] == [[1], [2, 3]])
+    println((1, "a") == (1, "a"))
+    println(Ok(Some(1)) == Ok(Some(1)))
+    println(Some(None) == None)
+}
+// true
+// true
+// true
+// false
+```
+
+A **Map ignores insertion order.** Order is what you get when you
+*iterate* a map, not part of what the map is — two maps holding the
+same pairs are the same map however they were built. A List stays
+order-sensitive, because a list is a sequence and a map is a set of
+pairs.
+```rust
+fn main() {
+    let mut a = ["x": 1, "y": 2]
+    let b = ["y": 2, "x": 1]
+    println(a == b)
+    println(a.keys() == b.keys())
+
+    // Removing and re-adding moves the key to the end of the
+    // iteration order, and still doesn't change what the map is.
+    let _ = a.remove("x")
+    a["x"] = 1
+    println(a.keys())
+    println(a == b)
+}
+// true
+// false
+// ["y", "x"]
+// true
+```

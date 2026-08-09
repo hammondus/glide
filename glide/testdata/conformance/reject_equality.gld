@@ -1,0 +1,23 @@
+// Universal does not mean untyped: `==` compares two values of the
+// same type. Two types that could never hold an equal pair of values
+// are rejected here rather than at runtime, whether or not the line
+// would have run.
+type Point = struct { pub x: Int, pub y: Int }
+type NoteId = distinct Int
+
+fn main() {
+    println(1 == "one")             // error: Int and String can never be equal
+    let i = 1
+    let f = 1.5
+    println(i == f)                 // error: Int and Float can never be equal
+    let n: u8 = 1
+    println(n == 1000)              // error: 1000 does not fit in u8
+    println(NoteId(1) == 1)         // error: NoteId and Int can never be equal
+    println([1] == ["a"])           // error: List<Int> and List<String> can never be equal
+    println(["a": 1] == ["a": 1.5]) // error: Map<String, Int> and Map<String, Float> can never be equal
+    println(Point{ x: 1, y: 2 } == 1) // error: Point and Int can never be equal
+
+    // An untyped literal still adapts, so this pair is fine: `1`
+    // becomes a Float, exactly as it would at a Float parameter.
+    println(1 == 1.0)
+}

@@ -996,6 +996,44 @@ satisfies `types.Type` — the only thing that noticed was
 `TestDocExamples` reporting `unknown module "time"`. An argument for
 keeping the doc examples executable.
 
+### Equality had four holes, not one
+
+`==` is specified structural and universal (`../DESIGN.md`), and the
+evaluator's switch did not implement that. `Map`, `Result`, `Error`
+and `Range` all panicked with "not comparable" while `List`, tuples,
+structs and variants worked, and boxing `Option` in M4c had quietly
+added a fifth. All closed 2026-08-09.
+
+`Ok(1) == Ok(1)` failing is the one that mattered most: it is what a
+test asserts, and the failure mode was a runtime panic in the place a
+program is least able to handle one.
+
+**A Map's insertion order is not part of its identity.** The decision,
+and the only one here with two defensible sides. Order stays a
+specified *iteration* property that the compiled tier must reproduce —
+but a map is a set of pairs, and two maps built by different routes to
+the same pairs are the same map. Python holds both properties at once
+(ordered dicts since 3.7, contents-only `==`) and nobody finds it
+surprising, because iteration and identity are different questions. A
+`List` stays order-sensitive because a list is a *sequence*: the rule
+follows from what the collection is, which is exactly what Java gets
+wrong by putting an order-sensitive `List.equals` and an order-blind
+`Set.equals` under one `Collection` interface.
+
+`Error` compares by message *and* the whole cause chain, so `context`
+is part of identity — two failures with different provenance are
+different failures.
+
+The values still not comparable are the ones with no structure:
+functions, iterators, and the concurrency handles (`Scope`, `Task`,
+`Sender`, `Receiver`). There `==` could only mean identity, and
+identity is not a question this language lets you ask.
+
+One more untyped-literal leak fixed alongside: `1 == "one"` reported
+*untyped integer and String can never be equal*, naming a type that
+appears nowhere in the language. Same defaulting fix as the "no
+method" diagnostic.
+
 **Found by using it.** Two things surfaced within ten minutes of
 writing the first real script, which is the entire argument for
 writing one:

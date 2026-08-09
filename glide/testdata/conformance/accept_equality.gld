@@ -1,0 +1,39 @@
+// `==` is structural and universal: no trait to declare, no way to
+// redefine it, and it recurses through everything that has structure.
+// A checker case as much as a runtime one — equality has to *type*
+// before it can compare, and the two sides must be the same type.
+type Colour = Red | Green
+type Point = struct { pub x: Int, pub y: Int }
+type NoteId = distinct Int
+
+fn main() {
+    // Containers, all the way down.
+    println("{[[1], [2, 3]] == [[1], [2, 3]]} {(1, "a") == (1, "a")}")
+    println("{Point{ x: 1, y: 2 } == Point{ x: 1, y: 2 }}")
+    println("{Colour.Red == Colour.Red} {Colour.Red == Colour.Green}")
+    println("{NoteId(7) == NoteId(7)}")
+
+    // Result and the Option box: both were holes once. Some(1) == Some(1)
+    // stopped working when M4c boxed Option, and Result was never
+    // comparable at all.
+    println("{Ok(Some(1)) == Ok(Some(1))} {Some(None) == None}")
+    let l: Result<Int, String> = Err("boom")
+    println("{l == Err("boom")} {l == Ok(1)}")
+
+    // Range.
+    println("{(0..3) == (0..3)} {(0..3) == (0..4)}")
+
+    // A Map ignores insertion order: order is what iterating a map
+    // gives you, not part of what the map *is*. A List keeps its
+    // order-sensitivity, because a list is a sequence and a map is a
+    // set of pairs — the rule follows from the collection, which is
+    // the thing Java's List.equals/Set.equals under one interface
+    // gets wrong.
+    let a = ["x": 1, "y": 2]
+    let b = ["y": 2, "x": 1]
+    println("{a == b} {a.keys() == b.keys()}")
+    println("{["x": 1] == ["x": 2]} {["x": 1] == ["y": 1]}")
+
+    // Nested through Map, Result and Option at once.
+    println("{["k": Ok(Some(1))] == ["k": Ok(Some(1))]}")
+}

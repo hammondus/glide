@@ -291,6 +291,87 @@ func TestCollectionIndexTraps(t *testing.T) {
 	}
 }
 
+// Equality is specified structural and universal (DESIGN.md), and the
+// evaluator's switch had four holes in it: Map, Result, Error and
+// Range all panicked with "not comparable" while List and tuples
+// worked. The Map case carries the one real decision — insertion
+// order is an *iteration* property, not part of a map's identity, so
+// two maps with the same pairs are equal however they were built.
+// Python draws the line in exactly the same place, and its dicts have
+// been ordered since 3.7.
+func TestStructuralEqualityHasNoHoles(t *testing.T) {
+	out, err := runProg(t, `
+fn main() {
+    // Map: order-independent, including after a delete-and-reinsert
+    // moves a key to the end of the iteration order.
+    let mut a = ["x": 1, "y": 2]
+    let b = ["y": 2, "x": 1]
+    println("{a == b} {a.keys()} {b.keys()}")
+    let _ = a.remove("x")
+    a["x"] = 1
+    println("{a == b} {a.keys()}")
+
+    println("{["x": 1] == ["x": 2]} {["x": 1] == ["x": 1, "y": 2]} {["x": 1] == ["y": 1]}")
+    println("{["x": [1, 2]] == ["x": [1, 2]]} {["x": [1, 2]] == ["x": [2, 1]]}")
+    let e1: Map<String, Int> = [:]
+    let e2: Map<String, Int> = [:]
+    println("{e1 == e2} {e1 == ["x": 1]}")
+
+    // Result, both sides.
+    let l: Result<Int, String> = Ok(1)
+    let r: Result<Int, String> = Err("boom")
+    println("{Ok(1) == Ok(1)} {Ok(1) == Ok(2)} {l == r} {r == Err("boom")} {r == Err("other")}")
+
+    // Range.
+    println("{(0..3) == (0..3)} {(0..3) == (0..4)} {(1..3) == (0..3)}")
+
+    // Nested through Map, Result and the Option box at once.
+    println("{["k": Ok(Some(1))] == ["k": Ok(Some(1))]} {["k": Ok(Some(1))] == ["k": Ok(None)]}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		`true ["x", "y"] ["y", "x"]`,
+		`true ["y", "x"]`,
+		"false false false",
+		"true false",
+		"true false",
+		"true false false true false",
+		"true false false",
+		"true false",
+		"",
+	}, "\n")
+	if out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// Errors compare by message and by the whole cause chain: `context`
+// builds one, and ignoring it would make two failures with different
+// provenance compare equal.
+func TestErrorEquality(t *testing.T) {
+	dir := t.TempDir()
+	out, err := runProg(t, `
+import fs
+
+fn main() {
+    let a = fs.read_string("`+dir+`/nope")
+    let b = fs.read_string("`+dir+`/nope")
+    let c = fs.read_string("`+dir+`/other")
+    println("{a == b} {a == c}")
+    println("{a.context("loading") == b.context("loading")}")
+    println("{a.context("loading") == b.context("saving")}")
+    println("{a.context("loading") == b}")
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "true false\ntrue\nfalse\nfalse\n"; out != want {
+		t.Fatalf("got %q want %q", out, want)
+	}
+}
+
 // Boxing Option in M4c dropped *SomeV from the structural-equality
 // switch, so `Some(1) == Some(1)` panicked with "Option values are
 // not comparable" — in a language whose equality is specified

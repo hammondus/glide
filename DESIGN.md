@@ -539,6 +539,26 @@ Mechanics:
      section already bans. Overloaded equality is how a type comes to
      lie about being equal to itself. Custom equality is a `.equals()`
      method or a `distinct` type.
+
+     **Universal means universal**, which took two rounds of holes to
+     make true. Boxing `Option` in M4c dropped `Some(1) == Some(1)`,
+     and `Map`, `Result`, `Error` and `Range` were never comparable at
+     all while `List` and tuples were. All fixed 2026-08-09. The
+     genuinely-absent cases are the ones with no structure to compare:
+     functions, iterators, and the concurrency handles (`Scope`,
+     `Task`, `Sender`, `Receiver`), where equality would have to mean
+     identity and identity is not a question this language lets you
+     ask.
+
+     **A Map's insertion order is not part of its identity.** Order is
+     a specified *iteration* property — `for (k, v) in m` is ordered,
+     and the compiled tier must reproduce that — but a map is a set of
+     pairs, and two maps built by different routes to the same pairs
+     are the same map. Python draws the line in exactly this place and
+     its dicts have been ordered since 3.7. `Error` compares by
+     message *and* the whole cause chain, since `context` builds one
+     and ignoring it would make two failures with different provenance
+     equal.
   3. **No `Add`/`Mul` yet.** Same admission rule as the universe
      traits: answer a forcing need. `Ord` had one — `sorted()` on a
      struct failed, and `tree.gld` needs `<`. `Add` has none, and

@@ -152,13 +152,29 @@ Binary, loosest to tightest (levels from the parser):
 | 2 | `..` `..=` | range construction: half-open / inclusive |
 | 3 | `\|\|` | short-circuit or |
 | 4 | `&&` | short-circuit and |
-| 5 | `==` `!=` | byte equality on strings |
+| 5 | `==` `!=` | **structural and universal** — see below |
 | 6 | `<` `<=` `>` `>=` | |
 | 7 | `+` `-` | |
 | 8 | `*` `/` `%` | |
 
 All ✓. Unary: `!` (Bool), `-` (numeric) ✓. Postfix: call `f(x)`,
 index `xs[i]` / `m[k]`, field `.name`, tuple field `.0`, try `?` ✓.
+
+**`==` is structural and universal**, with no trait to declare and no
+way to redefine it ✓. It compares byte-for-byte on strings, reaches
+inside the `Option` box, and recurses through structs, variants,
+tuples, `List`, `Map`, `Result`, `Error`, `distinct` and `Range`. A
+**Map ignores insertion order** — order is a specified *iteration*
+property, not part of a map's identity, so two maps with the same
+pairs are equal however they were built (Python's rule; a `List` stays
+order-sensitive because a list is a sequence). `Error` compares by
+message and the whole cause chain, so `context` is part of identity.
+The only values that are *not* comparable are the ones with no
+structure — functions, iterators, and the concurrency handles
+(`Scope`, `Task`, `Sender`, `Receiver`) — where `==` could only mean
+identity, which is not a question this language lets you ask.
+`Float` follows IEEE 754 here, so `nan == nan` is `false` even though
+`nan.cmp(nan)` is `0`.
 
 - `?` unwraps a `Result` or returns the `Err` to the caller ✓
   (on `Option` — not adopted; use `??` / `if let`). Conversion fires

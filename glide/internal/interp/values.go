@@ -389,6 +389,41 @@ func eq(a, b Value, at source.Span) bool {
 	case InstantV:
 		y, ok := b.(InstantV)
 		return ok && x.T.Equal(y.T) // Go's ==-on-time.Time trap, dodged
+	case RangeV:
+		return a == b
+	case *MapV:
+		// **Insertion order is not part of a Map's identity.** It is a
+		// specified *iteration* property (DESIGN.md) and stays one:
+		// `for (k, v) in m` is ordered, `==` is not. A map is a set of
+		// pairs, and two maps built by different routes to the same
+		// pairs are the same map — Python, whose dicts have been
+		// ordered since 3.7, draws the line in exactly this place.
+		y, ok := b.(*MapV)
+		if !ok || len(x.keys) != len(y.keys) {
+			return false
+		}
+		for _, k := range x.keys {
+			// Keys are restricted to comparable scalars by `hashable`,
+			// so a direct lookup is the right membership test; only
+			// the values need structural comparison.
+			other, present := y.m[k]
+			if !present || !eq(x.m[k], other, at) {
+				return false
+			}
+		}
+		return true
+	case *ResultV:
+		y, ok := b.(*ResultV)
+		return ok && x.Ok == y.Ok && eq(x.V, y.V, at)
+	case *ErrV:
+		// Errors compare by message *and* cause, the whole chain:
+		// `context` builds one, and ignoring it would make two errors
+		// with different provenance compare equal.
+		y, ok := b.(*ErrV)
+		if !ok || x.Msg != y.Msg || (x.Cause == nil) != (y.Cause == nil) {
+			return false
+		}
+		return x.Cause == nil || eq(x.Cause, y.Cause, at)
 	case *SomeV:
 		// Boxing Option in M4c left this case out, and `Some(1) ==
 		// Some(1)` panicked with "Option values are not comparable" —
