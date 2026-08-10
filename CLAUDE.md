@@ -1,11 +1,16 @@
 # Project: Glide — a new programming language
 
 ## Overriding instructions
-Regardless of what is writen elsewhere, nothing is set it stone at this stage.
+Regardless of what is written elsewhere, nothing is set in stone at this stage.
 Multiple times, things have been decided and closed as done, only for them
-to subsequenly shown to not be ideal. At the moment, nothing is locked down.
+to subsequently be shown to not be ideal. At the moment, nothing is locked down.
 If something needs to change that becomes a breaking change, but it will end
 up giving a better end result, then make the change.
+
+This doesn't repeal the re-litigation guard below: re-opening a recorded
+decision still needs new evidence or a concrete failure, not just a fresh
+argument. What it repeals is "done" as a defence — once the evidence exists,
+the size of the breaking change is irrelevant.
 
 ## Design
 Design doc: `DESIGN.md` — read it before proposing or evaluating anything.

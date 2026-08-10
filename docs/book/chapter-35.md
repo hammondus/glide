@@ -251,13 +251,10 @@ This mirrors the language-level position: `DESIGN.md` notes that
 era, with different cross-compile ergonomics — exactly like cgo-sqlite
 in Go.
 
-#### A known bug, today
+#### Errors from the driver
 
-While writing this chapter, a genuine interpreter bug surfaced and is
-worth documenting so you recognise it.
-
-**A failing `db.exec` or `db.query` panics with an internal
-`cancelUnwind` instead of returning `Err`.**
+A failing statement is an ordinary `Err` — a missing table, a violated
+constraint, a syntax error in the SQL all come back as values:
 
 ```glide
 import sql
@@ -276,19 +273,15 @@ fn main() {
 ```
 
 ```
-panic: (interp.cancelUnwind) …
+err: SQL logic error: no such table: nosuchtable (1)
 ```
 
-The cause is in `internal/interp/sqlmod.go`: the host context's
-`release()` is deferred *inside* the closure that runs the query, so by
-the time the code checks `cancelled()` — `ctx.Err() != nil` — the
-context has already been cancelled by `release()`. Every failure
-therefore looks like a cancellation.
-
-Successful queries are unaffected, which is why the working examples in
-this chapter and in Chapter 34 run fine. Errors detected *before* the
-query reaches the driver are also unaffected — a bad placeholder is
-caught by `bindNamed` and returns properly:
+The message text is the driver's, surfaced verbatim — if a program
+must branch on one (a `UNIQUE` violation, say), translate it into a
+typed error at the storage boundary and let nothing else see the
+string; Chapter 41 does exactly this. Errors detected *before* the
+query reaches the driver read better, because they are the shim's own —
+a bad placeholder is caught by `bindNamed`:
 
 ```glide
 db.exec("insert into notes (title) values (:title)", ["ttile": "x"])
@@ -298,8 +291,9 @@ db.exec("insert into notes (title) values (:title)", ["ttile": "x"])
 err: query names :title but params do not supply it
 ```
 
-Until the context bug is fixed, **do not rely on catching errors that
-come back from the database itself** at this tier.
+(An earlier edition recorded a bug here: every driver-level failure
+escaped as an internal cancellation panic instead of returning `Err`.
+Fixed; Appendix D keeps the record.)
 
 #### Cancellation
 
@@ -505,9 +499,7 @@ type system does not stop you here — this is the one place in the book
 where the discipline is entirely yours.
 
 **Forgetting a parameter, or misspelling one.** Both are errors naming
-the parameter, which is the feature. But note the current bug above:
-error *paths* through `db.exec` may panic rather than returning `Err`
-at this tier.
+the parameter, which is the feature.
 
 **Expecting typed rows.** `db.query` returns maps today. Read with
 `??`, and convert to a struct at the boundary (Chapter 33's pattern
@@ -530,8 +522,10 @@ discard must be visible (Chapter 22).
 **Assuming a transaction API exists.** `db.tx(|tx| …)` is ○. Today,
 `begin`/`commit` are not exposed.
 
-**Relying on catching a SQL error.** The `cancelUnwind` bug means a
-failing query panics at this tier. Successful paths are fine.
+**Branching on driver error text away from the boundary.** Driver
+errors arrive as message strings; match on one where the query runs,
+translate to a typed error there, and let nothing downstream see the
+text (Chapter 41's `insert`).
 
 ---
 
@@ -872,10 +866,9 @@ driver escapes it.
   interpreter's only third-party dependency, chosen so that
   cross-compilation stays a `GOOS` variable. Rows are maps; typed rows
   are ○.
-- **Known bug at this tier:** a failing `db.exec`/`db.query` panics
-  with an internal `cancelUnwind` instead of returning `Err`, because
-  the host context is released before the cancellation check.
-  Successful queries are unaffected.
+- **Driver failures are ordinary `Err` values**, carrying the driver's
+  message text; branch on that text only at the storage boundary, and
+  translate it into a typed error there.
 - **Never interpolate into a query.** This is the one place where the
   discipline is entirely yours.
 

@@ -251,7 +251,6 @@ with a designed fix.
 | **Defaults fill through function values** | `let f = connect; f("db")` supplies `connect`'s defaults | the checker (defaults are declaration sugar, not type) |
 | **Decoded JSON keys are sorted** | encode preserves order, decode does not | `derive Json` with an ordered map |
 | **Nested tuple access `x.0.1`** | lexes `0.1` as a float | lexer special case |
-| **Failing SQL panics** | a driver-level error raises `cancelUnwind` — and it escapes as a raw Go panic, not a Glide diagnostic — because the host context is released before the cancellation check (`sqlmod.go`) | one-line fix; see Chapter 35 |
 
 Two behaviours that look like warts and are **not**:
 
@@ -262,9 +261,13 @@ Two behaviours that look like warts and are **not**:
   That is the tree-walker's chosen implementation, replaced by a state
   machine in the compiled tier.
 
-Two warts earlier editions listed have been **fixed**: builtin methods
-now enforce receiver-`mut`, and a string literal inside an
-interpolation lexes correctly — `"{xs.join(", ")}"` works. (Escaping
+Three warts earlier editions listed have been **fixed**: builtin
+methods now enforce receiver-`mut`; a string literal inside an
+interpolation lexes correctly — `"{xs.join(", ")}"` works; and a
+failing SQL statement returns `Err` instead of escaping as a raw
+cancellation panic (the host context was released before the
+cancellation check in `sqlmod.go`, so every driver failure looked like
+a cancellation). (Escaping
 those inner quotes still does not, and should not: the backslash makes
 them the outer string's own.)
 

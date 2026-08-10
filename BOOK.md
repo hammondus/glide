@@ -34,13 +34,6 @@ how that happened.
   the tail-value rule, the nested-shadow ban, and a generic bound whose
   type parameter appears only inside a container. All three
   under-approximate. Appendix D, *Known checker gaps*.
-- **A driver-level SQL failure escapes as a raw Go panic**
-  (`interp.cancelUnwind`) instead of returning `Err`. In
-  `glide/internal/interp/sqlmod.go`, `release()` is deferred inside the
-  `in.unblock` closure, so the `cancelled()` check that follows always
-  sees a cancelled context. `bindNamed` errors are unaffected. Looks like
-  a one-line fix; the book documents it with a workaround in Chapter 35
-  and Appendix D.
 - **Normal scope exit joins children without cancelling them**, so a
   child blocked on `send` or `http.serve` deadlocks unless the body uses
   an early `return`. Not a bug — rule 1 — and Chapter 28's centrepiece.

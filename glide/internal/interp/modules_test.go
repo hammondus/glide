@@ -194,6 +194,37 @@ fn main() {
 	}
 }
 
+// sql: an ordinary query failure is an Err value, not a cancellation.
+// Regression: release() cancels the bridged ctx, so checking ctx.Err()
+// after unblock misread every failure as a cancel unwind.
+func TestSQLErrorIsErrNotCancel(t *testing.T) {
+	out, err := runProg(t, `
+import sql
+
+fn run() -> Result<(), Error> {
+    let db = sql.open("sqlite::memory:")?
+    defer { _ = db.close() }
+    match db.exec("not valid sql") {
+        Ok(_) => println("impossible")
+        Err(e) => println("exec err: {e}")
+    }
+    match db.query("select * from missing_table") {
+        Ok(_) => println("impossible")
+        Err(e) => println("query err: {e}")
+    }
+    Ok(())
+}
+fn main() {
+    _ = run()
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "exec err: ") || !strings.Contains(out, "query err: ") {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // sql: distinct values bind by unwrapping — the codec is the
 // explicit conversion boundary.
 func TestSQLDistinctParam(t *testing.T) {

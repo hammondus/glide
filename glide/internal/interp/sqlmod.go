@@ -86,34 +86,45 @@ func (in *Interp) sqlMethod(d *DbV, name string, args []Value, at source.Span) V
 	ctx, release := in.hostCtx()
 	var out Value
 	var failure string
-	cancelled := func() bool { return ctx.Err() != nil }
+	cancelled := false
+	// The cancellation test must run inside the closure: the deferred
+	// release() cancels ctx, so after unblock returns ctx.Err() is
+	// always non-nil and would misreport every failure as cancellation.
+	failed := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if ctx.Err() != nil {
+			cancelled = true
+		} else {
+			failure = err.Error()
+		}
+		return true
+	}
 	in.unblock(func() {
 		defer release()
 		switch name {
 		case "exec":
 			res, err := d.db.ExecContext(ctx, query, bound...)
-			if err != nil {
-				failure = err.Error()
+			if failed(err) {
 				return
 			}
 			n, _ := res.RowsAffected()
 			out = IntV(n)
 		case "query", "query_one":
 			rows, err := d.db.QueryContext(ctx, query, bound...)
-			if err != nil {
-				failure = err.Error()
+			if failed(err) {
 				return
 			}
 			defer rows.Close()
 			list, scanErr := scanRows(rows)
-			if scanErr != nil {
-				failure = scanErr.Error()
+			if failed(scanErr) {
 				return
 			}
 			out = list
 		}
 	})
-	if failure != "" && cancelled() {
+	if cancelled {
 		panic(cancelUnwind{})
 	}
 	if failure != "" {

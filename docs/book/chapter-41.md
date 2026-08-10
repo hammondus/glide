@@ -137,6 +137,38 @@ Note the return type: `Result<Link?, StoreError>`. Two different
 nil-and-nil case meaning "not found", which is a convention rather than
 a type.
 
+`insert` is where a driver error becomes a typed one:
+
+```glide
+fn insert(db: Db, code: Code, url: String) -> Result<LinkId, StoreError> {
+    match db.exec("insert into links (code, url) values (:code, :url)",
+                  ["code": code, "url": url]) {
+        Ok(_)  => {}
+        Err(e) => {
+            if "{e}".contains("UNIQUE") {
+                return Err(.Duplicate{ code: code })
+            }
+            return Err(.Backend{ cause: e })
+        }
+    }
+    let row = db.query_one("select id from links where code = :code",
+                           ["code": code])?
+    match row {
+        Some(r) => Ok(LinkId(r["id"] ?? 0))
+        None    => Err(.Backend{ cause: "inserted row not found" })
+    }
+}
+```
+
+The `UNIQUE` constraint on `code` is the duplicate check — atomic in
+the database, where an application-level check-then-insert is a race
+under concurrency. The price is that the driver reports the violation
+as message text (Chapter 35), so the translation into `.Duplicate` is
+textual — and it happens *here*, at the storage boundary, so no caller
+ever parses a driver string. Well-factored Go makes the same move with
+`sqlite3.ErrConstraintUnique`; drivers are where stringly errors meet
+typed ones, in any language.
+
 #### Step 5 — transport, knowing nothing about SQL
 
 ```glide
@@ -151,19 +183,19 @@ fn create(db: Db, req: Request) -> Result<Response, ApiError> {
     if !url.starts_with("http") {
         return Err(.BadInput{ msg: "url must be absolute" })
     }
-    if lookup(db, code)? != None {
-        return Err(.Store{ cause: .Duplicate{ code: code } })
-    }
     _ = insert(db, code, url)?
     Ok(http.created())
 }
 ```
 
-Four guard clauses, each `let … else` or `if`, each returning early —
+Three guard clauses, each `let … else` or `if`, each returning early —
 and **zero nesting** (Chapter 9). The happy path is the last two lines.
 
-The `?` on `lookup` and `insert` converts `StoreError` into `ApiError`
-via `from`. Nothing in this function mentions the conversion.
+The `?` on `insert` converts `StoreError` into `ApiError` via `from`.
+Nothing in this function mentions the conversion — and nothing here
+mentions duplicates, because the database's `UNIQUE` constraint rejects
+them inside `insert`, which transport sees only as another
+`StoreError`.
 
 #### Step 6 — one place maps errors to statuses
 
@@ -278,28 +310,14 @@ Nesting them is precise: `Result<Link?, StoreError>` says "this might
 fail, and if it succeeds it might find nothing", which is three
 outcomes, distinguished.
 
-#### Where the interpreter's rough edges showed
+#### Where the interpreter's rough edge showed
 
-Two, and both are recorded in earlier chapters. It is worth seeing them
-in a real program rather than in a minimal repro.
-
-**The duplicate-code check is defensive.** The natural implementation
-lets the database's `UNIQUE` constraint reject the insert and catches
-the error. That does not work at this tier — Chapter 35's recorded bug
-means a driver-level failure panics with an internal `cancelUnwind`
-instead of returning `Err`. So the code checks first:
-
-```glide
-// Check first: a UNIQUE-violation Err cannot be caught at this tier
-// (Chapter 35's recorded interpreter bug), so we avoid provoking one.
-if lookup(db, code)? != None {
-    return Err(.Store{ cause: .Duplicate{ code: code } })
-}
-```
-
-This is a real workaround with a real cost: check-then-insert is a race
-under concurrency, where let-the-constraint-fail is not. The comment
-says why, and it comes out when the bug is fixed.
+One, recorded in an earlier chapter. It is worth seeing it in a real
+program rather than in a minimal repro. (An earlier edition had a
+second: a driver-level SQL failure escaped as a cancellation panic, so
+`create` carried a racy check-then-insert workaround. That bug is
+fixed, the workaround is gone, and the `UNIQUE` constraint now does
+the checking — Appendix D keeps the record.)
 
 **The scope body ends with `return`, not a tail expression.** Chapter
 27's sharpest edge: `http.serve` blocks forever, and a *normal* scope
@@ -395,9 +413,11 @@ place instead of three, which is the whole benefit.
 Nothing here is tuned, and the interesting costs are structural rather
 than measured:
 
-**`check-then-insert` is two round trips** where let-the-constraint-fail
-is one — and it is racy. That is the cost of the interpreter
-workaround, and it is documented in the code.
+**`insert` is two round trips** — the insert, then a select for the
+generated id. SQLite's `returning` clause would make it one
+(`db.query_one("insert … returning id", …)` works today); two plain
+statements read more conventionally, which a teaching chapter values
+over a round trip.
 
 **`bump` is a second query per read.** A real service would batch hit
 counts or write them asynchronously; here it is a query per request.
@@ -440,7 +460,7 @@ The chapter checklist, as applied:
 | Scope owns the lifetime | `scope s { … }` | 25 |
 | `defer` on the line after acquisition | `db.close()` | 21 |
 | Example test plus property test | both `test` blocks | 22 |
-| Document the workaround, not just the fix | the duplicate-check comment | 36 |
+| Translate driver errors at the boundary | `insert`'s `UNIQUE` match | 19 |
 
 Zero `mut` bindings except the router and the report list — both
 genuine accumulators, both sealed or returned immediately.
@@ -503,13 +523,24 @@ fn schema(db: Db) -> Result<(), StoreError> {
 }
 
 fn insert(db: Db, code: Code, url: String) -> Result<LinkId, StoreError> {
-    _ = db.exec("insert into links (code, url) values (:code, :url)",
-                ["code": code, "url": url])?
+    match db.exec("insert into links (code, url) values (:code, :url)",
+                  ["code": code, "url": url]) {
+        Ok(_)  => {}
+        Err(e) => {
+            // The UNIQUE constraint is the duplicate check. Translate the
+            // driver's error into the typed variant here, at the storage
+            // boundary, so no caller ever parses message text.
+            if "{e}".contains("UNIQUE") {
+                return Err(.Duplicate{ code: code })
+            }
+            return Err(.Backend{ cause: e })
+        }
+    }
     let row = db.query_one("select id from links where code = :code",
                            ["code": code])?
     match row {
         Some(r) => Ok(LinkId(r["id"] ?? 0))
-        None    => Err(.Duplicate{ code: code })
+        None    => Err(.Backend{ cause: "inserted row not found" })
     }
 }
 
@@ -548,11 +579,6 @@ fn create(db: Db, req: Request) -> Result<Response, ApiError> {
     let url = v["url"] ?? ""
     if !url.starts_with("http") {
         return Err(.BadInput{ msg: "url must be absolute" })
-    }
-    // Check first: a UNIQUE-violation Err cannot be caught at this tier
-    // (Chapter 35's recorded interpreter bug), so we avoid provoking one.
-    if lookup(db, code)? != None {
-        return Err(.Store{ cause: .Duplicate{ code: code } })
     }
     _ = insert(db, code, url)?
     Ok(http.created())
@@ -704,10 +730,10 @@ exercises it over real HTTP, and shuts everything down by returning.
 - **The scope owns the server's lifetime**, and the body ends with
   `return` because a normal exit would join the blocked server forever
   (Chapter 26's rule 1, Chapter 28's sharpest edge).
-- **Two interpreter rough edges showed up in real code**: the
-  SQL-error `cancelUnwind` bug forced a check-then-insert workaround
-  (documented in a comment, with its race cost acknowledged), and the
-  scope-exit rule required an early `return`.
+- **One interpreter rough edge showed up in real code**: the
+  scope-exit rule required an early `return`. The `UNIQUE` constraint
+  handles duplicates, with the driver's error translated to a typed
+  `.Duplicate` at the storage boundary.
 - What did not need writing: null checks, `sql.NullString`, struct
   tags, `if err != nil`, `context.Context`, a shutdown handler, an
   assertion library, or a single mock.
@@ -720,11 +746,12 @@ exercises it over real HTTP, and shuts everything down by returning.
    `to_response` — and that is the exhaustiveness guarantee delivering
    the work list that Chapter 13 promised.
 
-2. **Remove the workaround.** Rewrite `create` to let the `UNIQUE`
-   constraint reject the duplicate, and observe the `cancelUnwind`
-   panic. Then fix the interpreter bug (the release is deferred before
-   the cancellation check in `sqlmod.go`) and confirm both versions
-   work. This is a real, small, well-specified contribution.
+2. **Break the boundary.** Delete the `UNIQUE` translation in `insert`
+   (return `.Backend` for every driver error) and observe what a
+   duplicate now sends the client: "internal error" instead of
+   400 "code already taken". Put it back. The layer that knows a
+   failure's *meaning* decides what the user sees — that knowledge
+   lives in storage, not transport.
 
 3. **Port it.** Write the same service in a language you know well.
    Count the lines, and — more usefully — count the places where a
