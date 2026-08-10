@@ -1,0 +1,9 @@
+{
+  // Glide has no TextMate grammar of its own yet. Its surface syntax is
+  // close enough to Rust's that VS Code's built-in Rust grammar gives
+  // usable highlighting. Unhighlighted: defer, errdefer, scope, select,
+  // import — Rust has no such keywords, so they render as identifiers.
+  "files.associations": {
+    "*.gld": "rust"
+  }
+}

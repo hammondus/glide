@@ -1,5 +1,13 @@
 # Project: Glide — a new programming language
 
+## Overriding instructions
+Regardless of what is writen elsewhere, nothing is set it stone at this stage.
+Multiple times, things have been decided and closed as done, only for them
+to subsequenly shown to not be ideal. At the moment, nothing is locked down.
+If something needs to change that becomes a breaking change, but it will end
+up giving a better end result, then make the change.
+
+## Design
 Design doc: `DESIGN.md` — read it before proposing or evaluating anything.
 It records decisions *and* deliberate sacrifices; don't re-litigate a
 recorded sacrifice unless new evidence turns up.
