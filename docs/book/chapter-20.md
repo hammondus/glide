@@ -657,7 +657,7 @@ function.** It exits the closure. This is the same rule as `return`
 let results = paths.iter().map(|p| fs.read_string(p)?).collect()
 
 // Good — a loop can propagate
-let mut results = []
+let mut results: List<String> = []
 for p in paths {
     results.push(fs.read_string(p)?)
 }

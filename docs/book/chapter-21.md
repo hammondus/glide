@@ -476,7 +476,7 @@ type NonEmpty = struct { head: Int, tail: List<Int> }
 impl NonEmpty {
     pub fn parse(xs: List<Int>) -> NonEmpty? {
         if xs.len() == 0 { return None }
-        let mut tail = []
+        let mut tail: List<Int> = []
         for i in 1..xs.len() { tail.push(xs[i]) }
         Some(NonEmpty{ head: xs[0], tail: tail })
     }

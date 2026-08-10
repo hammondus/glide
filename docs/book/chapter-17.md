@@ -609,7 +609,7 @@ trait NoteStore {
 
     // Added later. Breaks nobody; implementors may override for speed.
     fn get_many(self, ids: List<NoteId>) -> Result<List<Note>, Error> {
-        let mut out = []
+        let mut out: List<Note> = []
         for id in ids {
             if let n = self.get(id)? {
                 out.push(n)

@@ -70,7 +70,7 @@ Give the test block parameters and it becomes a **property test**:
 
 ```glide
 fn reverse(xs: List<Int>) -> List<Int> {
-    let mut out = []
+    let mut out: List<Int> = []
     for i in 0..xs.len() {
         out.push(xs[xs.len() - 1 - i])
     }
@@ -413,7 +413,7 @@ finds the bugs. But if you only write one, write the property.
 ```glide
 // Bad — this just reimplements the function in the test
 test "reverse reverses" (xs: List<Int>) {
-    let mut expected = []
+    let mut expected: List<Int> = []
     for i in 0..xs.len() { expected.push(xs[xs.len() - 1 - i]) }
     expect(reverse(xs) == expected)
 }
@@ -575,7 +575,7 @@ in the designed toolchain, not just a test runner.
 
 ```glide
 fn reverse(xs: List<Int>) -> List<Int> {
-    let mut out = []
+    let mut out: List<Int> = []
     for i in 0..xs.len() {
         out.push(xs[xs.len() - 1 - i])
     }
@@ -637,8 +637,8 @@ wrong-looking-correct implementation:
 // Intended: split a list into two halves.
 fn halves(xs: List<Int>) -> (List<Int>, List<Int>) {
     let mid = xs.len() / 2
-    let mut a = []
-    let mut b = []
+    let mut a: List<Int> = []
+    let mut b: List<Int> = []
     for i in 0..mid { a.push(xs[i]) }
     for i in mid..xs.len() { b.push(xs[i]) }
     (a, b)

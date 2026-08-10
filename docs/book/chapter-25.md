@@ -665,7 +665,7 @@ fn fib() -> Iterator<Int> {
 }
 
 fn primes() -> Iterator<Int> {
-    let mut found = []
+    let mut found: List<Int> = []
     let mut n = 2
     for {
         let mut is_prime = true
@@ -769,7 +769,7 @@ cheap enough that you do it by default.
 ```glide
 // Bad — builds the whole list, even when the caller wants three
 fn walk_eager(n: Node) -> List<Int> {
-    let mut out = []
+    let mut out: List<Int> = []
     if let l = n.left {
         for v in walk_eager(l) { out.push(v) }
     }

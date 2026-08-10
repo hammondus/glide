@@ -220,7 +220,7 @@ let out = sb.build()
 
 ```glide
 // Good, today
-let mut parts = []
+let mut parts: List<String> = []
 for w in words {
     parts.push(w)
 }

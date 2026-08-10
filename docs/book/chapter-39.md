@@ -72,7 +72,7 @@ boolean, a signal handler. The scope does all of it (Chapter 26).
 
 ```glide
 // Bad
-let (stop_tx, stop_rx) = channel()
+let (stop_tx, stop_rx) = channel(Int)
 _ = s.spawn(|| sweeper(db, stop_rx))
 …
 stop_tx.close()

@@ -13,11 +13,11 @@ fn main() {
         println(2)
     }
 
-    let (tx, rx) = channel(size: 4) // error: channel takes no arguments or (cap: n)
+    let (tx, rx) = channel(Int, size: 4) // error: channel takes an optional element type and an optional (cap: n)
     tx.close()
 
     // The split is structural: each half has only its own operations.
-    let (tx2, rx2) = channel(cap: 1)
+    let (tx2, rx2) = channel(Int, cap: 1)
     rx2.close()                     // error: only the sender half closes a channel
     tx2.recv()                      // error: only the receiver half receives
 

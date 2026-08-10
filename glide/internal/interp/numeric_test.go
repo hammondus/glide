@@ -443,7 +443,7 @@ fn main() {
 	out, err = runProg(t, `
 fn main() {
     scope s {
-        let (tx, rx) = channel()
+        let (tx, rx): (Sender<u8?>, Receiver<u8?>) = channel()
         s.spawn(|| {
             tx.send(None)
             tx.send(Some(7))

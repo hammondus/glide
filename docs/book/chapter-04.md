@@ -174,7 +174,7 @@ after:
 
 ```glide-run
 fn main() {
-    let mut acc = []
+    let mut acc: List<Int> = []
     for i in 0..3 {
         acc.push(i * i)
     }
@@ -738,7 +738,7 @@ multiline (Chapter 6).
 fn parse_env(text: String) -> Map<String, String> {
     let mut out: Map<String, String> = [:]
     let mut line = ""
-    let mut parts = []
+    let mut parts: List<String> = []
     let mut key = ""
     let mut value = ""
 

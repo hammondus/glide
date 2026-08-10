@@ -44,6 +44,14 @@ var builtins = map[string]*BuiltinV{
 	// buffered. No unbounded variant (recorded). The named form is
 	// translated to positional in evalCall.
 	"channel": {Name: "channel", Fn: func(in *Interp, args []Value, at source.Span) Value {
+		// `channel(Int)` names the element type, the same type-as-a-value
+		// spelling `e.find(MyError)` uses. It is erased here — the
+		// checker is what reads it — so the runtime just drops it.
+		if len(args) > 0 {
+			if _, isType := args[0].(TypeV); isType {
+				args = args[1:]
+			}
+		}
 		capN := 0
 		switch len(args) {
 		case 0:

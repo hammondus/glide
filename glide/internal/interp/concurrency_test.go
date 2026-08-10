@@ -57,14 +57,14 @@ fn main() {
 func TestScopeWaitsForChildren(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 4)
+    let (tx, rx) = channel(String, cap: 4)
     scope s {
         _ = s.spawn(|| {
             tx.send("child")
             tx.close()
         })
     }
-    let mut log = []
+    let mut log: List<String> = []
     for v in rx { log.push(v) }
     log.push("after")
     println(log)
@@ -286,7 +286,7 @@ fn main() {
 func TestSpawnAfterScopeEnds(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
-    let mut escaped = []
+    let mut escaped: List<Scope> = []
     scope s {
         escaped.push(s)
     }
@@ -330,7 +330,7 @@ func TestScopeFanOut(t *testing.T) {
 fn square(n: Int) -> Int { n * n }
 fn main() {
     scope s {
-        let mut tasks = []
+        let mut tasks: List<Task<Int>> = []
         for i in 1..=5 {
             tasks.push(s.spawn(|| square(i)))
         }
@@ -377,7 +377,7 @@ fn main() {
 func TestChannelProducerConsumer(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in 1..=4 {
@@ -404,12 +404,12 @@ fn main() {
 func TestChannelBuffered(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 3)
+    let (tx, rx) = channel(Int, cap: 3)
     tx.send(1)
     tx.send(2)
     tx.send(3)
     tx.close()
-    let mut got = []
+    let mut got: List<Int> = []
     for v in rx {
         got.push(v)
     }
@@ -427,7 +427,7 @@ fn main() {
 func TestChannelRecvOption(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 1)
+    let (tx, rx) = channel(Int, cap: 1)
     tx.send(7)
     tx.close()
     if let Some(v) = rx.recv() {
@@ -451,8 +451,8 @@ fn main() {
 func TestChannelWorkerPool(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel()
-    let (rtx, rrx) = channel(cap: 6)
+    let (tx, rx) = channel(Int)
+    let (rtx, rrx) = channel(Int, cap: 6)
     scope s {
         _ = s.spawn(|| {
             for job in rx {
@@ -491,7 +491,7 @@ fn main() {
 func TestChannelCloseRules(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, _) = channel(cap: 1)
+    let (tx, _) = channel(Int, cap: 1)
     tx.close()
     tx.close()
     println("double close survived")
@@ -505,7 +505,7 @@ fn main() {
 
 	_, err = runProg(t, `
 fn main() {
-    let (_, rx) = channel()
+    let (_, rx) = channel(Int)
     rx.close()
 }`)
 	if err == nil || !strings.Contains(err.Error(), "only the sender half closes") {
@@ -514,7 +514,7 @@ fn main() {
 
 	_, err = runProg(t, `
 fn main() {
-    let (tx, _) = channel(cap: 1)
+    let (tx, _) = channel(Int, cap: 1)
     tx.close()
     tx.send(1)
 }`)
@@ -528,7 +528,7 @@ fn main() {
 func TestChannelBlockedRecvCancelled(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
-    let (_, rx) = channel()
+    let (_, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| rx.recv())
         _ = s.spawn(|| boom())
@@ -545,7 +545,7 @@ fn boom() -> Int { [][0] }`)
 func TestChannelRendezvous(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in 1..=3 {
@@ -577,7 +577,7 @@ fn main() {
 func TestChannelMisc(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
-    let (tx, _) = channel(cap: -1)
+    let (tx, _) = channel(Int, cap: -1)
     tx.close()
 }`)
 	if err == nil || !strings.Contains(err.Error(), "non-negative") {
@@ -599,7 +599,7 @@ fn main() {
 func TestSelectRecvSplit(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 2)
+    let (tx, rx) = channel(Int, cap: 2)
     tx.send(41)
     tx.close()
     let mut open = true
@@ -627,7 +627,7 @@ fn main() {
 func TestSelectElse(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     let v = select {
         Some(v) = rx.recv() => v
         else => -1
@@ -647,7 +647,7 @@ fn main() {
 func TestSelectSend(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 1)
+    let (tx, rx) = channel(Int, cap: 1)
     let did = select {
         tx.send(9) => "sent"
         else => "full"
@@ -668,7 +668,7 @@ fn main() {
 func TestSelectGuard(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 1)
+    let (tx, rx) = channel(Int, cap: 1)
     tx.send(5)
     let v = select {
         Some(a) = rx.recv() if false => a
@@ -694,7 +694,7 @@ fn main() {
 func TestSelectAllDisabled(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     _ = select {
         Some(v) = rx.recv() if false => v
     }
@@ -709,7 +709,7 @@ fn main() {
 func TestSelectCancelled(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
-    let (_, rx) = channel()
+    let (_, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| select {
             Some(v) = rx.recv() => v
@@ -729,7 +729,7 @@ fn boom() -> Int { [][0] }`)
 func TestSelectUnmatchedRecv(t *testing.T) {
 	_, err := runProg(t, `
 fn main() {
-    let (tx, rx) = channel(cap: 1)
+    let (tx, rx) = channel(Int, cap: 1)
     tx.close()
     _ = select {
         Some(v) = rx.recv() => v
@@ -763,8 +763,8 @@ else => 2 } }`, "two else"},
 func TestSelectFanIn(t *testing.T) {
 	out, err := runProg(t, `
 fn main() {
-    let (atx, arx) = channel()
-    let (btx, brx) = channel()
+    let (atx, arx) = channel(Int)
+    let (btx, brx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in 1..=3 { atx.send(i) }
@@ -978,7 +978,7 @@ func TestTimeAfterInSelect(t *testing.T) {
 import time
 
 fn main() {
-    let (_, rx) = channel()
+    let (_, rx) = channel(Int)
     let v = select {
         Some(v) = rx.recv() => v
         Some(_) = time.after(20.ms).recv() => -1

@@ -228,8 +228,8 @@ document's `math` entry now means the *numerics* surface
 |---|---|---|---|
 | `s.spawn(f)` | `(fn() -> T) -> Task<T>` | scope handles only; error if the scope has ended. The closure **may not capture a `mut` binding** ✓ — the parent may still be writing it, which is the data-race archetype. Freeze first (`let frozen = building`) or send it over a channel. Immutable captures cross freely | ✓ |
 | `t.join()` | `() -> T` | blocks (cancellation point); returns exactly what the closure returned | ✓ |
-| `channel()` | `() -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous | ✓ |
-| `channel(cap: n)` | `(Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ✓ |
+| `channel(T)` | `(type) -> (Sender<T>, Receiver<T>)` | unbuffered rendezvous. The element type is named as a **value**, the `e.find(MyError)` spelling — simple type names only, since `List<Int>` in expression position parses as a comparison. Bare `channel()` is legal only where something else supplies the type (a parameter, or the annotation `let (tx, rx): (Sender<Int?>, Receiver<Int?>) = channel()`); with nothing supplying it, the pair would be `(Sender<?>, Receiver<?>)` and every `send` would go unchecked, which is a compile error | ✓ |
+| `channel(T, cap: n)` | `(type, Int) -> (Sender<T>, Receiver<T>)` | buffered; no unbounded variant | ✓ |
 | `tx.send(v)` | `(T) -> ()` | blocks per capacity (cancellation point); **panics** on closed channel (sender coordination bug) | ✓ |
 | `tx.close()` | `() -> ()` | idempotent; only the sender half has it | ✓ |
 | `rx.recv()` | `() -> Option<T>` | blocks (cancellation point); `None` = closed and drained. A *sent* `None` is an ordinary element — Option is boxed as of M4c, so a payload can no longer impersonate the end-of-stream signal | ✓ |

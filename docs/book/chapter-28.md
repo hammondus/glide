@@ -45,7 +45,7 @@ rx.recv()               // -> Option<T>; None means closed and drained
 import time
 
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in 1..=3 { tx.send(i) }
@@ -77,7 +77,7 @@ same task would deadlock; the send happens in a spawned child.
 
 ```glide-run
 fn main() {
-    let (btx, brx) = channel(cap: 3)
+    let (btx, brx) = channel(Int, cap: 3)
     btx.send(1)
     btx.send(2)
     btx.close()
@@ -129,8 +129,8 @@ fn slow_square(n: Int) -> Int {
 }
 
 fn pool_sum(upto: Int) -> Int {
-    let (jobs_tx, jobs_rx) = channel()
-    let (out_tx, out_rx) = channel(cap: 64)
+    let (jobs_tx, jobs_rx) = channel(Int)
+    let (out_tx, out_rx) = channel(Int, cap: 64)
 
     scope s {
         _ = s.spawn(|| {
@@ -364,7 +364,7 @@ integration, so there is no `select` and no `for … in`.
 
 ```glide
 // Bad — the send blocks forever; nobody is receiving
-let (tx, rx) = channel()
+let (tx, rx) = channel(Int)
 tx.send(1)
 println("{rx.recv():?}")
 
@@ -375,7 +375,7 @@ scope s {
 }
 
 // Also good — capacity means the send does not block
-let (tx, rx) = channel(cap: 1)
+let (tx, rx) = channel(Int, cap: 1)
 tx.send(1)
 println("{rx.recv():?}")
 ```
@@ -431,10 +431,10 @@ fix is that the *coordinator* closes after joining all senders.
 // Bad — with an unbuffered out channel, workers block while
 // the main task is still feeding jobs, and jobs_tx.send blocks
 // because the workers are blocked. Deadlock.
-let (out_tx, out_rx) = channel()
+let (out_tx, out_rx) = channel(Int)
 
 // Good
-let (out_tx, out_rx) = channel(cap: 64)
+let (out_tx, out_rx) = channel(Int, cap: 64)
 ```
 
 This is the most common real deadlock in the worker-pool shape.
@@ -446,7 +446,7 @@ dormant. The checker will reject it; write as though it already does.
 
 ```glide
 // Bad — a channel to return one value
-let (tx, rx) = channel()
+let (tx, rx) = channel(Int)
 _ = s.spawn(|| tx.send(compute()))
 let result = rx.recv() ?? 0
 
@@ -498,7 +498,7 @@ block itself.
 ```glide
 // Good — producer and consumer are both bounded by the scope
 scope s {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     _ = s.spawn(|| produce(tx))
     consume(rx)
 }
@@ -536,7 +536,7 @@ the reason.
 
 ```glide
 // Good — the number means something
-let (out_tx, out_rx) = channel(cap: 64)    // ~2x worker count; smooths jitter
+let (out_tx, out_rx) = channel(Int, cap: 64)    // ~2x worker count; smooths jitter
 ```
 
 **Do not build an unbounded channel by accident.** A very large
@@ -562,7 +562,7 @@ write — which is the point.
 
 ```glide-run
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in 1..=3 { tx.send(i) }
@@ -584,7 +584,7 @@ fn main() {
 
 ```glide-run
 fn main() {
-    let (btx, brx) = channel(cap: 3)
+    let (btx, brx) = channel(Int, cap: 3)
     btx.send(1)
     btx.send(2)
     btx.close()
@@ -614,8 +614,8 @@ fn slow_square(n: Int) -> Int {
 }
 
 fn pool_sum(upto: Int) -> Int {
-    let (jobs_tx, jobs_rx) = channel()
-    let (out_tx, out_rx) = channel(cap: 64)
+    let (jobs_tx, jobs_rx) = channel(Int)
+    let (out_tx, out_rx) = channel(Int, cap: 64)
 
     scope s {
         _ = s.spawn(|| {
@@ -677,7 +677,7 @@ var nilCh chan int
 
 ```glide
 // Glide
-let (tx, rx) = channel()
+let (tx, rx) = channel(Int)
 tx.close()
 tx.close()          // fine — idempotent
 tx.send(1)          // panics — a sender coordination bug
@@ -711,7 +711,7 @@ most common Go channel leak.
 ```glide
 // Glide — and this version DEADLOCKS. Read on.
 fn consume_some(items: List<Int>, n: Int) -> Int {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in items { tx.send(i) }
@@ -746,7 +746,7 @@ The fix is to exit early, which triggers the cancel:
 ```glide-run
 // Good — `return` is an early exit, so the scope cancels first
 fn consume_some(items: List<Int>, n: Int) -> Int {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in items { tx.send(i) }

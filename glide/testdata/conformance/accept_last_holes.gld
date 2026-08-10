@@ -41,7 +41,7 @@ fn main() {
     }
 
     // The freeze idiom: mut for setup, frozen before it crosses.
-    let mut building = []
+    let mut building: List<Int> = []
     building.push(1)
     building.push(2)
     let frozen = building

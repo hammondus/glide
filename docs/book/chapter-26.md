@@ -94,7 +94,7 @@ keep what worked:
 ```glide
 scope s {
     let tasks = urls.iter().map(|u| s.spawn(|| fetch(u))).collect()
-    let mut ok = []
+    let mut ok: List<String> = []
     for t in tasks {
         match t.join() {
             Ok(page) => ok.push(page)
@@ -549,7 +549,7 @@ s.spawn(|| handle(snapshot, id))
 // Good — fetch everything, report what failed, use what worked
 scope s {
     let tasks = urls.iter().map(|u| s.spawn(|| fetch(u))).collect()
-    let mut pages = []
+    let mut pages: List<String> = []
     for t in tasks {
         match t.join() {
             Ok(p)  => pages.push(p)
@@ -636,7 +636,7 @@ fn partial() -> List<String> {
         let b = s.spawn(|| Err("beta failed"))
         let c = s.spawn(|| Ok("gamma"))
 
-        let mut good = []
+        let mut good: List<String> = []
         for t in [a, b, c] {
             match t.join() {
                 Ok(v)  => good.push(v)

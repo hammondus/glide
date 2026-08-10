@@ -1,0 +1,44 @@
+// A binding whose initialiser takes its type from the expectation,
+// where there is no expectation. The type comes out with a `?` in it,
+// `?` is assignable to anything, and the binding's real destination
+// then goes unchecked — `let mut xs = []` in a function returning
+// List<Int> would accept a String and a Bool.
+//
+// The accept half is accept_determined_literal.gld: every one of these
+// forms is fine the moment something says what it holds.
+
+fn a_list() -> List<Int> {
+    let mut xs = []             // error: cannot tell what the ? in List<?> is
+    xs.push(1)
+    xs
+}
+
+fn a_map() -> Map<String, Int> {
+    let mut m = [:]             // error: cannot tell what the ? in Map<?, ?> is
+    m["k"] = 1
+    m
+}
+
+fn an_option() -> Int? {
+    let x = None                // error: cannot tell what the ? in Option<?> is
+    x
+}
+
+fn a_result() -> Result<Int, Error> {
+    let r = Ok(1)               // error: cannot tell what the ? in Result<Int, ?> is
+    r
+}
+
+fn a_channel() {
+    // Both halves are undetermined, so the whole tuple is reported once.
+    let (tx, rx) = channel()    // error: cannot tell what the ? in (Sender<?>, Receiver<?>) is
+    tx.close()
+}
+
+fn main() {
+    println(a_list())
+    println(a_map())
+    println(an_option())
+    println(a_result())
+    a_channel()
+}

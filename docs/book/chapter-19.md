@@ -694,16 +694,45 @@ let key = |row| row.1
 let key = |row: (String, Int)| row.1
 ```
 
-**Annotate empty collections at their declaration, not at their first
-use.**
+**Annotate empty collections at their declaration.** Not a style
+preference — the checker requires it, because there is nothing else
+for it to read:
 
 ```glide
-// Bad — the annotation is doing nothing here; the empty literal
-// already had to guess
+// error: cannot tell what the ? in Map<?, ?> is — annotate the binding
 let mut seen = [:]
 
 // Good
 let mut seen: Map<String, Bool> = [:]
+```
+
+The rule covers every form whose type comes from what is expected of
+it rather than from itself: `[]`, `[:]`, `None`, `Ok(v)`, `Err(v)`,
+and `channel()`. Bind one of those with nothing to constrain it and
+the type arrives with a `?` in it — and since `?` is assignable to
+anything, everything downstream stops being checked. A function
+declaring `List<Int>` could accumulate into a bare `[]`, push a String
+and a Bool, and return them with a clean check.
+
+Where an expectation already exists, nothing is demanded: `return []`
+in a `-> List<Int>` function, `[]` passed to a `List<Note>` parameter,
+and `[[1], []]` are all fine, because the position or a sibling
+element has already answered the question.
+
+Channels take the answer as an argument instead, the same
+type-as-a-value spelling `e.find(MyError)` uses:
+
+```glide
+let (tx, rx) = channel(Int)
+let (jobs, results) = channel(Job, cap: 64)
+```
+
+That works for any type nameable as a plain expression. A *generic*
+element type is not one — `List<Int>` in expression position parses as
+a comparison — so those take the annotation:
+
+```glide
+let (tx, rx): (Sender<Int?>, Receiver<Int?>) = channel()
 ```
 
 **Write bounds even where they are not yet enforced.** `<T: Ord>` is a

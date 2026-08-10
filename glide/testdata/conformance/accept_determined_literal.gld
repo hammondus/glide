@@ -1,0 +1,62 @@
+// The other half of reject_undetermined_literal.gld: every way an
+// expectation-driven literal gets told what it holds. This is the file
+// that catches an over-eager rule — the diagnostic must fire only when
+// *nothing* determines the type, and there are more sources of that
+// information than the annotation.
+
+type Job = struct { id: Int }
+
+fn from_an_annotation() -> Int {
+    let mut xs: List<Int> = []
+    xs.push(1)
+    let mut m: Map<String, Int> = [:]
+    m["k"] = 2
+    let x: Int? = None
+    let r: Result<Int, Error> = Ok(3)
+    xs.len() + m.len() + (x ?? 0) + (r ?? 0)
+}
+
+fn from_a_type_argument() -> Int {
+    // The element type named as a value, the `e.find(MyError)`
+    // spelling. Simple type names only — a generic element type like
+    // `List<Int>` is not an expression, so that case takes the
+    // annotation above.
+    let (tx, rx) = channel(Int)
+    let (jtx, jrx) = channel(Job, cap: 2)
+    tx.close()
+    jtx.close()
+    rx.recv().len()
+}
+
+fn from_a_sibling_element() -> Int {
+    // A non-empty element already settled it, so the empty one is not
+    // a hole.
+    let xss = [[1], []]
+    xss.len()
+}
+
+fn from_the_return_type() -> List<Int> {
+    // Position supplies the expectation: no annotation needed, and
+    // none demanded.
+    []
+}
+
+fn from_a_parameter(xs: List<Int>) -> Int { xs.len() }
+
+fn from_an_unmodelled_call() -> Int {
+    // Not an expectation-driven form, so silence even though the
+    // checker knows nothing about what came back. That is the
+    // `Unknown` contract, and the reason the rule is keyed on syntax
+    // as well as on the type.
+    let anything = from_the_return_type()
+    anything.len()
+}
+
+fn main() {
+    println(from_an_annotation())
+    println(from_a_type_argument())
+    println(from_a_sibling_element())
+    println(from_the_return_type())
+    println(from_a_parameter([1, 2]))
+    println(from_an_unmodelled_call())
+}

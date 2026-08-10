@@ -2030,10 +2030,14 @@ func (in *Interp) evalCall(ex *ast.Call, env *Env) (Value, *sig) {
 		return in.evalExpect(ex, env)
 	}
 	// channel(cap: n) — the one builtin with a named parameter; the
-	// name is validated here and the call proceeds positionally.
+	// name is validated here and the call proceeds positionally. The
+	// optional leading element type (`channel(Int, cap: 4)`) is
+	// positional, so Names carries a "" for it.
 	if id, ok := ex.Fn.(*ast.IdentExpr); ok && id.Name == "channel" && ex.Names != nil {
-		if len(ex.Names) != 1 || ex.Names[0] != "cap" {
-			panic(rtErr{ex.Span, "channel takes no arguments or (cap: n)"})
+		for _, n := range ex.Names {
+			if n != "" && n != "cap" {
+				panic(rtErr{ex.Span, "channel takes an optional element type and an optional (cap: n)"})
+			}
 		}
 		ex = &ast.Call{Fn: ex.Fn, Args: ex.Args, Span: ex.Span}
 	}

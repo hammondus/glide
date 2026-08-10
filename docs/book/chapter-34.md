@@ -676,7 +676,7 @@ fn run() -> Result<String, Error> {
         _ = s.spawn(|| http.serve("127.0.0.1:17651", r))
         time.sleep(80.ms)
 
-        let mut report = []
+        let mut report: List<String> = []
         for id in ["1", "999", "abc"] {
             let resp = http.get("http://127.0.0.1:17651/notes/" + id)?
             report.push("{id:4} -> {resp.status()} {resp.body().trim()}")
@@ -759,7 +759,7 @@ than a runtime double-write.
 ```glide
 // Bad — Go habits transplanted
 fn main() -> Result<(), Error> {
-    let (stop_tx, stop_rx) = channel()
+    let (stop_tx, stop_rx) = channel(Int)
     let mut shutting_down = false
 
     scope s {

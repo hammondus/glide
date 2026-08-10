@@ -413,6 +413,38 @@ Mechanics:
   before, by erasing to `Box<?>` and letting the annotation win on the
   Unknown wildcard — which is why the element type went unchecked when
   no annotation was there to win.
+- **The same rule for literals, not just calls** (M4d). The decision
+  above was recorded for calls and skipped for the forms that take
+  their type from the expectation: `[]`, `[:]`, `None`, `Ok(v)`,
+  `Err(v)`, `channel()`. `let mut xs = []` came out `List<?>`, so a
+  function declaring `List<Int>` could accumulate a String and a Bool
+  into it and return them with a clean check — a *declared return type
+  going unenforced*, which is the one thing the checker exists to
+  prevent. Now an error wherever nothing supplies the type: an
+  annotation, the position, or a sibling element. This is the M4c
+  sentence above applied where it was missed, not a new judgement.
+
+  Kept narrow deliberately: the rule fires only when the initialiser
+  is one of those *forms* and the result still contains a `?`. `let xs
+  = f()` where `f` is merely unmodelled stays silent, which is what
+  the `Unknown` contract promises. Declined again: inferring from the
+  first `push`, which is the constraint store this design does not
+  have.
+- **A channel names its element type as a value: `channel(Int)`**
+  (M4d). Forced by the rule above — the alternative was `let (tx, rx):
+  (Sender<Int>, Receiver<Int>) = channel()` on every channel in every
+  program, forty characters to say "Int" twice. The type-as-a-value
+  spelling already exists for `e.find(MyError)`, and a turbofish is
+  ruled out elsewhere in this document, so this is the established
+  form rather than a new one. `channel(Job, cap: 64)` buffers.
+  Erased at runtime; only the checker reads it.
+
+  Limit, since it will be met: the argument must be nameable as an
+  *expression*, so `channel(List<Int>)` and `channel(Int?)` do not
+  parse — `<` is a comparison and `?` is propagation. Those keep the
+  annotation form, which is why it stays legal. Generalising
+  type-as-value to arbitrary type expressions is a separate question
+  and is not open yet.
 
 - **A function type is writable: `fn(A, B) -> C`.** The type existed
   inside the checker from M4b — a closure handed to `sort_by` is

@@ -709,7 +709,7 @@ fn with_retries(max: Int = 5) -> Result<String, Fail> {
         "attempt {n} of {max}"
     }
 
-    let mut last = Err(.GaveUp)
+    let mut last: Result<String, Fail> = Err(.GaveUp)
     for i in 1..=max {
         println(describe(i, max))
         match attempt(i) {

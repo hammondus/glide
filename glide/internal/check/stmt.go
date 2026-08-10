@@ -135,6 +135,7 @@ func (c *checker) letStmt(st *ast.LetStmt) {
 		// constant settles into its default here — `let n = 1` is an
 		// Int, not a constant that stays polymorphic.
 		t = types.Default(c.infer(st.Init))
+		c.requireDetermined(st.Init, t)
 	default:
 		t = types.Unknown
 	}
@@ -148,6 +149,83 @@ func (c *checker) letStmt(st *ast.LetStmt) {
 		}
 	}
 	c.bind(st.Pat, t)
+}
+
+// requireDetermined reports a binding whose initialiser is a form that
+// takes its type from the expectation, where there was no expectation:
+// `let mut xs = []`, `let mut r = Ok(1)`, `let mut x = None`.
+//
+// The type comes out with a `?` in it — `List<?>`, `Result<Int, ?>` —
+// and `?` is a wildcard assignable to anything. So every later `push`
+// or assignment checks against nothing, and the destination the
+// binding was written for goes unenforced. A function declaring
+// `List<Int>` could accumulate into one of these and hand back
+// `["s", true]` with a clean check; one declaring
+// `Result<Int, MyErr>` could return `Err("not a MyErr")`.
+//
+// This is the bug requireBound reports for a call whose type
+// parameters the arguments could not determine, arriving through a
+// literal instead of a call, and it takes the same answer: an
+// annotation costs one line and says what the erasure was hiding.
+//
+// Deliberately keyed on *both* halves. Syntactically the initialiser
+// must be one of the expectation-driven forms, so `let xs = f()` —
+// where f is something the checker simply does not model — stays
+// silent, which is the `Unknown` contract. Semantically the result
+// must still contain a `?`, so `[[1], []]` and `Ok(1)` in a position
+// that supplies the error type are both fine: something already
+// settled it.
+func (c *checker) requireDetermined(init ast.Expr, t types.Type) {
+	if !expectationDriven(init) || !containsUnknown(t) {
+		return
+	}
+	c.errf(span(init), "cannot tell what the ? in %s is — annotate the binding", t)
+}
+
+// expectationDriven reports whether e is one of the forms whose type
+// comes from what is expected of it rather than from itself. The
+// checker already names this set: the collection literals, a bare
+// `None`, and expectedTypeBuiltins (`Ok`, `Err`, `Some`, `channel`),
+// which universe.go keeps out of freeBuiltins for exactly this reason.
+func expectationDriven(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.ListLit, *ast.MapLit:
+		return true
+	case *ast.IdentExpr:
+		return x.Name == "None"
+	case *ast.Call:
+		if fn, ok := x.Fn.(*ast.IdentExpr); ok {
+			return expectedTypeBuiltins[fn.Name]
+		}
+	}
+	return false
+}
+
+// containsUnknown reports whether t has a `?` anywhere inside it.
+func containsUnknown(t types.Type) bool {
+	switch x := t.(type) {
+	case *types.Basic:
+		return x.IsUnknown()
+	case *types.App:
+		for _, a := range x.Args {
+			if containsUnknown(a) {
+				return true
+			}
+		}
+	case *types.Named:
+		for _, a := range x.Args {
+			if containsUnknown(a) {
+				return true
+			}
+		}
+	case *types.Tuple:
+		for _, e := range x.Elems {
+			if containsUnknown(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *checker) forStmt(st *ast.ForStmt) {

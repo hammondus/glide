@@ -101,7 +101,7 @@ fn run() -> Result<String, Error> {
         _ = s.spawn(|| sweeper(db))
         time.sleep(80.ms)
 
-        let mut report = []
+        let mut report: List<String> = []
         report.push(post_note(`{"title": "first", "body": "hello"}`))
         report.push(post_note(`{"title": "second"}`))
         report.push(post_note(`{"body": "no title"}`))

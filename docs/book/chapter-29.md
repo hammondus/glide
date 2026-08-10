@@ -48,8 +48,8 @@ Three arm kinds:
 import time
 
 fn main() {
-    let (atx, arx) = channel()
-    let (ctx2, crx) = channel()
+    let (atx, arx) = channel(String)
+    let (ctx2, crx) = channel(String)
 
     scope s {
         _ = s.spawn(|| {
@@ -556,8 +556,8 @@ dies, it already does.
 import time
 
 fn main() {
-    let (atx, arx) = channel()
-    let (ctx2, crx) = channel()
+    let (atx, arx) = channel(String)
+    let (ctx2, crx) = channel(String)
 
     scope s {
         _ = s.spawn(|| {
@@ -589,7 +589,7 @@ from c: c
 
 ```glide-run
 fn main() {
-    let (etx, erx) = channel(cap: 1)
+    let (etx, erx) = channel(Int, cap: 1)
 
     let r = select {
         Some(v) = erx.recv() => "got {v}"
@@ -618,7 +618,7 @@ got 42
 import time
 
 fn main() {
-    let (tx, rx) = channel()
+    let (tx, rx) = channel(String)
 
     scope s {
         _ = s.spawn(|| {
@@ -648,8 +648,8 @@ Early exit cancels it.
 
 ```glide-run
 fn fan_in() -> Int {
-    let (atx, arx) = channel()
-    let (btx, brx) = channel()
+    let (atx, arx) = channel(Int)
+    let (btx, brx) = channel(Int)
 
     scope s {
         _ = s.spawn(|| {

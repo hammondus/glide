@@ -12,8 +12,8 @@ fn slow_square(n: Int) -> Int {
 // Fan out jobs to two workers over a rendezvous channel; collect
 // results on a buffered one. The scope guarantees nothing leaks.
 fn pool_sum(upto: Int) -> Int {
-    let (jobs_tx, jobs_rx) = channel()
-    let (out_tx, out_rx) = channel(cap: 64)
+    let (jobs_tx, jobs_rx) = channel(Int)
+    let (out_tx, out_rx) = channel(Int, cap: 64)
     scope s {
         _ = s.spawn(|| {
             for j in jobs_rx {
@@ -40,8 +40,8 @@ fn pool_sum(upto: Int) -> Int {
 // select with guards: drain two producers, disabling each channel's
 // arms as it closes — Go's nil-channel trick, spelled honestly.
 fn fan_in() -> Int {
-    let (atx, arx) = channel()
-    let (btx, brx) = channel()
+    let (atx, arx) = channel(Int)
+    let (btx, brx) = channel(Int)
     scope s {
         _ = s.spawn(|| {
             for i in 1..=5 { atx.send(i) }

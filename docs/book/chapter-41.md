@@ -621,7 +621,7 @@ fn run() -> Result<String, Error> {
         _ = s.spawn(|| http.serve("127.0.0.1:17699", r))
         time.sleep(80.ms)
 
-        let mut out = []
+        let mut out: List<String> = []
         out.push(post(`{"code": "gl", "url": "https://example.com"}`))
         out.push(post(`{"code": "gl", "url": "https://dupe.com"}`))
         out.push(post(`{"code": "", "url": "https://x.com"}`))

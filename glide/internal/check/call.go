@@ -154,17 +154,47 @@ func (c *checker) specialForm(name string, x *ast.Call, want types.Type) (types.
 		return types.Apply(types.Result, res[0], res[1]), true
 
 	case "channel":
-		// channel() / channel(cap: n) -> (Sender<T>, Receiver<T>).
-		for _, a := range x.Args {
-			c.checkExpr(a, types.Int)
-		}
-		if len(x.Names) > 0 && (len(x.Names) != 1 || x.Names[0] != "cap") {
-			c.errf(x.Span, "channel takes no arguments or (cap: n)")
+		// channel(T) / channel() / channel(cap: n) -> (Sender<T>, Receiver<T>).
+		//
+		// The element type is named as a *value*, the spelling
+		// `e.find(MyError)` already established — `let (tx, rx) =
+		// channel(Int)`. Without it the pair comes out
+		// `(Sender<?>, Receiver<?>)` and every `send` goes unchecked,
+		// which the alternative annotation would have to spell as
+		// `let (tx, rx): (Sender<Int>, Receiver<Int>) = channel()`:
+		// forty characters to say "Int" twice.
+		// x.Names runs parallel to x.Args, "" for a positional one, so
+		// the positional count is the index of the first named
+		// argument.
+		npos := len(x.Args)
+		for i, n := range x.Names {
+			if n != "" {
+				npos = i
+				break
+			}
 		}
 		elem := types.Type(types.Unknown)
-		if tup, ok := want.(*types.Tuple); ok && len(tup.Elems) == 2 {
-			if s, isApp := tup.Elems[0].(*types.App); isApp && s.C == types.Sender {
-				elem = s.Elem()
+		rest := x.Args
+		if npos > 0 {
+			if m, isType := c.infer(rest[0]).(*types.Meta); isType {
+				elem = m.T
+				rest = rest[1:]
+			}
+		}
+		for _, a := range rest {
+			c.checkExpr(a, types.Int)
+		}
+		for _, n := range x.Names {
+			if n != "" && n != "cap" {
+				c.errf(x.Span, "channel takes an optional element type and an optional (cap: n)")
+				break
+			}
+		}
+		if types.IsUnknown(elem) {
+			if tup, ok := want.(*types.Tuple); ok && len(tup.Elems) == 2 {
+				if s, isApp := tup.Elems[0].(*types.App); isApp && s.C == types.Sender {
+					elem = s.Elem()
+				}
 			}
 		}
 		return &types.Tuple{Elems: []types.Type{

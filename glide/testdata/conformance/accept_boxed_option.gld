@@ -41,7 +41,7 @@ fn main() {
     //    channel's own "closed and drained" signal is the box being
     //    absent, which a payload can no longer impersonate.
     scope s {
-        let (tx, rx) = channel()
+        let (tx, rx): (Sender<Int?>, Receiver<Int?>) = channel()
         s.spawn(|| {
             tx.send(None)
             tx.send(Some(7))

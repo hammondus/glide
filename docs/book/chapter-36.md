@@ -22,7 +22,7 @@ demands it:
 
 ```glide
 fn make_crc_table() -> List<Int> {
-    let mut t = []
+    let mut t: List<Int> = []
     for i in 0..256 {
         let mut c = i
         for _ in 0..8 {

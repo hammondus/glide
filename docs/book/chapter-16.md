@@ -576,7 +576,7 @@ impl Stack {
 
     // Transformation — `self`, returns a new value
     fn reversed(self) -> Stack {
-        let mut out = []
+        let mut out: List<Int> = []
         for i in 0..self.items.len() {
             out.push(self.items[self.items.len() - 1 - i])
         }

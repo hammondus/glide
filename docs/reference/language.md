@@ -6,7 +6,7 @@ book (`docs/book/`) teaches; this file reminds.
 
 **Status markers** — the language is ahead of its implementation:
 
-- ✓ — runs in the current interpreter (M4c)
+- ✓ — runs in the current interpreter (M4d)
 - ○ — designed (recorded in `DESIGN.md`), not yet implemented; using
   it today is a parse, check, or runtime error
 
@@ -107,8 +107,8 @@ reserved — declaring them is an error ✓ — and `None` is a literal.
 | Unicode escape | `\u{1F600}` — braced hex, one form; also in rune literals | ✓ |
 | Raw string | `` `no escapes, no interpolation, multiline` `` — cannot contain a backtick (by definition of raw) | ✓ |
 | Rune | `'a'` (its own type, not an int alias; `'ab'` is a lex error; escape family + `\u{…}` work) | ✓ |
-| List | `[1, 2, 3]`, empty `[]` | ✓ |
-| Map | `[:]` (empty; annotation required), inserts via `m[k] = v` | ✓ |
+| List | `[1, 2, 3]`; empty `[]` only where something says what it holds | ✓ |
+| Map | `[:]` (empty), inserts via `m[k] = v` | ✓ |
 | Tuple | `(a, b)` — parens + comma; `(x)` is grouping | ✓ |
 | Unit | `()` | ✓ |
 | Range | `lo..hi` half-open, `lo..=hi` inclusive (Int only; `..=` desugars to `hi + 1`, so it cannot include the maximum Int — loud error) | ✓ |
@@ -405,6 +405,17 @@ patterns in function signatures, ref/binding modes.
   type parameters; the **tail-value rule** in both directions; the
   **nested-shadow ban**; **`let … else` divergence**; and every name
   being defined. ✓
+- **An undetermined type is an error, not an `Unknown`** ✓ (M4d). The
+  forms whose type comes from the expectation rather than from
+  themselves — `[]`, `[:]`, `None`, `Ok(v)`, `Err(v)`, `channel()` —
+  must have something that supplies it: an annotation, the position
+  they sit in, a sibling element, or (for `channel`) the element type
+  as an argument. Bound with nothing to constrain them the type
+  arrives with a `?` in it, and since `?` is assignable to anything
+  the binding's real destination stops being checked — a `List<Int>`
+  function could accumulate a String and a Bool into a bare `[]` and
+  return them clean. Same rule, and the same diagnostic shape, as a
+  generic call whose arguments determine nothing (`Box.new()`).
 - **Nothing is left to the evaluator alone.** As of M4d every rule the
   language has is reported by `glide check` before a line runs. The
   evaluator keeps its own copies of `mut`, the nested-shadow ban,
@@ -468,8 +479,9 @@ patterns in function signatures, ref/binding modes.
   a cancelled task. `scope(timeout: 5.s) { … }` evaluates to
   `Result<T, Timeout>`; body `?` propagates through the scope, so
   body errors never nest inside it. `s.deadline()` reads the
-  effective deadline. Channels: `let (tx, rx) = channel()`
-  (rendezvous) / `channel(cap: n)` (buffered; no unbounded); mpmc,
+  effective deadline. Channels: `let (tx, rx) = channel(Int)`
+  (rendezvous) / `channel(Int, cap: n)` (buffered; no unbounded) —
+  the element type is named as a value, see stdlib.md; mpmc,
   both halves clone; `tx.send(v)` (panics if closed), `tx.close()`
   (idempotent; only `tx` has it), `rx.recv() -> Option<T>` (`None` =
   closed-and-drained), `for v in rx` consumes until closed.

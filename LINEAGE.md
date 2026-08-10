@@ -132,6 +132,15 @@ deliberately left behind.
   store, no global solve, no occurs-check subtleties, and the
   algorithm reads like the typing rules.
 
+- **2010s** — the bill for declining a constraint store comes due in
+  every such language at the same place: a value whose type nothing
+  local determines. Rust's `let v = Vec::new()` and `None` both fail
+  with *type annotations needed*; Swift's `let xs = []` fails with
+  *empty collection literal requires an explicit type*; Kotlin needs
+  `listOf<Int>()`. Three languages, one diagnostic, because the
+  alternative — inferring from a later statement — is exactly the
+  global solve they all gave up.
+
 **Glide takes** bidirectional checking as the direct consequence of
 mandatory signatures. Because every function's type is written down,
 nothing needs to be inferred across a call — checking is a local walk
@@ -141,6 +150,16 @@ resolve in the expected type, and implicit `T -> T?` coercion fires
 where the expected type is an Option. The discipline recorded above
 was chosen for error quality; a tractable checker is the second
 dividend, and M4 is where it gets collected.
+
+It also takes the bill, in the same coin as its neighbours: an empty
+`[]`, a bare `None` or `Ok(v)`, and a `channel()` with nothing to
+determine them are compile errors demanding an annotation (M4d), not
+values that quietly become `List<?>`. The one place Glide answers
+differently is channels, where the annotation would have been
+`(Sender<Int>, Receiver<Int>)`: the element type is passed as a value
+instead, `channel(Int)` — the spelling Glide already uses for
+`e.find(MyError)`, and reachable only because no-turbofish left the
+argument position free.
 
 ## Landing a checker gradually: report only when certain
 

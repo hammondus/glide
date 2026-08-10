@@ -412,7 +412,7 @@ func TestSpawnCannotCaptureMut(t *testing.T) {
 		t.Errorf("an immutable capture must cross freely: %s", got)
 	}
 	// The freeze idiom: mut for setup, frozen before it crosses.
-	if got := frontendErr(t, "fn main() {\n    let mut b = []\n    b.push(1)\n    let frozen = b\n    scope s {\n        let t = s.spawn(|| frozen.len())\n        println(t.join())\n    }\n}"); got != "" {
+	if got := frontendErr(t, "fn main() {\n    let mut b: List<Int> = []\n    b.push(1)\n    let frozen = b\n    scope s {\n        let t = s.spawn(|| frozen.len())\n        println(t.join())\n    }\n}"); got != "" {
 		t.Errorf("the freeze idiom must work: %s", got)
 	}
 	// A closure that is not spawned may capture whatever it likes.

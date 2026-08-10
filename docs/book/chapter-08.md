@@ -187,7 +187,7 @@ made a different binding.
 
 ```glide-run
 fn main() {
-    let mut fs = []
+    let mut fs: List<fn() -> Int> = []
     for i in 0..3 {
         fs.push(|| i)
     }
@@ -859,7 +859,7 @@ stops being the right tool.
 ```glide
 // Bad — everything wrong at once
 fn process(items: List<Int>) -> List<Int> {
-    let mut out = []
+    let mut out: List<Int> = []
     items.iter().for_each(|x| {
         if x % 2 == 0 {
             out.push(x * 2)
@@ -897,7 +897,7 @@ Or, if you genuinely want a loop — which is fine, and often clearer:
 ```glide
 // Also good
 fn process(items: List<Int>) -> List<Int> {
-    let mut out = []
+    let mut out: List<Int> = []
     for n in items {
         if n % 2 == 0 {
             out.push(n * 2)

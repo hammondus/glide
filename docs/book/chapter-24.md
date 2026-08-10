@@ -501,7 +501,7 @@ check the lengths first.
 let contents = paths.iter().map(|p| fs.read_string(p)?).collect()
 
 // Good
-let mut contents = []
+let mut contents: List<String> = []
 for p in paths {
     contents.push(fs.read_string(p)?)
 }

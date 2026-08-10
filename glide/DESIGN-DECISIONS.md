@@ -1208,6 +1208,79 @@ every case `diverges` fails to see becomes a false positive. That is
 why the guard question mattered enough to get it right rather than
 get it safe.
 
+### The empty-literal hole, and `channel(T)`
+
+Found by pulling on a thread from the M4d book correction: `let mut
+prime = []` in a scratch file. The type is `List<?>`, `?` is
+assignable to anything, and nothing downstream is checked again. This
+compiled clean and ran:
+
+```glide
+fn c() -> List<Int> {
+    let mut xs = []
+    xs.push("s")
+    xs.push(true)
+    xs           // ["s", true]
+}
+```
+
+A **declared return type going unenforced** is not a small
+inconsistency, and it was not confined to lists. The same hole existed
+for `[:]`, for `None`, for `Ok(v)`/`Err(v)` (a `Result<Int, MyErr>`
+function could return `Err("not a MyErr")`), and for `channel()`,
+where it meant no `send` in a concurrent program was ever checked.
+
+One family, one cause: these are the forms whose type comes from what
+is *expected* of them rather than from themselves. `universe.go`
+already names the set — `expectedTypeBuiltins`, the builtins kept out
+of `freeBuiltins` precisely because "their result depends on the
+expected type". Bind one where nothing supplies an expectation and the
+`?` survives into the binding.
+
+**The answer was already recorded, for the call case.** M4c's
+`requireBound` reports `Box.new()` with "cannot tell what T is here —
+annotate the binding", and its comment reads: *"Erasing to Unknown
+silently was the M4b behaviour, and it means a later `add(1)` then
+`add("s")` both pass."* That is this bug's sentence verbatim. It was
+missed because it arrives through a literal rather than a call, so
+this is not a new judgement — it is the existing one, applied where it
+was skipped. Rust answers `Vec::new()` the same way.
+
+**Declined: infer from the first use.** Rust makes `let mut v =
+Vec::new(); v.push(1)` work with a constraint store, which `DESIGN.md`
+declines outright ("no cross-function unification, no occurs check,
+and no solver"). A one-statement peephole is a solver in disguise and
+its edges are all bad — a push inside a branch, two pushes that
+disagree, a first push after a loop.
+
+**The rule is keyed on syntax *and* type, and needs both.** Syntax
+alone would report `let xs = f()` where `f` is merely something the
+checker does not model, which is exactly what the `Unknown` contract
+promises not to do. Type alone would miss that distinction. Requiring
+both means the diagnostic fires only where the language itself failed
+to supply an answer. `[[1], []]` stays legal: the non-empty sibling
+already settled it.
+
+**`channel(T)`, because the annotation was intolerable there.** Every
+other form annotates cheaply. A channel would have needed `let (tx,
+rx): (Sender<Int>, Receiver<Int>) = channel()` — forty characters to
+say "Int" twice, on the language's flagship concurrency idiom. So the
+element type is named as a *value*: `channel(Int)`, `channel(Job, cap:
+64)`. That spelling is not new either; `e.find(MyError)` established
+it, and `DESIGN.md` rules out a turbofish. Erased at runtime — the
+interpreter drops a leading `TypeV` — since only the checker reads it.
+
+Its limit, stated because it will be met: only types nameable as an
+*expression* work, so `channel(List<Int>)` and `channel(Int?)` do not
+parse (`<` is a comparison, `?` is propagation). Those take the
+annotation, which is why the annotation form stays legal rather than
+being replaced.
+
+The sweep: ~40 sites across the book, examples, corpus and the Go
+tests' inline programs. `accept_determined_literal.gld` is the guard —
+six ways an expectation can arrive, including the two that are easy to
+break, a sibling element and a return position.
+
 ## Deliberately absent (after M4)
 
 `Mutex<T>` (stdlib-era; ownership-transfer culture first), `derive`

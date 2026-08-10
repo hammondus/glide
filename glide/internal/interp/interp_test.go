@@ -383,7 +383,7 @@ func TestFreshLoopBindings(t *testing.T) {
 	// Closures capture per-iteration bindings, not one shared variable.
 	out, err := runProg(t, `
 fn main() {
-    let mut fns = []
+    let mut fns: List<fn() -> Int> = []
     for i in 0..3 {
         fns.push(|| i)
     }

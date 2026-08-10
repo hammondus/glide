@@ -120,7 +120,7 @@ impl Stack<T> {
     fn pop(mut self) -> T? {
         if self.items.len() == 0 { return None }
         let last = self.items[self.items.len() - 1]
-        let mut rest = []
+        let mut rest: List<T> = []
         for i in 0..self.items.len() - 1 {
             rest.push(self.items[i])
         }
@@ -688,7 +688,7 @@ impl Stack<T> {
     fn pop(mut self) -> T? {
         if self.items.len() == 0 { return None }
         let last = self.items[self.items.len() - 1]
-        let mut rest = []
+        let mut rest: List<T> = []
         for i in 0..self.items.len() - 1 {
             rest.push(self.items[i])
         }

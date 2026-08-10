@@ -717,7 +717,7 @@ type Note = struct {
 
 fn load_all(db: Db) -> Result<List<Note>, Error> {
     let rows = db.query("select id, title, body from notes order by id")?
-    let mut out = []
+    let mut out: List<Note> = []
     for row in rows {
         out.push(Note{
             id:    row["id"] ?? 0,
@@ -791,7 +791,7 @@ The four problems, numbered:
 // Glide, today
 let rows = db.query("select id, title, body from notes where org = :org",
                     ["org": org])?
-let mut notes = []
+let mut notes: List<Note> = []
 for row in rows {
     notes.push(Note{
         id:    row["id"] ?? 0,
