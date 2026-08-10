@@ -225,39 +225,32 @@ error messages are what you will spend time reading:
    later rather than written ahead of it. This is an unusual choice and
    an honest one for a language that is still moving.
 
-3. **Evaluate.** A tree-walking evaluator over the AST. Declarations
+3. **Check.** Every program is type-checked before any of it runs.
+   Annotations are not decoration: they are read, resolved to real
+   types, and enforced. This stage runs in every tier — `glide run`,
+   `glide test`, and eventually the compiler — with no `--no-check`
+   and no plan for one. `glide check` is this stage on its own.
+
+4. **Evaluate.** A tree-walking evaluator over the AST. Declarations
    (functions, types, `impl` blocks, `const`) are collected first and
    are order-independent; then `main` is called.
 
-There is no type-checking stage yet. **Type annotations are parsed,
-stored as strings, and ignored.** This is the single most important
-thing to know about running Glide today — and it is the thing M4, the
-work currently in progress, exists to end.
+The checker was the M4 milestone, and it is done. An earlier plan
+deferred it to a compiler frontend written in Glide; that was reversed,
+for reasons Chapter 37 covers — the frontend would have been the most
+type-dense Glide program ever written, written in the one tier that
+checked nothing. The checker was built in Go instead, and the
+interpreter keeps it. `glide run` is a statically-checked scripting
+language, not a stepping stone. Chapter 19 is the chapter on the
+checker itself: what it proves, and where it stops.
 
-An earlier plan deferred the checker to a compiler frontend written in
-Glide. That was reversed, for reasons Chapter 37 covers: the frontend
-would have been the most type-dense Glide program ever written, written
-in the one tier that checks nothing. The checker is being built in Go
-first, and the interpreter keeps it — `glide run` is meant to be a
-statically-checked scripting language, not a stepping stone.
+#### Everything is checked, including the rules that are not about types
 
-#### Rules enforced dynamically instead of statically
-
-Because a program that can cheat proves nothing about the semantics,
-the rules the compiler will eventually enforce statically are enforced
-at runtime today. You get a real error, just later than you will
-eventually get it:
-
-```glide
-fn main() {
-    let x = 1
-    x = 2
-}
-```
-
-```
-error: line 3: cannot mutate through immutable binding "x" (declare it with `let mut`)
-```
+The checker is not only a type checker. Every rule the language has is
+enforced before a line executes: `mut` on bindings, receivers and
+assignment paths; sum-type match exhaustiveness; reserved-name
+protection for the builtins; the tail-value rule; the nested-shadow
+ban; `let … else` divergence; and every annotation in the program.
 
 ```glide
 fn main() {
@@ -273,14 +266,19 @@ fn main() {
 error: line 4: cannot shadow "count" from an enclosing block (redeclaring in the same scope is fine; nested shadowing is not)
 ```
 
-Note the shape of both messages: what is wrong, and what to do about
+Note the shape of that message: what is wrong, and what to do about
 it. That is a standard the project holds itself to, and it is a
 standard worth stealing.
 
-The dynamically-enforced set is: `mut` (bindings, receivers, and
-assignment paths), the nested-shadow ban, `let … else` divergence, the
-tail-value rule, sum-type match exhaustiveness, and reserved-name
-protection for the builtins.
+The last three of those rules — tail-value, nested-shadow, let-else
+divergence — were the evaluator's alone until M4d, and fired only when
+the offending line actually ran. Chapter 19 covers what closing them
+required, and the one edge that remains.
+
+The evaluator still carries its own copy of each rule. That is
+deliberate belt-and-braces: reaching one now means the checker has a
+bug, so it should be loud rather than silent. `DESIGN.md` keeps the
+question of whether the duplicates stay forever as an open one.
 
 #### The interpreter's concurrency model, briefly
 
@@ -459,8 +457,8 @@ reaction is worth repeating.
 
 ### 5. Common Mistakes
 
-**Expecting type errors.** The single biggest surprise for anyone
-coming to Glide today: annotations are ignored.
+**Expecting a way to skip the checker.** There isn't one, and there
+will not be one.
 
 ```glide
 fn main() {
@@ -473,8 +471,16 @@ fn main() {
 error: line 2: expected Int, found String
 ```
 
-This ran and printed `not an int` through M3. As of M4 every
-annotation is checked, in every tier, with no way to skip it.
+This ran and printed `not an int` through M3, when annotations were
+parsed and ignored. As of M4 every annotation is checked, in every
+tier. If you have read older notes on the project — or an older
+printing of this chapter — that describe Glide as a dynamically-typed
+interpreter with decorative types, they describe a language that no
+longer exists.
+
+**Assuming `glide check` is weaker than `glide run`.** It was, through
+M4c — three rules fired only at runtime. As of M4d it reports
+everything the run would have reported before the run starts.
 
 **Running a file with no `main`.** Library files parse fine but
 `glide run` needs an entry point:
@@ -560,13 +566,9 @@ where hygiene is enforced, and treating it as the real gate — locally,
 in your editor's task runner, in CI — is the habit the design is
 built around.
 
-**Write the annotations anyway.** They are ignored today and they are
-the specification tomorrow. A codebase full of `let x = …` with no
-local annotations will be harder to bring under the checker, and it
-will be harder to read in the meantime.
-
-Note that signatures are not optional even now — the parser requires a
-type on every parameter, so the unannotated form was never available:
+**Let inference do the locals; annotate the boundaries.** Signatures
+are not optional and never were — the parser requires a type on every
+parameter and the checker holds the function to it:
 
 ```glide
 fn process(items, limit) {          // error: expected ':' in parameter list
@@ -574,9 +576,12 @@ fn process(items, limit) {          // error: expected ':' in parameter list
 }
 ```
 
-What *is* currently unchecked is whether the annotation tells the
-truth. `fn process(items: List<Note>, limit: Int)` will happily accept
-a `String` for `limit` today. That is the gap M4 closes.
+That mandatory boundary is what makes the checker cheap: it never has
+to infer across a call, so a local `let x = …` can be left bare and
+still be fully known. Annotate a local when the type is the point —
+when it documents an intent the right-hand side does not make
+obvious — not as insurance. Chapter 19 explains why the trade lands
+this way.
 
 Good:
 
@@ -586,9 +591,9 @@ fn process(items: List<Note>, limit: Int) -> Result<Int, Error> {
 }
 ```
 
-The first form is not even a shortcut worth taking: signatures are the
-documentation, and Glide's inference is deliberately local to bodies so
-that boundaries stay explicit.
+The unannotated form is not even a shortcut worth wanting: signatures
+are the documentation *and* the thing the checker holds every caller
+to.
 
 **Let the formatter own the import block.** In the designed toolchain,
 saving the file fixes the imports; humans do not curate them.

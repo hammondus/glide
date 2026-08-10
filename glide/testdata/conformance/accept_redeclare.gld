@@ -1,0 +1,65 @@
+// Every legal redeclare. This file is the guard on the nested-shadow
+// ban: the rule is enforced by walking scopes, so it is only as right
+// as the checker's scope structure is faithful to the evaluator's.
+// Each case here is a place where a binding and the block that follows
+// it deliberately share one scope, and a checker that pushed an extra
+// scope would reject the lot.
+
+fn params_and_body(x: Int) -> Int {
+    // A parameter and a body-level `let` are the same scope.
+    let x = x + 1
+    x
+}
+
+fn loop_pattern() {
+    for x in [1, 2, 3] {
+        // The loop pattern and the loop body are the same scope.
+        let x = x * 2
+        println(x)
+    }
+}
+
+fn if_let_pattern(v: Int?) {
+    if let n = v {
+        // The `if let` binding and its `then` block are the same scope.
+        let n = n + 1
+        println(n)
+    }
+}
+
+fn sequential() {
+    // Redeclaring in the same scope, repeatedly, is the idiom that
+    // makes the ban affordable: rebinding a name as it is transformed.
+    let s = "  text  "
+    let s = s.trim()
+    let s = s.to_upper()
+    println(s)
+}
+
+fn siblings() {
+    // Sibling blocks do not nest, so neither shadows the other.
+    {
+        let tmp = 1
+        println(tmp)
+    }
+    {
+        let tmp = 2
+        println(tmp)
+    }
+}
+
+fn function_boundary() -> Int {
+    let n = 1
+    // A closure is a function boundary: it may reuse outer names.
+    let f = |n: Int| n * 2
+    f(n)
+}
+
+fn main() {
+    println(params_and_body(1))
+    loop_pattern()
+    if_let_pattern(3)
+    sequential()
+    siblings()
+    println(function_boundary())
+}

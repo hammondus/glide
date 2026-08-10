@@ -1,0 +1,36 @@
+// The nested-shadow ban: shadowing a live name from an enclosing
+// block within the same function. Redeclaring in the *same* scope is
+// idiomatic and lives in accept_redeclare.gld — the two files are a
+// pair, and the accept half is the one that catches a checker whose
+// scopes do not match the evaluator's.
+
+fn in_a_block(n: Int) -> Int {
+    let total = n
+    {
+        let total = total + 1   // error: cannot shadow "total"
+        println(total)
+    }
+    total
+}
+
+fn in_a_loop() {
+    let count = 0
+    for x in [1, 2] {
+        let count = count + 1   // error: cannot shadow "count"
+        println(count)
+    }
+    println(count)
+}
+
+fn a_parameter(limit: Int) {
+    if limit > 0 {
+        let limit = 0           // error: cannot shadow "limit"
+        println(limit)
+    }
+}
+
+fn main() {
+    println(in_a_block(1))
+    in_a_loop()
+    a_parameter(1)
+}

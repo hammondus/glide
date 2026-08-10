@@ -6,17 +6,35 @@ import (
 	"glide/internal/types"
 )
 
-// block checks a block and returns the type of its tail value. want is
-// the expected type when the block sits in an expression position with
-// one (an `if` arm whose sibling is already typed, a function body
-// whose return type is declared); nil means synthesise.
+// block checks a block in a scope of its own and returns the type of
+// its tail value. want is the expected type when the block sits in an
+// expression position with one (an `if` arm whose sibling is already
+// typed, a function body whose return type is declared); nil means
+// synthesise.
 func (c *checker) block(b *ast.Block, want types.Type) types.Type {
 	if b == nil {
 		return types.Unit
 	}
 	c.push()
 	defer c.pop()
+	return c.blockIn(b, want)
+}
 
+// blockIn checks a block *in the scope the caller already pushed*,
+// rather than a child of it. Every site that binds names belonging to
+// the block before entering it — a function's parameters, a closure's,
+// a `for` pattern, an `if let` pattern, a `scope` handle — uses this,
+// because that is exactly what the evaluator does: it declares those
+// bindings into an env and hands the same env to evalBlock.
+//
+// The distinction only became load-bearing when the nested-shadow ban
+// moved into the checker. `fn f(x: Int) { let x = 1 }` is a same-scope
+// redeclare, which is idiomatic; a checker that pushed a second scope
+// here would call it a nested shadow and reject a working program.
+func (c *checker) blockIn(b *ast.Block, want types.Type) types.Type {
+	if b == nil {
+		return types.Unit
+	}
 	// Nested fns are hoisted to block entry so siblings can be
 	// mutually recursive, which means their signatures must be in
 	// scope before any statement is checked.
@@ -122,6 +140,12 @@ func (c *checker) letStmt(st *ast.LetStmt) {
 	}
 	if st.Else != nil {
 		c.block(st.Else, nil)
+		// Checked after the block, because divergence is read partly
+		// off the types the block's own checking recorded.
+		if !c.diverges(st.Else) {
+			c.errf(st.Span, "the else block of `let … else` must diverge "+
+				"(return or exit), but it ran off the end")
+		}
 	}
 	c.bind(st.Pat, t)
 }
@@ -140,7 +164,10 @@ func (c *checker) forStmt(st *ast.ForStmt) {
 	case st.Cond != nil:
 		c.cond(st.Cond, "for")
 	}
-	c.block(st.Body, nil)
+	// The loop pattern's bindings and the body share one scope, as
+	// they do in the evaluator: `for x in xs { let x = f(x) }` is a
+	// redeclare, not a shadow.
+	c.blockIn(st.Body, nil)
 }
 
 // elemType is what `for x in it` binds. Reporting a non-iterable is

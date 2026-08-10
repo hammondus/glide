@@ -1119,6 +1119,95 @@ works, and `?` in `main` prints the error and exits 1. That closes
 most of the gap where a script wants "this must succeed, crash
 otherwise", so no `unwrap`/`expect`-style builtin was added.
 
+### M4d: the last three rules the evaluator enforced alone
+
+The tail-value rule, the nested-shadow ban and `let … else` divergence
+were checked only by the evaluator, and only on an executed path. All
+three are now static (2026-08-10). Found while correcting the book: a
+doc claimed annotations were ignored, checking that claim turned up
+the residue, and the residue turned out to be worth closing rather
+than documenting.
+
+**A fourth documented gap did not exist.** Both `docs/book/chapter-19.md`
+and `docs/reference/language.md` said a bound was unenforced when its
+type parameter appeared only inside a container — `fn top<T: Ord>(xs:
+List<T>)` accepting a `List<Blob>`. It is enforced, and was: `unify`
+recurses through `App`, `Named` and `Tuple` arguments, so the binding
+`T := Blob` reaches `checkBounds` from any depth. `List<T>`, `T?`,
+`(T, Int)` and `List<List<T>>` were all tested. The prose was written
+from the design intent and never re-verified — the exact failure the
+conformance corpus exists to prevent, in the one place the corpus does
+not reach.
+
+**The scope-structure trap, which is the real content of this
+change.** The nested-shadow ban depends only on scope structure, so
+enforcing it statically means the checker's scopes must match the
+evaluator's exactly — and the evaluator's are not the obvious shape.
+`evalBlock` does not push an environment; its *caller* decides. A
+function call declares parameters into an env and hands that same env
+to the body, so `fn f(x: Int) { let x = g(x) }` is a same-scope
+redeclare and legal. The checker pushed a scope for the parameters and
+then `block` pushed another, which would have made that program a
+nested shadow.
+
+Five sites share a scope this way: a function's parameters and its
+body, a closure's, a `for` pattern and its body, an `if let` binding
+and its `then`, and a `scope` handle and its block. `block` was split
+into `block` (push, then check) and `blockIn` (check in the caller's
+scope), and those five call `blockIn`. A match arm is *not* in the
+list, and that asymmetry is the evaluator's too: the arm env and a
+block-expression body are separate envs there, so a rebinding inside
+`Some(v) => { … }` really is a shadow.
+
+Nothing enforces this agreement mechanically. `accept_redeclare.gld`
+is the guard — six legal-redeclare shapes, one per sharing site, whose
+whole job is to fail if the two ever drift apart. That is the general
+lesson for the duplicated rules: an accept-case catches a false
+positive, and a false positive is what a scope mismatch produces.
+
+**Divergence is proved, and the proof has a hole the language cannot
+fill.** `let … else` needs the else block to leave. The primitives are
+a closed set — `return`, `break`, `continue`, and `os.exit`, typed
+`Never` — plus composition: an `if` whose every branch leaves, a
+`match` whose every arm does. Guards need no special case, and adding
+one would have been a mistake in the expensive direction: a guarded
+arm cannot count as covering for exhaustiveness, so an unguarded arm
+always catches the fall-through, and every-arm-diverges is therefore
+sound. Treating a guard as "might fall out" would have rejected
+`match k { _ if hot => { return 1 } _ => { return 2 } }`.
+
+A conditionless `for { … }` counts, when nothing breaks out to *here*.
+A break aimed at an enclosing labelled loop does not disqualify it —
+that leaves this loop without resuming after it, so the block is still
+departed — while an unlabelled break, or one naming this loop, does. A
+`for cond` never counts, not even `for true`: reading the condition
+would mean constant-folding it, and then the rule's edge moves every
+time the folder gets cleverer. Go's terminating-statement rule and
+Rust's `loop`-versus-`while true` draw the line in the same place.
+
+The hole: a helper ending in `os.exit` is typed `()`, so `else {
+die("no config") }` is rejected though it would run. Rust rejects it
+too and answers with `-> !` (Swift `-> Never`, Kotlin `Nothing`);
+`../DESIGN.md` now carries that as an open question. Not adopted
+speculatively — nothing in the corpus, the examples or the book wanted
+it. What makes the set *closed* is not its size but that no user code
+can join it: there is no way to declare a function that never returns.
+
+`flow.go` is also the groundwork for unreachable-code detection, which
+`../DESIGN.md` now records as a goal. The predicate transfers; the
+failure direction does not. For `let … else`, a weak analysis rejects
+working code, so the analysis is made as strong as it can be. For
+unreachable code, a strong analysis condemns live code, so it must be
+weak. Reusing the predicate without inverting that judgement is the
+mistake waiting to be made there.
+
+Note the direction of the risk, which is inverted from every other
+rule here. Elsewhere the checker under-approximates and silence is the
+failure mode. Here a *weaker* analysis means rejecting working code:
+every case `diverges` fails to see becomes a false positive. That is
+why the guard question mattered enough to get it right rather than
+get it safe.
+
 ## Deliberately absent (after M4)
 
 `Mutex<T>` (stdlib-era; ownership-transfer culture first), `derive`

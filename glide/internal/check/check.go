@@ -285,12 +285,12 @@ func (c *checker) checkFile(f *ast.File) {
 		for _, prm := range td.Params {
 			c.declare(prm.Name, c.resolve(prm.Type), false, prm.Span)
 		}
-		c.block(td.Body, nil)
+		c.blockIn(td.Body, nil)
 		c.pop()
 	}
 	for _, bd := range f.Benches {
 		c.pushFn()
-		c.block(bd.Body, nil)
+		c.blockIn(bd.Body, nil)
 		c.pop()
 	}
 }
@@ -352,11 +352,25 @@ func (c *checker) fnBody(fd *ast.FuncDecl, sig *types.Func, self types.Type) {
 			want = nil
 		}
 		defer func() { c.yields = savedYields }()
-		tail := c.block(fd.Body, want)
+		tail := c.blockIn(fd.Body, want)
 		if want != nil && !types.IsOpaque(tail) && !types.IsNever(tail) &&
 			!types.AssignableTo(tail, want) {
 			c.errf(tailSpan(fd.Body), "this function returns %s, but its body ends with %s",
 				sig.Ret, types.Default(tail))
+		}
+		// The tail-value rule's other half: no declared return type
+		// means a meaningful tail value is an error, not a silent
+		// discard. The evaluator enforced this alone until M4d, and
+		// only when the function was actually called — so a helper on
+		// a path the tests never took kept its bug.
+		//
+		// A generator is exempt for the same reason it is exempt above:
+		// its body's tail is not what it produces.
+		if fd.RetType == nil && !c.scope.generator && !types.IsOpaque(tail) &&
+			!types.IsNever(tail) && tail != types.Unit {
+			got := types.Default(tail)
+			c.errf(tailSpan(fd.Body), "%s declares no return value but its body ends with a %s; "+
+				"discard it with `_ = …` or declare `-> %s`", fd.Name, got, got)
 		}
 		c.pop()
 		c.ret = savedRet
@@ -377,9 +391,30 @@ func (c *checker) push() {
 
 func (c *checker) pop() { c.scope = c.scope.parent }
 
+// declare introduces a binding, and enforces the nested-shadow ban:
+// redeclaring in the same scope is idiomatic, shadowing a live name
+// from an enclosing block within the same function is an error, and a
+// function boundary resets the rule (a closure may reuse outer names
+// for its own locals).
+//
+// This mirrors Env.declare in the evaluator, which enforced the rule
+// alone until M4d. The mirror has to be exact in *scope structure*,
+// not just in the walk: see blockIn.
 func (c *checker) declare(name string, t types.Type, mut bool, at source.Span) {
 	if name == "" || name == "_" || c.scope == nil {
 		return
+	}
+	if !c.scope.fnBound {
+		for p := c.scope.parent; p != nil; p = p.parent {
+			if _, ok := p.vars[name]; ok {
+				c.errf(at, "cannot shadow %q from an enclosing block "+
+					"(redeclaring in the same scope is fine; nested shadowing is not)", name)
+				break
+			}
+			if p.fnBound {
+				break
+			}
+		}
 	}
 	c.scope.vars[name] = &local{t: t, mut: mut}
 }

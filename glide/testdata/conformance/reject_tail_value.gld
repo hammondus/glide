@@ -1,0 +1,22 @@
+// The tail-value rule, no-arrow half: a function that declares no
+// return value may not end in one. The arrow half — a declared return
+// type the tail does not match — is reject_returns.gld.
+
+fn silent_discard() {
+    let n = 41
+    n + 1                   // error: declares no return value but its body ends with a Int
+}
+
+fn from_a_call() {
+    "text".to_upper()          // error: declares no return value but its body ends with a String
+}
+
+fn from_a_branch(b: Bool) {
+    if b { 1 } else { 2 }   // error: declares no return value but its body ends with a Int
+}
+
+fn main() {
+    silent_discard()
+    from_a_call()
+    from_a_branch(true)
+}

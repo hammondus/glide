@@ -412,29 +412,75 @@ That test has already earned its keep: writing a case for a `yield`
 diagnostic revealed that the parser makes the condition impossible, and
 the dead branch was deleted rather than covered.
 
-#### Where the checker still stops
+#### Where the checker used to stop
 
-Three gaps are worth knowing, because all three are silent.
+Until M4d three rules were still the evaluator's alone, and they fired
+only when the offending line actually ran: the **tail-value rule**, the
+**nested-shadow ban**, and **`let … else` divergence**. All three are
+now checked. `glide check` reports them, and a helper on a path your
+tests never take no longer hides one.
 
-**A bound is not enforced when the type parameter appears only inside a
-constructor.** `fn top<T: Ord>(xs: List<T>)` accepts a
-`List<Blob>` even where `Blob` has no `Ord`; the failure arrives at
-runtime as "Blob has no method cmp". Passing a bare `T` is checked;
-passing a `List<T>` or a `T?` is not.
+Closing them was mostly scope bookkeeping, and it exposed a trap worth
+knowing about, because it is the shape of every future bug in this
+area. The nested-shadow ban depends only on scope structure — so
+enforcing it statically means the checker's idea of a scope has to
+match the evaluator's *exactly*. The evaluator declares a function's
+parameters into an environment and then hands **that same
+environment** to the body, which is what makes
 
-**The tail-value rule is enforced by the evaluator, not the checker.**
-A no-arrow function whose body ends in a value is an error — but the
-error arrives when that function is *called*, so `glide check` does not
-report it.
+```glide-run
+fn process(items: List<Int>) {
+    let items = items.iter().filter(|n| n > 0).collect()
+    println(items)
+}
 
-**The nested-shadow ban is also the evaluator's.** It depends only on
-scope structure, so it *could* be static; today a shadowing `let` on a
-branch that never runs is never reported.
+fn main() {
+    process([1, -2, 3])
+}
+// [1, 3]
+```
 
-All three are `Unknown`-shaped holes: they under-approximate, so
-closing them cannot break a program that works. They are listed here
-rather than hidden because a book that describes a checker's ambitions
-and not its edges teaches you to trust the wrong things.
+a same-scope redeclare rather than a nested shadow. A checker that
+pushed a fresh scope for the body — the obvious way to write it —
+rejects that program. The same sharing applies to a `for` pattern and
+its body, a closure's parameters and its body, an `if let` binding and
+its `then`, and a `scope` handle and its block. Five sites, one rule:
+if a construct binds names *before* entering a block, the names and the
+block live together.
+
+There is one thing the divergence rule genuinely cannot see. It proves
+that an else block leaves, and the ways out are a set the *language*
+fixes rather than your program: `return`, `break`, `continue`,
+`os.exit` (whose type is `!`), a conditionless `for { … }` that nothing
+breaks out of, and any `if` or `match` where every path leaves. What
+makes that set *closed* is not its size — it is that nothing you write
+can join it. There is no way to define a function and have the checker
+learn that it never returns.
+
+So a helper of your own that ends in `os.exit` is still typed `()`:
+
+```glide
+fn die(msg: String) {
+    eprintln(msg)
+    os.exit(1)
+}
+```
+
+`let Some(cfg) = load() else { die("no config") }` is **rejected**,
+even though it would have run correctly. Rust rejects the same program
+for the same reason, and answers it with a `-> !` return type; Swift
+spells it `-> Never` and Kotlin `Nothing`. Glide has no spelling for it
+yet, and `DESIGN.md` carries it as an open question rather than a
+decision. Until then, inline the `os.exit`.
+
+That trade is the deliberate one, and note that it inverts the rule
+this chapter has been repeating. Everywhere else, an analysis that sees
+less says *less* — `Unknown` passes in silence, and the cost of
+ignorance is a missed diagnostic. Here the cost of ignorance is a
+**rejected program**: every case the proof cannot see becomes a false
+positive. That is why divergence is the one place the checker was built
+to be as strong as it could be made rather than as quiet as it could
+get away with.
 
 ---
 
@@ -925,9 +971,11 @@ Get any of the four types wrong and it says so, at the sub-expression.
   is one, and do not cascade.** Every independent error in one pass.
 - **The conformance corpus is the contract** for every future frontend,
   and its coverage is measured from the checker's own source.
-- Three known silences: bounds through a container, the tail-value
-  rule, and the nested-shadow ban. All under-approximate; all are safe
-  to close later.
+- **No rule is left to the evaluator alone.** M4d closed the last
+  three silences — the tail-value rule, the nested-shadow ban, and
+  `let … else` divergence. The one remaining edge is by construction:
+  divergence must be *provable*, and Glide cannot yet declare a
+  function that never returns.
 
 **Exercises**
 

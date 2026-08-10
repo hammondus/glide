@@ -9,9 +9,12 @@ type-checks it first, in both tiers, with no way to opt out (see
 numeric conversion, generic bound checking, trait conformance and the
 `Ord` operator trait, boxed `Option`, match exhaustiveness, generator
 element types, the spawn-captures-mut ban, and undetermined type
-parameters. **M4 is done.** The only checker work left is the
-arithmetic operator traits (`Add`, `Mul`), deferred for want of a
-forcing need.
+parameters. M4d closed the last three rules the evaluator still
+enforced alone — the nested-shadow ban, the tail-value rule and
+`let … else` divergence — so **every rule the language has is now
+checked before a program runs.** **M4 is done.** The only checker work
+left is the arithmetic operator traits (`Add`, `Mul`), deferred for
+want of a forcing need.
 
 One user, no compatibility promise. Breaking changes are free until further
 notice — this is a deliberate design asset, not an apology. Go's v1 guarantee
@@ -2453,16 +2456,74 @@ scripting tail wagging the compiled dog. Decided:
 - **Embedding API shape** — Glide↔Go value-marshaling rules (sum
   types/`Result`/`Option` as Go values), interrupt and resource-limit
   surface. Decide while wrapping the interpreter, not before.
-- **Does the runtime keep the dynamic checks once the checker is
-  static?** `mut`, the nested-shadow ban, let-else divergence, the
-  tail-value rule and arity/field existence are all enforced in the
-  evaluator today, and ~140 Go tests plus `GLIDE-BY-EXAMPLE.md`'s
-  `// error:` contracts assert their exact message text. Belt-and-braces
-  costs a duplicated rule in two places forever; removing them makes the
-  checker load-bearing for memory safety of the evaluator's own
+- **Does the runtime keep the dynamic checks now that the checker is
+  static?** *Sharpened by M4d, not answered.* `mut`, the nested-shadow
+  ban, let-else divergence, the tail-value rule and arity/field
+  existence are now all checked statically **and** still enforced in
+  the evaluator, so belt-and-braces is the shipped state rather than a
+  transitional one. ~140 Go tests plus `GLIDE-BY-EXAMPLE.md`'s
+  `// error:` contracts assert the evaluator's exact message text.
+  Duplication costs a rule maintained in two places forever; removing
+  it makes the checker load-bearing for the evaluator's own
   assumptions. Lean: keep them, as assertions rather than diagnostics —
   a checker bug should surface as a loud interpreter panic, not as
-  undefined behaviour.
+  undefined behaviour. What M4d adds to the question: the two copies
+  must agree on *scope structure*, not just on the rule, and nothing
+  enforces that agreement mechanically (see
+  `glide/DESIGN-DECISIONS.md`).
+- **Should divergence be spellable in a signature (`-> !`)?** Raised by
+  M4d. The `let … else` rule requires the else block to provably
+  diverge, and the ways out are a set the *language* fixes rather than
+  the program: `return`, `break`, `continue`, `os.exit` (typed Never),
+  a conditionless `for` nothing breaks out of, and branches/matches
+  where every path leaves. Nothing a user writes can join that set. A
+  helper that ends in `os.exit` is still typed `()`, so
+  `else { die("no config") }` is rejected even though it would run
+  correctly. Rust rejects the same program for the same reason and
+  answers it with `-> !`; Swift spells it `-> Never`, Kotlin
+  `Nothing` — three languages, one conclusion, which is the usual
+  signal. Not adopted yet because nothing in the corpus, the examples
+  or the book wanted it, and the workaround is to inline the
+  `os.exit`. Revisit when a real program wants a `die` helper; the
+  change is a return type resolving to the existing `types.Never`, not
+  new machinery.
+- **Unreachable code as a diagnostic.** A goal, not a question — the
+  analysis it needs now exists. `internal/check/flow.go` answers "does
+  control leave here" for the `let … else` rule, and a statement
+  following a provably-divergent one is unreachable by the same
+  predicate. Two things to settle when it is built: whether it is an
+  error or a dev-tier warning (the hygiene tiering says warning in dev,
+  error in `glide test` and release — same treatment as unused
+  variables), and that the rule must stay *under*-approximating in this
+  direction, unlike the `let … else` rule, since calling live code dead
+  is the expensive mistake. Note the two share a predicate but not a
+  failure direction, so the predicate cannot simply be reused
+  unexamined.
+- **Editor support: what to build, and in what order.** Today `.gld`
+  is mapped to Rust's grammar (`.vscode/settings.json`), which covers
+  every Glide keyword except `import`, `defer`, `errdefer`, `scope`
+  and `select`. Good enough to defer the real thing. When it is time,
+  the ordering is not the obvious one. The lexer already emits every
+  token with a `source.Span`, so every target *except* TextMate can
+  consume `lexer.Lex` instead of re-describing the language: LSP
+  semantic tokens, the book's 749 ` ```glide ` fences (a `glide
+  highlight --html` subcommand beats porting a grammar to
+  highlight.js), and the wasm playground's editor. TextMate is the
+  only one that structurally cannot, because it must be regexes
+  running inside the editor — so keep that grammar minimal
+  (keywords/comments/strings/numbers, a first-paint fallback that
+  semantic tokens overwrite) rather than lavishing effort on a
+  context-free approximation of a context-sensitive language.
+  Corollary on timing: a hand-written grammar rots on every keyword
+  change and so should wait for stability, but the LSP is *derived*
+  from the lexer and cannot go stale — it need not wait, and per
+  "Tooling & ecosystem philosophy" it ships as `glide lsp` in the one
+  binary. **The real prerequisite is parser error recovery**: the
+  parser returns on the first syntax error, and an LSP re-checking on
+  every keystroke looks at a half-typed file nearly all the time, so
+  today it would show one squiggle and blank semantic tokens
+  mid-edit. Recovery is the larger job — the checker already collects
+  multiple diagnostics, so it is the parser alone that blocks this.
 - **A REPL.** A scripting tier eventually wants one, and static checking
   plus an interactive prompt is solved but not free (GHCi, F#
   Interactive) — it needs incremental checking and a story for

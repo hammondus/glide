@@ -1026,7 +1026,7 @@ func (c *checker) closure(x *ast.Closure, want types.Type) types.Type {
 	case x.BodyExpr != nil:
 		ret = c.typeOf(x.BodyExpr, retWant)
 	default:
-		ret = c.block(x.BodyBlock, retWant)
+		ret = c.blockIn(x.BodyBlock, retWant)
 	}
 	// The closure's own diagnostic, rather than the generic
 	// "expected X, found Y": a mismatch here is about what the
@@ -1088,7 +1088,7 @@ func (c *checker) ifLet(x *ast.IfLet, want types.Type) types.Type {
 		subject = inner
 	}
 	c.bind(x.Pat, subject)
-	then := c.block(x.Then, want)
+	then := c.blockIn(x.Then, want)
 	c.pop()
 	switch {
 	case x.ElseIf != nil:
@@ -1183,7 +1183,7 @@ func (c *checker) scopeExpr(x *ast.ScopeExpr, want types.Type) types.Type {
 			bodyWant = nil
 		}
 	}
-	body := c.block(x.Body, bodyWant)
+	body := c.blockIn(x.Body, bodyWant)
 	c.pop()
 	if timed {
 		return types.Apply(types.Result, body, c.named["Timeout"])

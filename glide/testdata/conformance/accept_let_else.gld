@@ -1,0 +1,110 @@
+// Every way an else block may leave. Divergence is proved, not
+// assumed, so this file is what stops the proof from being too strict
+// and rejecting working code.
+import os
+
+fn by_return(v: Int?) -> Int {
+    let Some(n) = v else { return 0 }
+    n
+}
+
+fn by_break(vs: List<Int?>) -> Int {
+    let mut total = 0
+    for v in vs {
+        let Some(n) = v else { break }
+        total = total + n
+    }
+    total
+}
+
+fn by_continue(vs: List<Int?>) -> Int {
+    let mut total = 0
+    for v in vs {
+        let Some(n) = v else { continue }
+        total = total + n
+    }
+    total
+}
+
+fn by_exit(v: Int?) -> Int {
+    // os.exit is typed Never, which is the only non-keyword way out.
+    let Some(n) = v else { os.exit(1) }
+    n
+}
+
+fn by_both_branches(v: Int?, b: Bool) -> Int {
+    let Some(n) = v else {
+        if b { return 1 } else { return 2 }
+    }
+    n
+}
+
+fn by_every_arm(v: Int?, k: Int) -> Int {
+    let Some(n) = v else {
+        match k {
+            0 => { return 10 }
+            _ => { return 20 }
+        }
+    }
+    n
+}
+
+fn by_looping_forever(v: Int?) -> Int {
+    // A conditionless `for` with nothing breaking out of it never
+    // reaches the end of the block. Go and Rust draw the line here
+    // too: no condition, not `for true`.
+    let Some(n) = v else {
+        for {
+            println("waiting")
+        }
+    }
+    n
+}
+
+fn by_looping_past_an_inner_break(v: Int?) -> Int {
+    // The `break` belongs to the inner loop, so the outer one still
+    // runs forever.
+    let Some(n) = v else {
+        for {
+            for k in [1, 2] {
+                break
+            }
+        }
+    }
+    n
+}
+
+fn by_breaking_outward(vs: List<Int?>) -> Int {
+    // A labelled break aimed at an enclosing loop leaves the else
+    // block rather than resuming after the inner loop.
+    outer: for v in vs {
+        let Some(n) = v else {
+            for {
+                break outer
+            }
+        }
+        return n
+    }
+    0
+}
+
+fn by_a_later_statement(v: Int?) -> Int {
+    let Some(n) = v else {
+        println("absent")
+        return 0
+    }
+    n
+}
+
+fn main() {
+    println(by_return(1))
+    println(by_break([1, 2]))
+    println(by_continue([1, 2]))
+    println(by_exit(1))
+    println(by_both_branches(1, true))
+    println(by_every_arm(1, 0))
+    println(by_looping_forever(1))
+    println(by_looping_past_an_inner_break(1))
+    println(by_breaking_outward([1]))
+    println(by_a_later_statement(1))
+}

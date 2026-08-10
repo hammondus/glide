@@ -812,7 +812,8 @@ collections, not from pretending `mut` is Rust.
 **Glide takes** both halves of the evidence: sequential redeclare is
 idiomatic (exactly one binding alive at a time), nested shadowing of
 a live name is a compile error (the Go bug shape needs *two* live
-bindings — made unwritable), and the root cause is gone anyway
+bindings — made unwritable; static as of M4d, where Java and C# have
+always had it), and the root cause is gone anyway
 (`let` always declares, `=` always assigns). Free builtins (the
 prints, `expect`) are reserved names outright — a tiny fixed set
 nobody wants as locals. Imports stay shadowable — `sql` is a prime
@@ -920,12 +921,23 @@ not a wrap. Adopted the day rune range patterns landed — the
   destructuring to the mainstream the same year.
 - **2022** — Rust, seven years after 1.0, adds `let…else` — evidence
   the construct is load-bearing, not sugar: flat early-exit chains
-  are how real programs read.
+  are how real programs read. It requires the else block to have type
+  `!`: divergence is *proved by the type system*, never inferred from
+  what a function happens to do. A helper that always panics still
+  needs `-> !` written on it to count, and Rust stabilised that return
+  type (1.26, 2018) largely because this class of rule needs it.
+- **2015 onward** — Swift's `guard` needs the same proof and spells it
+  `-> Never`; Kotlin spells it `Nothing`. Three languages, three
+  names, one conclusion: a rule that demands divergence has to let you
+  *declare* divergence.
 
 **Glide takes** the ML principle whole: destructuring `let`
 everywhere (irrefutable), real tuples (with the doctrine: tuples are
 for transport; >2 elements or >1 API boundary means a named struct),
-`let…else` (Swift's guard, body must diverge — enforced), nested
+`let…else` (Swift's guard, body must diverge — statically enforced as
+of M4d, with divergence *proved* as in all three ancestors: `return`,
+`break`, `continue`, `os.exit`, or a branch/match where every path
+leaves), nested
 patterns with exhaustiveness following the nesting, struct patterns
 requiring `..` for partial (Rust's rule — new fields must break match
 sites that ignore them), and spread as patterns-run-forward

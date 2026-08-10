@@ -208,9 +208,13 @@ path). Discard is explicit: `_ = expr` ✓.
 - Destructuring `let`: `let (a, b) = pair`, `let [x] = xs`,
   `let [first, ..rest] = xs` (patterns below). ✓
 - `let PATTERN = expr else { … }` — else body must diverge
-  (return/exit); enforced. ✓
+  (`return`/`break`/`continue`/`os.exit`); **statically enforced as of
+  M4d**, and the divergence must be provable — see the quick-list. ✓
 - Sequential redeclare in the same scope: idiomatic ✓. Nested shadow
-  of a live outer name: error ✓. Locals shadowing this file's
+  of a live outer name: error ✓ (static as of M4d; the binding and the
+  block that follows it share a scope, so a parameter and a body-level
+  `let`, or a `for` pattern and its body, are a redeclare and legal).
+  Locals shadowing this file's
   imports: legal until used through the shadow (checker-era error) ○.
 - `fn name(param: Type, …) -> Ret { … }` — signatures written in
   full; no arrow = returns nothing; tail expression is the value ✓.
@@ -398,13 +402,24 @@ patterns in function signatures, ref/binding modes.
   against a sized type; generic bounds; trait conformance; match
   exhaustiveness and unreachable arms; generator element types against
   the declared `Iterator<T>`; the spawn-captures-`mut` ban; undetermined
-  type parameters; and every name being defined.
-- **Three rules are still enforced by the evaluator rather than the
-  checker**, so `glide check` does not report them and they fire only on
-  an executed path: the **tail-value rule**, the **nested-shadow ban**,
-  and a **bound whose type parameter appears only inside a container**
-  (`fn f<T: Ord>(xs: List<T>)` accepts a `List<Blob>`). All three
-  under-approximate — closing them cannot reject a program that works.
+  type parameters; the **tail-value rule** in both directions; the
+  **nested-shadow ban**; **`let … else` divergence**; and every name
+  being defined. ✓
+- **Nothing is left to the evaluator alone.** As of M4d every rule the
+  language has is reported by `glide check` before a line runs. The
+  evaluator keeps its own copies of `mut`, the nested-shadow ban,
+  let-else divergence, the tail-value rule and arity/field existence as
+  belt-and-braces assertions; a program that reaches one of them has
+  found a checker bug.
+- **`let … else` divergence is proved, not assumed** ✓. The else block
+  must provably leave, and the ways to do that are fixed by the
+  language: `return`, `break`, `continue`, a Never-typed call
+  (`os.exit`), a conditionless `for { … }` that nothing breaks out of
+  (`for cond` does not count, even `for true` — Go's and Rust's line),
+  an `if` whose every branch leaves, or a `match` whose every arm does.
+  A helper function that ends in `os.exit` is typed `()`, not Never, so
+  calling it does **not** count; there is no `-> !` to declare one with
+  (recorded as an open question in `DESIGN.md`).
 - No null; no zero values; mandatory initialisation. ✓
 - Errors are values; `?` propagates; panics are for bugs, kill the
   task (M2: the program), and cannot be caught — no `recover`,

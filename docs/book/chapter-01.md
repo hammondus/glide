@@ -80,7 +80,7 @@ and deliberately not into syntax.
 
 ### The Freedom That Makes This Possible
 
-Glide has one user and no compatibility promise. Breaking changes are
+Glide is new and has no compatibility promise. Breaking changes are
 free until further notice.
 
 This sounds like an apology. It is a design asset, and it is worth
